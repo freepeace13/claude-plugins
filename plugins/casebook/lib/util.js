@@ -283,6 +283,16 @@ function newId(exists) {
 
 const ID_RE = /^cb-[a-z0-9]{6}$/;
 
+/**
+ * A filesystem-safe key for a session id, shared by its ledger, pending marks and lock. Ids made only of
+ * safe characters are used as they are; if sanitising changed one, a hash of the raw id keeps distinct ids apart.
+ */
+function sessionKey(sessionId) {
+  const id = String(sessionId);
+  const safe = id.replace(/[^\w-]/g, '');
+  return safe === id && safe ? safe : `${safe}-${crypto.createHash('sha1').update(id).digest('hex').slice(0, 8)}`;
+}
+
 function slugify(s, max = 60) {
   return String(s || 'untitled')
     .toLowerCase()
@@ -320,5 +330,5 @@ function globMatch(pattern, value) {
 
 module.exports = {
   PLUGIN_ROOT, paths, DEFAULT_CONFIG, loadConfig, mkdirp, readJson, writeJsonAtomic, writeFileAtomic,
-  logError, profile, useProfile, listProfiles, normalizeDir, profileNameFor, parseDoc, renderDoc, newId, ID_RE, slugify, parseAge, daysSince, globMatch, expandHome,
+  logError, profile, useProfile, listProfiles, normalizeDir, profileNameFor, parseDoc, renderDoc, newId, ID_RE, sessionKey, slugify, parseAge, daysSince, globMatch, expandHome,
 };

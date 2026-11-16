@@ -787,6 +787,18 @@ test('a recently active session is not finished early by a catch-up pass', () =>
   assert.match(s.run(['show', r.logId]).out, /partial: true/);
 });
 
+test('session ids that sanitise alike get separate ledgers as well as separate locks', () => {
+  const s = sandbox();
+  const a = JSON.parse(s.run(['scout', '--session', 'x', '--transcript', s.transcript('x', 3), '--json']).out);
+  const b = JSON.parse(s.run(['scout', '--session', '../x', '--transcript', s.transcript('../x', 3), '--json']).out);
+  assert.strictEqual(a.status, 'created');
+  assert.strictEqual(b.status, 'created', 'the second id is not mistaken for the first one');
+  assert.notStrictEqual(a.logId, b.logId);
+  const files = fs.readdirSync(path.join(s.env.CASEBOOK_HOME, 'state', 'sessions')).sort();
+  assert.strictEqual(files.length, 2);
+  assert.ok(files.includes('x.json'), 'ordinary ids keep their plain file name');
+});
+
 test('a relative CASEBOOK_HOME resolves to one absolute store', () => {
   const s = sandbox();
   const r = s.run(['config'], { env: { CASEBOOK_HOME: 'rel-store' }, cwd: s.root });

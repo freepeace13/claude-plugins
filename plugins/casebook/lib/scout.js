@@ -2,11 +2,10 @@
 // Scout: condense a session, ask a cheap headless Claude for case-study notes, write/update the log.
 
 const fs = require('fs');
-const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { PLUGIN_ROOT, paths, readJson, writeJsonAtomic, logError } = require('./util');
+const { PLUGIN_ROOT, paths, sessionKey, readJson, writeJsonAtomic, logError } = require('./util');
 const store = require('./store');
 const { condense, findTranscript } = require('./transcript');
 const { resolveProject, commitsBetween } = require('./project');
@@ -144,13 +143,6 @@ function lockIsStale(file, staleMs) {
   return holder ? !pidAlive(holder.pid) || Date.now() - holder.startedAt > staleMs : ageMs > 10000;
 }
 
-/** One lock per session id. If sanitising changed the id, add a hash so distinct ids never share a lock. */
-function lockName(sessionId) {
-  const id = String(sessionId);
-  const safe = id.replace(/[^\w-]/g, '');
-  return safe === id && safe ? safe : `${safe}-${crypto.createHash('sha1').update(id).digest('hex').slice(0, 8)}`;
-}
-
 /**
  * Serialize scouts of the same session (state/locks/<id>.lock = {pid, startedAt}). A resumed session
  * can end while an earlier scout is still running; without this both would see no log yet and each
@@ -159,7 +151,7 @@ function lockName(sessionId) {
  * (or the wait ran out).
  */
 function acquireSessionLock(sessionId, { wait, timeoutMs }) {
-  const file = path.join(paths.locks(), `${lockName(sessionId)}.lock`);
+  const file = path.join(paths.locks(), `${sessionKey(sessionId)}.lock`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // A scout can take up to two model runs (the flag-fallback retry), so a live holder is not stale before that.
   const staleMs = 2 * timeoutMs + 60000;
