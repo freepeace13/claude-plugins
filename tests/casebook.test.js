@@ -545,8 +545,9 @@ test('--profile rejects path-like names and cannot be combined with CASEBOOK_HOM
   fs.writeFileSync(path.join(p.cb, 'broken', 'profile.json'), '{}');
   assert.match(p.run(['--profile', 'broken', 'list']).stderr, /no claudeConfigDir/);
   const home = p.run(['--profile', 'default', 'list'], { env: { CASEBOOK_HOME: path.join(p.root, 'h') } });
-  assert.strictEqual(home.status, 0, 'warns instead of failing');
-  assert.match(home.stderr, /ignoring --profile because CASEBOOK_HOME/);
+  assert.strictEqual(home.status, 1, 'never silently acts on the wrong store');
+  assert.match(home.stderr, /cannot be used while CASEBOOK_HOME is set/);
+  assert.match(p.run(['list', '--profile']).stderr, /--profile needs a profile name/);
   assert.strictEqual(p.run(['help', '--profile', 'nope']).status, 0, 'help never needs a profile');
 });
 
@@ -595,4 +596,29 @@ test('a fresh empty lock is respected; a stale one is reclaimed exactly once und
   assert.strictEqual(results.filter((r) => r.status === 'created').length, 1);
   assert.strictEqual(s.calls().length, 1);
   assert.deepStrictEqual(fs.readdirSync(locks), [], 'no leftover lock or aside files');
+});
+
+test('--limit must be a positive whole number', () => {
+  const s = sandbox();
+  for (const bad of ['abc', '0', '-2', '1.5']) {
+    const r = s.run(['scout', '--pending', '--dry-run', '--limit', bad]);
+    assert.strictEqual(r.status, 1, bad);
+    assert.match(r.stderr, /--limit must be a positive whole number/);
+  }
+  assert.match(s.run(['backfill', '--limit', 'x', '--yes']).stderr, /--limit must be/);
+});
+
+test('--pending marks a recently active session partial, so SessionEnd can finish it', () => {
+  const s = sandbox();
+  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
+  fs.mkdirSync(path.dirname(meta), { recursive: true });
+  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
+  s.transcript('live-elsewhere', 3);
+  const r = JSON.parse(s.run(['scout', '--pending', '--json']).out);
+  assert.strictEqual(r[0].partial, true);
+  assert.match(s.run(['show', r[0].logId]).out, /partial: true/);
+  // The session carries on by one turn and ends: the auto scout finishes the same log despite regrowTurns.
+  const fin = JSON.parse(s.run(['scout', '--session', 'live-elsewhere', '--transcript', s.transcript('live-elsewhere', 4), '--auto', '--json']).out);
+  assert.strictEqual(fin.status, 'updated');
+  assert.match(s.run(['show', r[0].logId]).out, /partial: false/);
 });

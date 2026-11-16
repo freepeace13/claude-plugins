@@ -156,12 +156,18 @@ function acquireSessionLock(sessionId, { wait, timeoutMs }) {
       if (err.code !== 'EEXIST') throw err;
     }
     if (lockIsStale(file, staleMs)) {
-      // Move it aside atomically so only one waiter reclaims it, then re-check what we actually moved:
-      // it may have been replaced by a fresh lock between our read and the rename.
-      const aside = `${file}.stale-${process.pid}-${Date.now()}`;
-      try { fs.renameSync(file, aside); } catch { continue; }
-      if (!lockIsStale(aside, staleMs)) { try { fs.linkSync(aside, file); } catch { /* someone else holds it now */ } }
-      fs.rmSync(aside, { force: true });
+      // Reclaim under a gate so the check and the removal can't interleave with another waiter's:
+      // only the gate holder ever removes an existing lock, and it re-checks first.
+      const gate = `${file}.reclaim`;
+      try {
+        fs.writeFileSync(gate, String(process.pid), { flag: 'wx' });
+        try { if (lockIsStale(file, staleMs)) fs.rmSync(file, { force: true }); } finally { fs.rmSync(gate, { force: true }); }
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err;
+        // Someone else is reclaiming; a gate left by a crashed process expires.
+        try { if (Date.now() - fs.statSync(gate).mtimeMs > 10000) fs.rmSync(gate, { force: true }); } catch { /* gone */ }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
       continue;
     }
     if (!wait || Date.now() > deadline) return null;
@@ -169,7 +175,7 @@ function acquireSessionLock(sessionId, { wait, timeoutMs }) {
   }
 }
 
-function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false, force = false }, config) {
+function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false, force = false, partialIfRecent = false }, config) {
   const manual = mode === 'manual';
   const tp = transcriptPath && fs.existsSync(transcriptPath) ? transcriptPath : findTranscript(sessionId);
   if (!tp) return { status: 'skipped', reason: 'transcript not found' };
@@ -189,7 +195,8 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
 
   // A log is partial when scouted while its session may still be running.
   const settleMs = (config.sweep.settleMinutes || 0) * 60000;
-  const partial = live || (manual && Date.now() - st.mtimeMs < settleMs);
+  // Manual scouts, and catch-up passes that skip the settle delay, may be looking at a session that is still running.
+  const partial = live || ((manual || partialIfRecent) && Date.now() - st.mtimeMs < settleMs);
 
   const existing = !ledger.deleted && ledger.logId ? store.findLog(ledger.logId) : null;
   if (!manual && existing) {
@@ -311,7 +318,7 @@ function candidateTranscripts({ since, exclude, settleMinutes = 0 }) {
  * With dryRun, nothing is scouted: returns the candidates with their project and user turns.
  * Returns { results, locked }; locked means another catch-up is already running.
  */
-function sweep(config, { since, exclude, limit, settleMinutes, dryRun, onResult } = {}) {
+function sweep(config, { since, exclude, limit, settleMinutes, dryRun, partialIfRecent, onResult } = {}) {
   if (dryRun) {
     const list = candidateTranscripts({ since, exclude, settleMinutes }).slice(0, limit || undefined);
     const results = list.map((c) => {
@@ -332,7 +339,7 @@ function sweep(config, { since, exclude, limit, settleMinutes, dryRun, onResult 
     const list = candidateTranscripts({ since, exclude, settleMinutes });
     for (const c of list.slice(0, limit || list.length)) {
       try {
-        const r = scoutSession({ ...c, mode: 'auto' }, config);
+        const r = scoutSession({ ...c, mode: 'auto', partialIfRecent }, config);
         results.push({ ...c, ...r });
         if (onResult) onResult(c, r);
       } catch (err) {

@@ -72,6 +72,13 @@ function row(log) {
 
 const HEADER = `${pad('ID', 10)} ${pad('DATE', 11)} ${pad('SCORE', 5)} ${pad('MRK', 3)} ${pad('WRT', 3)} TITLE`;
 
+function parseLimit(v, fallback) {
+  if (v === undefined) return fallback;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) fail(`--limit must be a positive whole number, got "${v}"`);
+  return n;
+}
+
 function describe(r) {
   const c = r.status === 'created' ? 'Created' : 'Updated';
   if (r.status === 'created' || r.status === 'updated') return `${c} ${r.logId} (score ${r.score}${r.partial ? ', partial' : ''}): ${r.title}`;
@@ -86,8 +93,9 @@ function scoutPending(config, opt) {
   const o = {
     since: meta.installedAt ? new Date(meta.installedAt) : null,
     exclude: opt.exclude,
-    limit: opt.limit ? Number(opt.limit) : config.sweep.maxPerRun,
+    limit: parseLimit(opt.limit, config.sweep.maxPerRun),
     settleMinutes: 0,
+    partialIfRecent: true,
   };
   const id8 = (r) => r.sessionId.slice(0, 8);
   if (opt.dryRun) {
@@ -291,14 +299,14 @@ const commands = {
   backfill({ opt }) {
     const config = U.loadConfig();
     const since = U.parseAge(opt.since || '30d');
-    const limit = opt.limit ? Number(opt.limit) : 20;
+    const limit = parseLimit(opt.limit, 20);
     if (!opt.yes) {
       out(`Backfill would scout up to ${limit} past session(s) since ${since.toISOString().slice(0, 10)}, one headless ${config.scout.model} call each.`);
       out('Re-run with --yes to start.');
       return;
     }
     const { locked } = sweep(config, {
-      since, limit, settleMinutes: 0,
+      since, limit, settleMinutes: 0, partialIfRecent: true,
       onResult: (c, r) => out(`${c.sessionId.slice(0, 8)}  ${r.status}${r.logId ? ' ' + r.logId : ''}${r.reason ? ' (' + r.reason + ')' : ''}${r.title ? ' — ' + r.title : ''}`),
     });
     if (locked) out('A catch-up is already running. Check /casebook:list in a minute.');
@@ -352,7 +360,7 @@ const commands = {
 const { pos, opt } = parseArgs(process.argv.slice(2));
 const name = pos.shift() || 'help';
 const fn = commands[name];
-if (opt.profile && fn && !opt.help && name !== 'help') {
+if ('profile' in opt && fn && !opt.help && name !== 'help') {
   try { U.useProfile(opt.profile); } catch (err) { fail(err.message); }
 }
 if (!fn || opt.help) commands.help();
