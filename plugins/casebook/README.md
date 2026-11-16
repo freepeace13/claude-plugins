@@ -31,12 +31,13 @@ casebook config      # prints the path, ~/.casebook/config.json
 | `/casebook:mark [note]` | Mark the current session. With no note, Claude writes a one-line note itself. |
 | `/casebook:mark <id> [note]` | Mark an existing log. |
 | `/casebook:list [--marked] [--all \| --project P] [--min-score N] [--unwritten] [--since 30d]` | List logs. Defaults to the current repository's project. |
+| `/casebook:scout [<session-id> \| --pending] [--background] [--force]` | Scout the current session now (or another one, or all missed sessions). See Manual scouting. |
 | `/casebook:show <id>` | Read one log. |
 | `/casebook:write <id…> [--out dir] [instructions]` | Write a case study `.md` with the `case-study-writer` agent. |
 | `/casebook:delete <id…>` | Delete specific logs. |
 | `/casebook:delete --below-score 3 --older-than 30d --unmarked` | Delete a batch. It runs as a dry run first and asks before deleting. |
 
-The same commands work from any shell through the `casebook` CLI. Inside Claude Code the plugin's `bin/` is on PATH. Elsewhere, run `node ~/.claude/plugins/…/casebook/bin/casebook`, or add an alias. Run `casebook help` for the full list, including `backfill` and `doctor`.
+The same commands work from any shell through the `casebook` CLI. Inside Claude Code the plugin's `bin/` is on PATH. Elsewhere, run `node ~/.claude/plugins/…/casebook/bin/casebook`, or add an alias. Run `casebook help` for the full list, including `profiles`, `backfill` and `doctor`.
 
 ```text
 $ casebook list --marked
@@ -67,14 +68,20 @@ next session starts ─► SessionStart hook ─► (detached) sweep missed sess
 ## Storage
 
 ```text
-~/.casebook/                    (override with CASEBOOK_HOME)
-  config.json
-  logs/<project>/cb-xxxxxx.md   one log per session (frontmatter + notes)
-  case-studies/<project>/YYYY-MM-DD-<slug>.md   writer output (or output.dir)
-  marks/                        pending marks for sessions still running
-  state/                        per-session ledger, install timestamp
-  casebook.log                  errors from background runs (see `casebook doctor`)
+~/.casebook/                    (override the root with CASEBOOK_ROOT)
+  default/                      one store per Claude config dir, see Profiles
+    profile.json                { name, claudeConfigDir, createdAt }
+    config.json
+    logs/<project>/cb-xxxxxx.md   one log per session (frontmatter + notes)
+    case-studies/<project>/YYYY-MM-DD-<slug>.md   writer output (or output.dir)
+    marks/                      pending marks for sessions still running
+    state/                      per-session ledger and locks, install timestamp
+    casebook.log                errors from background runs (see `casebook doctor`)
+  personal/
+    …
 ```
+
+`CASEBOOK_HOME` points straight at one store directory and bypasses profiles. The tests use it.
 
 Projects are named after the git remote's repository name. Without a remote, the folder name is used. A repository can override the name and policy with a committed or ignored `.casebook.json`:
 
@@ -82,9 +89,42 @@ Projects are named after the git remote's repository name. Without a remote, the
 { "project": "client-portal", "policy": "anonymize" }
 ```
 
+## Profiles
+
+If you run Claude Code under more than one config directory (for example `CLAUDE_CONFIG_DIR=~/.claude_personal` next to the default `~/.claude`), each one gets its own fully separate store. Nothing is shared: not logs, not config, not the install date. A work profile can stay `anonymize` while a personal one is `public`.
+
+| Config dir | Profile |
+|---|---|
+| `~/.claude` (or `CLAUDE_CONFIG_DIR` unset) | `default` |
+| `~/.claude_<x>` or `~/.claude-<x>` | `<x>` |
+| anything else | its folder name without leading dots |
+
+`CASEBOOK_PROFILE=<name>` overrides the name. If two different config dirs would get the same name, the second store gets a short hash suffix (`work-cfg-3fa9`) and a warning is written to its `casebook.log`.
+
+- **Hooks and skills** use the `CLAUDE_CONFIG_DIR` that Claude Code passes them.
+- **The terminal** uses `--profile <name>`, else `CASEBOOK_PROFILE`, else `CLAUDE_CONFIG_DIR`, else `default`. `casebook profiles` lists every store, with `*` on the current one. `casebook list` prints `[profile: <name>]` on its first line and never shows other profiles' logs.
+- **The scout runs as the session's profile**, so it is billed to that account. There is no setting to change this.
+- Transcripts, the catch-up pass and `backfill` only read the current profile's `projects/` folder. A profile installed later does not backfill its history.
+
+## Manual scouting
+
+Don't want to wait for the session to end? `/casebook:scout` scouts the current session now, in the foreground (20 to 90 seconds).
+
+| Invocation | Effect |
+|---|---|
+| `/casebook:scout` | Scout the current session. |
+| `/casebook:scout <session-id>` | Scout another session in this profile. |
+| `/casebook:scout --pending` | Catch up on missed sessions. It lists them first and asks before spending model calls. |
+| `… --background` | Return immediately; the log appears in a minute. |
+| `… --force` | Also re-scout a session whose log you deleted. Never overrides a `skip` policy. |
+
+A manual scout skips the `minTurns`, `keepMinScore` and `regrowTurns` gates: you asked, so you get a log. A log written while its session may still be running is **partial** (`partial: true`, shown as `4…` in `casebook list`). When the session ends, the normal scout finishes the same log and sets `partial: false`. The case study writer lists partial logs as things to verify.
+
+Scouts of one session never overlap. If one is already running, a manual scout says so and exits, and a hook scout waits for it and then skips if nothing changed.
+
 ## Configuration
 
-`~/.casebook/config.json`. Any key you leave out keeps its default:
+`~/.casebook/<profile>/config.json`. Any key you leave out keeps its default:
 
 ```json
 {
