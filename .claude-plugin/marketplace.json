@@ -1,0 +1,14 @@
+{
+  "name": "freepeace13",
+  "description": "Claude Code plugins by Kin Basco.",
+  "owner": {
+    "name": "Kin Basco"
+  },
+  "plugins": [
+    {
+      "name": "casebook",
+      "source": "./plugins/casebook",
+      "description": "Auto-log potential case studies from every session; mark, list, and write them up as Markdown."
+    }
+  ]
+}
