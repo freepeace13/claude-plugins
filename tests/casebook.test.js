@@ -447,7 +447,7 @@ test('stores are isolated, and the scout runs as the session\'s own profile', as
   assert.strictEqual(JSON.parse(p.run(['scout', '--session', 'sd', '--transcript', dtp, '--json']).out).status, 'created');
   assert.strictEqual(JSON.parse(p.run(['list', '--json'], { configDir: p.dirs.personal }).out).length, 2);
   assert.strictEqual(JSON.parse(p.run(['list', '--json']).out).length, 1);
-  assert.strictEqual(p.seen()[2], p.dirs.default);
+  assert.strictEqual(p.seen()[2], '(unset)', 'default profile with no CLAUDE_CONFIG_DIR keeps it unset for the child');
 });
 
 test('transcript discovery and catch-up stay inside the profile; installedAt is per store', () => {
@@ -647,6 +647,74 @@ test('session ids that sanitise to the same name get separate locks', () => {
   const tp = s.transcript('../x', 3);
   const r = JSON.parse(s.run(['scout', '--session', '../x', '--transcript', tp, '--json']).out);
   assert.strictEqual(r.status, 'created');
+});
+
+test('CASEBOOK_PROFILE is validated like --profile', () => {
+  const p = profileSandbox();
+  const r = p.run(['list'], { env: { CASEBOOK_PROFILE: '../../escape' } });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /invalid profile name/);
+  assert.ok(!fs.existsSync(path.join(p.root, 'escape')));
+});
+
+test('a hash-suffixed store stays stable when the store that claimed the plain name is gone', () => {
+  const p = profileSandbox();
+  const storeOf = (dir) => path.basename(path.dirname(p.run(['config'], { configDir: dir }).out.split('\n')[0]));
+  assert.strictEqual(storeOf('/srv/a/work-cfg'), 'work-cfg');
+  const second = storeOf('/srv/b/work-cfg');
+  assert.match(second, /^work-cfg-[0-9a-f]{4}$/);
+  fs.rmSync(path.join(p.cb, 'work-cfg'), { recursive: true });
+  assert.strictEqual(storeOf('/srv/b/work-cfg'), second);
+});
+
+test('profiles lists the current store even before it has been used', () => {
+  const p = profileSandbox();
+  const list = JSON.parse(p.run(['profiles', '--json'], { configDir: p.dirs.personal }).out);
+  assert.deepStrictEqual(list.map((x) => [x.name, x.current]), [['personal', true]]);
+});
+
+test('the default profile leaves CLAUDE_CONFIG_DIR unset for the scout; other profiles set it', () => {
+  const p = profileSandbox();
+  p.seedStore('default'); p.seedStore('personal');
+  p.run(['list']);
+  p.run(['list'], { configDir: p.dirs.personal });
+  p.transcript(p.dirs.default, 'dd', 3);
+  p.transcript(p.dirs.personal, 'pp', 3);
+  p.run(['scout', '--session', 'dd']);
+  p.run(['scout', '--session', 'pp', '--profile', 'personal']);
+  assert.deepStrictEqual(p.seen(), ['(unset)', p.dirs.personal]);
+});
+
+test('a live scout does not finish a partial log; a mark added meanwhile is kept when it is finished', () => {
+  const s = sandbox();
+  const tp = s.transcript('lv', 3);
+  const r = JSON.parse(s.run(['scout', '--session', 'lv', '--transcript', tp, '--live', '--json']).out);
+  const again = JSON.parse(s.run(['scout', '--session', 'lv', '--transcript', tp, '--auto', '--live', '--json']).out);
+  assert.strictEqual(again.status, 'skipped', 'still running: leave it partial');
+  assert.match(s.run(['show', r.logId]).out, /partial: true/);
+  s.run(['mark', '--session', 'lv', 'late', 'note']);
+  const fin = JSON.parse(s.run(['scout', '--session', 'lv', '--transcript', tp, '--auto', '--json']).out);
+  assert.strictEqual(fin.status, 'updated');
+  const doc = s.run(['show', r.logId]).out;
+  assert.match(doc, /"note":"late note"/, 'marks on an existing log are applied directly and survive');
+  assert.match(doc, /partial: false/);
+  assert.strictEqual(s.calls().length, 1, 'nothing new in the transcript, so no second model call');
+});
+
+test('a catch-up pass skips a session another scout holds instead of waiting', async () => {
+  const s = sandbox();
+  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
+  fs.mkdirSync(path.dirname(meta), { recursive: true });
+  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
+  const tp = s.transcript('busy', 3);
+  const first = spawn(process.execPath, [BIN, 'scout', '--session', 'busy', '--transcript', tp], { cwd: s.repo, env: { ...s.env, STUB_DELAY: '2000' }, stdio: 'ignore' });
+  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'locks', 'busy.lock');
+  for (let i = 0; i < 50 && !fs.existsSync(lock); i++) await new Promise((r) => setTimeout(r, 50));
+  const t0 = Date.now();
+  const r = JSON.parse(s.run(['scout', '--pending', '--json']).out);
+  assert.ok(Date.now() - t0 < 1500, 'did not wait for the busy session');
+  assert.strictEqual(r[0].status, 'running');
+  await new Promise((res) => first.on('close', res));
 });
 
 test('a relative CASEBOOK_HOME resolves to one absolute store', () => {

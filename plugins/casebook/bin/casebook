@@ -44,12 +44,10 @@ function readStdinJson() {
 }
 
 function detach(args) {
-  const child = spawn(process.execPath, [__filename, ...args], {
-    detached: true,
-    stdio: 'ignore',
-    // Pin the child to this profile, including when we were started from a terminal with --profile.
-    env: { ...process.env, CLAUDE_CONFIG_DIR: U.paths.claudeConfigDir(), CASEBOOK_PROFILE: U.paths.profileName() },
-  });
+  // Pin the child to this profile, including when we were started from a terminal with --profile.
+  const env = { ...process.env, CASEBOOK_PROFILE: U.paths.profileName() };
+  if (U.paths.claudeConfigDirExplicit()) env.CLAUDE_CONFIG_DIR = U.paths.claudeConfigDir();
+  const child = spawn(process.execPath, [__filename, ...args], { detached: true, stdio: 'ignore', env });
   child.unref();
 }
 

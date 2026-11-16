@@ -35,6 +35,12 @@ function buildPrompt(t, info, marks, commits) {
   return tpl.replace(/\{\{(\w+)\}\}/g, (_, k) => (k in vars ? vars[k] : ''));
 }
 
+function childEnv() {
+  const env = { ...process.env, CASEBOOK_SCOUT: '1' };
+  if (paths.claudeConfigDirExplicit()) env.CLAUDE_CONFIG_DIR = paths.claudeConfigDir();
+  return env;
+}
+
 function runClaude(prompt, config) {
   const cmd = config.scout.command || 'claude';
   const hardened = ['--restricted', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence'];
@@ -45,8 +51,8 @@ function runClaude(prompt, config) {
     timeout: (config.scout.timeoutSec || 240) * 1000,
     maxBuffer: 10 * 1024 * 1024,
     cwd: os.tmpdir(),
-    // Always bill/run as the session's profile, even from a terminal with no inherited value.
-    env: { ...process.env, CASEBOOK_SCOUT: '1', CLAUDE_CONFIG_DIR: paths.claudeConfigDir() },
+    // Run as the session's profile, even from a terminal with no inherited value.
+    env: childEnv(),
   };
   let r = spawnSync(cmd, [...base, ...hardened], opts);
   // Older Claude Code versions may not know every hardening flag: retry with the essentials.
@@ -111,9 +117,10 @@ function renderBody(n) {
 function scoutSession(args, config) {
   const mode = args.mode === 'auto' ? 'auto' : 'manual';
   const timeoutMs = (config.scout.timeoutSec || 240) * 1000;
-  const release = acquireSessionLock(args.sessionId, { wait: mode === 'auto', timeoutMs });
+  // Hook scouts wait for a running scout of the session; catch-up passes (noWait) move on to the next one.
+  const release = acquireSessionLock(args.sessionId, { wait: mode === 'auto' && !args.noWait, timeoutMs });
   if (!release) {
-    return { status: 'running', reason: mode === 'manual' ? 'A scout for this session is already running. Check /casebook:list in a minute.' : 'timed out waiting for another scout of this session' };
+    return { status: 'running', reason: mode === 'manual' ? 'A scout for this session is already running. Check /casebook:list in a minute.' : args.noWait ? 'another scout of this session is running' : 'timed out waiting for another scout of this session' };
   }
   try { return scoutSessionLocked({ ...args, mode }, config); } finally { release(); }
 }
@@ -136,7 +143,7 @@ function lockIsStale(file, staleMs) {
   let ageMs = 0;
   try {
     const h = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (h && typeof h === 'object' && Number.isInteger(h.pid)) holder = h;
+    if (h && typeof h === 'object' && Number.isInteger(h.pid) && Number.isFinite(h.startedAt)) holder = h;
     ageMs = Date.now() - fs.statSync(file).mtimeMs;
   } catch {
     try { ageMs = Date.now() - fs.statSync(file).mtimeMs; } catch { return false; } // released
@@ -213,8 +220,9 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   if (!manual && existing) {
     // An auto scout finishes a partial log if the transcript grew at all; otherwise the regrow threshold applies.
     const wasPartial = existing.meta.partial === true || ledger.partial === true;
-    const grew = t.userTurns > (ledger.userTurns || 0) || size !== ledger.size;
-    if (wasPartial && !grew) {
+    // New marks count as new content: the log has to be re-scouted to pick them up.
+    const grew = t.userTurns > (ledger.userTurns || 0) || size !== ledger.size || store.getMarks(sessionId).length > 0;
+    if (wasPartial && !grew && !live) {
       // The session is over (hook) or settled (catch-up) and nothing was added since the partial scout:
       // the notes are already complete, so finish the log without another model call.
       existing.meta.partial = false;
@@ -358,7 +366,7 @@ function sweep(config, { since, exclude, limit, settleMinutes, dryRun, partialIf
     const list = candidateTranscripts({ since, exclude, settleMinutes });
     for (const c of list.slice(0, limit || list.length)) {
       try {
-        const r = scoutSession({ ...c, mode: 'auto', partialIfRecent }, config);
+        const r = scoutSession({ ...c, mode: 'auto', partialIfRecent, noWait: true }, config);
         results.push({ ...c, ...r });
         if (onResult) onResult(c, r);
       } catch (err) {

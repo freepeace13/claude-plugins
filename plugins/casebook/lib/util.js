@@ -63,6 +63,7 @@ function computeProfile() {
     return { name: process.env.CASEBOOK_PROFILE || profileNameFor(configDir), configDir, home: path.resolve(expandHome(process.env.CASEBOOK_HOME)), collided: false };
   }
 
+  if (process.env.CASEBOOK_PROFILE) validateProfileName(process.env.CASEBOOK_PROFILE, 'CASEBOOK_PROFILE');
   const wanted = override || process.env.CASEBOOK_PROFILE || null;
   if (override) {
     const rec = readJson(profileFile(path.join(root, override)), null);
@@ -78,6 +79,16 @@ function computeProfile() {
   }
 
   const configDir = envDir || normalizeDir(DEFAULT_CLAUDE_DIR);
+  if (!wanted) {
+    // A store that already records this config dir wins, so a hash-suffixed store stays stable
+    // even if the store that first claimed the plain name goes away.
+    for (const n of knownProfiles()) {
+      const rec = readJson(profileFile(path.join(root, n)), null);
+      if (rec && rec.claudeConfigDir && sameDir(normalizeDir(rec.claudeConfigDir), configDir)) {
+        return { name: n, configDir, home: path.join(root, n), collided: false };
+      }
+    }
+  }
   let name = wanted || profileNameFor(configDir);
   let collided = false;
   const rec = readJson(profileFile(path.join(root, name)), null);
@@ -91,9 +102,13 @@ function computeProfile() {
 const profile = () => (cached = cached || computeProfile());
 
 /** Point this process at a named store (the CLI's global --profile flag). Throws if unknown. */
-function useProfile(name) {
-  if (typeof name !== 'string' || !name) throw new Error('--profile needs a profile name');
+function validateProfileName(name, what = '--profile') {
+  if (typeof name !== 'string' || !name) throw new Error(`${what} needs a profile name`);
   if (/[\\/]/.test(name) || name.startsWith('.')) throw new Error(`invalid profile name "${name}"`);
+}
+
+function useProfile(name) {
+  validateProfileName(name);
   if (process.env.CASEBOOK_HOME) throw new Error('--profile cannot be used while CASEBOOK_HOME is set (it points straight at one store)');
   override = name;
   cached = null;
@@ -132,10 +147,13 @@ function countLogs(dir) {
 function listProfiles() {
   const cur = profile();
   const dirs = process.env.CASEBOOK_HOME ? [cur.home] : knownProfiles().map((n) => path.join(storeRoot(), n));
+  // The current store may not have been used yet (no profile.json): still show it.
+  if (!dirs.some((d) => path.resolve(d) === path.resolve(cur.home))) dirs.push(cur.home);
   return dirs.map((dir) => {
-    const rec = readJson(profileFile(dir), {});
+    const isCurrent = path.resolve(dir) === path.resolve(cur.home);
+    const rec = readJson(profileFile(dir), isCurrent ? { name: cur.name, claudeConfigDir: cur.configDir } : {});
     const { count, last } = countLogs(dir);
-    return { name: rec.name || path.basename(dir), claudeConfigDir: rec.claudeConfigDir || null, logs: count, lastLog: last || null, current: path.resolve(dir) === path.resolve(cur.home) };
+    return { name: rec.name || path.basename(dir), claudeConfigDir: rec.claudeConfigDir || null, logs: count, lastLog: last || null, current: isCurrent };
   });
 }
 
@@ -154,6 +172,9 @@ const paths = {
   errorLog: () => path.join(home(), 'casebook.log'),
   profileName: () => profile().name,
   claudeConfigDir: () => profile().configDir,
+  // Pass CLAUDE_CONFIG_DIR to children only when it matters: it was already set, or the profile is not the
+  // default ~/.claude. Setting it for a default-profile user could change how `claude` finds its credentials.
+  claudeConfigDirExplicit: () => Boolean(process.env.CLAUDE_CONFIG_DIR) || profile().configDir !== normalizeDir(DEFAULT_CLAUDE_DIR),
   claudeProjects: () => path.join(profile().configDir, 'projects'),
 };
 
