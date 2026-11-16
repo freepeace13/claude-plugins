@@ -717,6 +717,76 @@ test('a catch-up pass skips a session another scout holds instead of waiting', a
   await new Promise((res) => first.on('close', res));
 });
 
+test('an invalid CASEBOOK_PROFILE does not block an explicit --profile', () => {
+  const p = profileSandbox();
+  p.seedStore('default');
+  p.run(['list']);
+  const r = p.run(['list', '--profile', 'default'], { env: { CASEBOOK_PROFILE: '.x' } });
+  assert.strictEqual(r.status, 0);
+});
+
+test('a symlinked ~/.claude is still the default profile', () => {
+  const p = profileSandbox();
+  fs.mkdirSync(p.dirs.default, { recursive: true });
+  const real = path.join(p.root, 'real-claude');
+  fs.mkdirSync(real);
+  fs.rmSync(p.dirs.default, { recursive: true });
+  fs.symlinkSync(real, p.dirs.default);
+  const store = path.basename(path.dirname(p.run(['config'], { configDir: real }).out.split('\n')[0]));
+  assert.strictEqual(store, 'default');
+});
+
+test('doctor probes claude the way the scout runs it', () => {
+  const p = profileSandbox();
+  p.seedStore('default'); p.seedStore('personal');
+  assert.match(p.run(['doctor']).out, /CLAUDE_CONFIG_DIR left unset/);
+  assert.match(p.run(['doctor'], { configDir: p.dirs.personal }).out, /CLAUDE_CONFIG_DIR set\)/);
+});
+
+test('the catch-up lock is atomic, owner-checked, and not stolen from a live holder', () => {
+  const s = sandbox();
+  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'sweep.lock');
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  // Held by a live process for over 30 minutes: no longer stolen (it used to be).
+  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, t: Date.now() - 2 * 3600000 }));
+  assert.match(s.run(['backfill', '--yes']).out, /already running/);
+  assert.ok(fs.existsSync(lock), 'a live holder keeps its lock');
+  // A dead holder is reclaimed and the lock is released afterwards.
+  fs.writeFileSync(lock, JSON.stringify({ pid: 2147483646, t: Date.now() }));
+  s.transcript('lk', 3);
+  assert.doesNotMatch(s.run(['backfill', '--yes']).out, /already running/);
+  assert.ok(!fs.existsSync(lock), 'released');
+});
+
+test('catch-up sessions skipped as busy do not use up the limit', async () => {
+  const s = sandbox();
+  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
+  fs.mkdirSync(path.dirname(meta), { recursive: true });
+  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
+  const old = (id, ago) => { const f = s.transcript(id, 3); const t = new Date(Date.now() - ago); fs.utimesSync(f, t, t); return f; };
+  const busyTp = old('busy1', 5000000);
+  old('newer', 1000000);
+  const first = spawn(process.execPath, [BIN, 'scout', '--session', 'busy1', '--transcript', busyTp], { cwd: s.repo, env: { ...s.env, STUB_DELAY: '2500' }, stdio: 'ignore' });
+  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'locks', 'busy1.lock');
+  for (let i = 0; i < 50 && !fs.existsSync(lock); i++) await new Promise((r) => setTimeout(r, 50));
+  const r = JSON.parse(s.run(['scout', '--pending', '--limit', '1', '--json']).out);
+  assert.deepStrictEqual(r.map((x) => [x.sessionId, x.status]), [['busy1', 'running'], ['newer', 'created']]);
+  await new Promise((res) => first.on('close', res));
+});
+
+test('a recently active session is not finished early by a catch-up pass', () => {
+  const s = sandbox();
+  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
+  fs.mkdirSync(path.dirname(meta), { recursive: true });
+  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
+  const tp = s.transcript('act', 3);
+  const r = JSON.parse(s.run(['scout', '--session', 'act', '--transcript', tp, '--live', '--json']).out);
+  // Same transcript, still recent: the logic reached through a catch-up must leave it partial.
+  const again = JSON.parse(s.run(['scout', '--pending', '--json']).out);
+  assert.ok(again.every((x) => x.status !== 'updated'), 'unchanged and recent: nothing to do');
+  assert.match(s.run(['show', r.logId]).out, /partial: true/);
+});
+
 test('a relative CASEBOOK_HOME resolves to one absolute store', () => {
   const s = sandbox();
   const r = s.run(['config'], { env: { CASEBOOK_HOME: 'rel-store' }, cwd: s.root });

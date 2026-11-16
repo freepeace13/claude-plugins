@@ -130,13 +130,6 @@ const pidAlive = (pid) => {
   try { process.kill(pid, 0); return true; } catch (err) { return err.code === 'EPERM'; }
 };
 
-/**
- * Serialize scouts of the same session (state/locks/<id>.lock = {pid, startedAt}). A resumed session
- * can end while an earlier scout is still running; without this both would see no log yet and each
- * create one. The ledger is read only after the lock is held, so the later scout sees the first one's
- * result. Returns a release function, or null when the lock is held and we were told not to wait
- * (or the wait ran out).
- */
 /** Dead holder, expired lock, or a lock file a crashed scout left empty/garbled (given 10s of grace). */
 function lockIsStale(file, staleMs) {
   let holder = null;
@@ -158,6 +151,13 @@ function lockName(sessionId) {
   return safe === id && safe ? safe : `${safe}-${crypto.createHash('sha1').update(id).digest('hex').slice(0, 8)}`;
 }
 
+/**
+ * Serialize scouts of the same session (state/locks/<id>.lock = {pid, startedAt}). A resumed session
+ * can end while an earlier scout is still running; without this both would see no log yet and each
+ * create one. The ledger is read only after the lock is held, so the later scout sees the first one's
+ * result. Returns a release function, or null when the lock is held and we were told not to wait
+ * (or the wait ran out).
+ */
 function acquireSessionLock(sessionId, { wait, timeoutMs }) {
   const file = path.join(paths.locks(), `${lockName(sessionId)}.lock`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -214,7 +214,8 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   // A log is partial when scouted while its session may still be running.
   const settleMs = (config.sweep.settleMinutes || 0) * 60000;
   // Manual scouts, and catch-up passes that skip the settle delay, may be looking at a session that is still running.
-  const partial = live || ((manual || partialIfRecent) && Date.now() - st.mtimeMs < settleMs);
+  const recent = Date.now() - st.mtimeMs < settleMs;
+  const partial = live || ((manual || partialIfRecent) && recent);
 
   const existing = !ledger.deleted && ledger.logId ? store.findLog(ledger.logId) : null;
   if (!manual && existing) {
@@ -222,8 +223,8 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
     const wasPartial = existing.meta.partial === true || ledger.partial === true;
     // New marks count as new content: the log has to be re-scouted to pick them up.
     const grew = t.userTurns > (ledger.userTurns || 0) || size !== ledger.size || store.getMarks(sessionId).length > 0;
-    if (wasPartial && !grew && !live) {
-      // The session is over (hook) or settled (catch-up) and nothing was added since the partial scout:
+    if (wasPartial && !grew && !live && !(partialIfRecent && recent)) {
+      // The session is over (hook) or settled and nothing was added since the partial scout:
       // the notes are already complete, so finish the log without another model call.
       existing.meta.partial = false;
       store.saveLog(existing);
@@ -303,16 +304,36 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
 
 // ---------- sweep: catch sessions whose SessionEnd hook never ran ----------
 
+// One catch-up pass at a time per store. Created atomically; a holder is stale when its process is gone
+// (or after 6 hours, in case the pid was reused). Only the process that wrote the lock removes it.
+let sweepToken = null;
+
 function acquireLock() {
   const file = paths.lock();
-  const cur = readJson(file, null);
-  if (cur && Date.now() - cur.t < 30 * 60000) {
-    try { process.kill(cur.pid, 0); return false; } catch { /* stale */ }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const mine = JSON.stringify({ pid: process.pid, t: Date.now() });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      fs.writeFileSync(file, mine, { flag: 'wx' });
+      sweepToken = mine;
+      return true;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+    const cur = readJson(file, null);
+    if (cur && Number.isInteger(cur.pid)) {
+      if (pidAlive(cur.pid) && Date.now() - cur.t < 6 * 3600000) return false;
+    } else {
+      // Empty or garbled: a holder that is still writing it gets a few seconds.
+      try { if (Date.now() - fs.statSync(file).mtimeMs < 10000) return false; } catch { continue; }
+    }
+    fs.rmSync(file, { force: true });
   }
-  writeJsonAtomic(file, { pid: process.pid, t: Date.now() });
-  return true;
+  return false;
 }
-const releaseLock = () => fs.rmSync(paths.lock(), { force: true });
+const releaseLock = () => {
+  try { if (fs.readFileSync(paths.lock(), 'utf8') === sweepToken) fs.rmSync(paths.lock(), { force: true }); } catch { /* gone */ }
+};
 
 function candidateTranscripts({ since, exclude, settleMinutes = 0 }) {
   const root = paths.claudeProjects();
@@ -364,12 +385,16 @@ function sweep(config, { since, exclude, limit, settleMinutes, dryRun, partialIf
   const results = [];
   try {
     const list = candidateTranscripts({ since, exclude, settleMinutes });
-    for (const c of list.slice(0, limit || list.length)) {
+    let spent = 0; // sessions skipped because another scout holds them don't use up the limit
+    for (const c of list) {
+      if (limit && spent >= limit) break;
       try {
         const r = scoutSession({ ...c, mode: 'auto', partialIfRecent, noWait: true }, config);
+        if (r.status !== 'running') spent++;
         results.push({ ...c, ...r });
         if (onResult) onResult(c, r);
       } catch (err) {
+        spent++;
         logError(`scout failed for ${c.sessionId}`, err);
         results.push({ ...c, status: 'error', reason: err.message });
         if (onResult) onResult(c, { status: 'error', reason: err.message });

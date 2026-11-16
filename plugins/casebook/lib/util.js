@@ -24,7 +24,7 @@ function normalizeDir(p) {
 }
 
 function profileNameFor(configDir) {
-  if (configDir === normalizeDir(DEFAULT_CLAUDE_DIR)) return 'default';
+  if (sameDir(configDir, normalizeDir(DEFAULT_CLAUDE_DIR))) return 'default';
   const base = path.basename(configDir);
   if (path.dirname(configDir) === os.homedir()) {
     const m = /^\.claude[_-](.+)$/.exec(base);
@@ -63,7 +63,7 @@ function computeProfile() {
     return { name: process.env.CASEBOOK_PROFILE || profileNameFor(configDir), configDir, home: path.resolve(expandHome(process.env.CASEBOOK_HOME)), collided: false };
   }
 
-  if (process.env.CASEBOOK_PROFILE) validateProfileName(process.env.CASEBOOK_PROFILE, 'CASEBOOK_PROFILE');
+  if (process.env.CASEBOOK_PROFILE && !override) validateProfileName(process.env.CASEBOOK_PROFILE, 'CASEBOOK_PROFILE');
   const wanted = override || process.env.CASEBOOK_PROFILE || null;
   if (override) {
     const rec = readJson(profileFile(path.join(root, override)), null);
@@ -174,7 +174,7 @@ const paths = {
   claudeConfigDir: () => profile().configDir,
   // Pass CLAUDE_CONFIG_DIR to children only when it matters: it was already set, or the profile is not the
   // default ~/.claude. Setting it for a default-profile user could change how `claude` finds its credentials.
-  claudeConfigDirExplicit: () => Boolean(process.env.CLAUDE_CONFIG_DIR) || profile().configDir !== normalizeDir(DEFAULT_CLAUDE_DIR),
+  claudeConfigDirExplicit: () => Boolean(process.env.CLAUDE_CONFIG_DIR) || !sameDir(profile().configDir, normalizeDir(DEFAULT_CLAUDE_DIR)),
   claudeProjects: () => path.join(profile().configDir, 'projects'),
 };
 

@@ -318,14 +318,17 @@ const commands = {
 
   doctor() {
     const config = U.loadConfig();
-    const which = spawnSync(config.scout.command, ['--version'], { encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: U.paths.claudeConfigDir() } });
+    // Probe the way the real scout runs: CLAUDE_CONFIG_DIR is set only when it matters (see paths.claudeConfigDirExplicit).
+    const probeEnv = { ...process.env };
+    if (U.paths.claudeConfigDirExplicit()) probeEnv.CLAUDE_CONFIG_DIR = U.paths.claudeConfigDir();
+    const which = spawnSync(config.scout.command, ['--version'], { encoding: 'utf8', env: probeEnv });
     const project = resolveProject(process.cwd(), config);
     const meta = U.readJson(U.paths.meta(), {});
     out(`node        ${process.version}`);
     out(`profile     ${U.paths.profileName()}`);
     out(`config dir  ${U.paths.claudeConfigDir()}`);
     out(`store       ${U.paths.home()}`);
-    out(`scout       ${config.scout.command} → ${which.status === 0 ? which.stdout.trim() : 'NOT FOUND'} (model ${config.scout.model}, with CLAUDE_CONFIG_DIR=${U.paths.claudeConfigDir()})`);
+    out(`scout       ${config.scout.command} → ${which.status === 0 ? which.stdout.trim() : 'NOT FOUND'} (model ${config.scout.model}, CLAUDE_CONFIG_DIR ${U.paths.claudeConfigDirExplicit() ? 'set' : 'left unset'})`);
     out(`this dir    project "${project.project}", policy ${project.policy}${project.repo ? `, ${project.repo}` : ''}`);
     out(`logs        ${store.allLogs().length} across ${store.listProjects().length} project(s)`);
     out(`installed   ${meta.installedAt || '-'}`);
