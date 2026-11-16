@@ -144,7 +144,10 @@ const commands = {
       if (opt.quiet) return;
       fail(`scout failed: ${err.message}`);
     }
-    if (opt.quiet) return;
+    if (opt.quiet) {
+      if (r.status === 'running') U.logError(`scout for ${sessionId} not run: ${r.reason}`);
+      return;
+    }
     out(opt.json ? JSON.stringify(r) : describe(r));
   },
 
@@ -294,10 +297,11 @@ const commands = {
       out('Re-run with --yes to start.');
       return;
     }
-    sweep(config, {
+    const { locked } = sweep(config, {
       since, limit, settleMinutes: 0,
       onResult: (c, r) => out(`${c.sessionId.slice(0, 8)}  ${r.status}${r.logId ? ' ' + r.logId : ''}${r.reason ? ' (' + r.reason + ')' : ''}${r.title ? ' — ' + r.title : ''}`),
     });
+    if (locked) out('A catch-up is already running. Check /casebook:list in a minute.');
   },
 
   config() {

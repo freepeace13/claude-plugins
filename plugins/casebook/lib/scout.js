@@ -144,7 +144,10 @@ function acquireSessionLock(sessionId, { wait, timeoutMs }) {
     let raw = '';
     let holder = null;
     try { raw = fs.readFileSync(file, 'utf8'); holder = JSON.parse(raw); } catch { /* released, or half-written */ }
-    const stale = holder && (!pidAlive(holder.pid) || Date.now() - holder.startedAt > staleMs);
+    let ageMs = 0;
+    try { ageMs = Date.now() - fs.statSync(file).mtimeMs; } catch { /* released */ }
+    // An unparseable lock is a holder that died between creating the file and writing it (give a live one a moment).
+    const stale = holder ? !pidAlive(holder.pid) || Date.now() - holder.startedAt > staleMs : ageMs > 10000;
     if (stale) {
       try { if (fs.readFileSync(file, 'utf8') === raw) fs.rmSync(file, { force: true }); } catch { /* raced */ }
       continue;

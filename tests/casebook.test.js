@@ -507,3 +507,60 @@ test('marketplace is named freepeace13', () => {
   const m = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../.claude-plugin/marketplace.json'), 'utf8'));
   assert.strictEqual(m.name, 'freepeace13');
 });
+
+// ---------------------------------------------------------------- review follow-ups
+
+test('an empty lock file left by a dead scout is recovered', () => {
+  const s = sandbox();
+  const locks = path.join(s.env.CASEBOOK_HOME, 'state', 'locks');
+  fs.mkdirSync(locks, { recursive: true });
+  const lock = path.join(locks, 'dead.lock');
+  fs.writeFileSync(lock, '');
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(lock, old, old);
+  const r = JSON.parse(s.run(['scout', '--session', 'dead', '--transcript', s.transcript('dead', 3), '--json']).out);
+  assert.strictEqual(r.status, 'created');
+});
+
+test('backfill says so when a catch-up already holds the lock', () => {
+  const s = sandbox();
+  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'sweep.lock');
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, t: Date.now() }));
+  assert.match(s.run(['backfill', '--yes']).out, /A catch-up is already running/);
+});
+
+test('--profile rejects path-like names and cannot be combined with CASEBOOK_HOME', () => {
+  const p = profileSandbox();
+  p.seedStore('default');
+  p.run(['list']);
+  const bad = p.run(['--profile', '../x', 'list']);
+  assert.strictEqual(bad.status, 1);
+  assert.match(bad.stderr, /invalid profile name/);
+  const home = p.run(['--profile', 'default', 'list'], { env: { CASEBOOK_HOME: path.join(p.root, 'h') } });
+  assert.strictEqual(home.status, 1);
+  assert.match(home.stderr, /CASEBOOK_HOME/);
+});
+
+test('a background scout that finds the session already being scouted is logged', async () => {
+  const s = sandbox();
+  const tp = s.transcript('bgrun', 3);
+  const first = spawn(process.execPath, [BIN, 'scout', '--session', 'bgrun', '--transcript', tp], { cwd: s.repo, env: { ...s.env, STUB_DELAY: '1500' }, stdio: 'ignore' });
+  await new Promise((r) => setTimeout(r, 500));
+  s.run(['scout', '--session', 'bgrun', '--transcript', tp, '--background']);
+  const logFile = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
+  for (let i = 0; i < 30 && !fs.existsSync(logFile); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.match(fs.readFileSync(logFile, 'utf8'), /scout for bgrun not run: A scout for this session is already running/);
+  await new Promise((r) => first.on('close', r));
+});
+
+test('a child pinned with CASEBOOK_PROFILE stays in the store when its config dir is spelled via a symlink', () => {
+  const p = profileSandbox();
+  const real = path.join(p.root, 'real-cfg');
+  const link = path.join(p.root, 'link-cfg');
+  fs.mkdirSync(real);
+  fs.symlinkSync(real, link);
+  const storeOf = (dir) => path.basename(path.dirname(p.run(['config'], { configDir: dir, env: { CASEBOOK_PROFILE: 'shared' } }).out.split('\n')[0]));
+  assert.strictEqual(storeOf(real), 'shared');
+  assert.strictEqual(storeOf(link), 'shared');
+});

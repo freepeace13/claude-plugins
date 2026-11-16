@@ -34,6 +34,8 @@ function profileNameFor(configDir) {
 }
 
 const storeRoot = () => path.resolve(expandHome(process.env.CASEBOOK_ROOT || '~/.casebook'));
+const realDir = (d) => { try { return fs.realpathSync(d); } catch { return d; } };
+const sameDir = (a, b) => a === b || realDir(a) === realDir(b);
 const profileFile = (dir) => path.join(dir, 'profile.json');
 const shortHash = (configDir) => crypto.createHash('sha1').update(configDir).digest('hex').slice(0, 4);
 
@@ -69,7 +71,7 @@ function computeProfile() {
   }
   if (wanted) {
     const rec = readJson(profileFile(path.join(root, wanted)), null);
-    if (rec && rec.claudeConfigDir && (!envDir || normalizeDir(rec.claudeConfigDir) === envDir)) {
+    if (rec && rec.claudeConfigDir && (!envDir || sameDir(normalizeDir(rec.claudeConfigDir), envDir))) {
       return { name: wanted, configDir: normalizeDir(rec.claudeConfigDir), home: path.join(root, wanted), collided: false };
     }
   }
@@ -78,7 +80,7 @@ function computeProfile() {
   let name = wanted || profileNameFor(configDir);
   let collided = false;
   const rec = readJson(profileFile(path.join(root, name)), null);
-  if (rec && rec.claudeConfigDir && normalizeDir(rec.claudeConfigDir) !== configDir) {
+  if (rec && rec.claudeConfigDir && !sameDir(normalizeDir(rec.claudeConfigDir), configDir)) {
     name = `${name}-${shortHash(configDir)}`;
     collided = true;
   }
@@ -89,6 +91,8 @@ const profile = () => (cached = cached || computeProfile());
 
 /** Point this process at a named store (the CLI's global --profile flag). Throws if unknown. */
 function useProfile(name) {
+  if (process.env.CASEBOOK_HOME) throw new Error('--profile cannot be used while CASEBOOK_HOME is set (it points straight at one store)');
+  if (!/^[A-Za-z0-9][\w.-]*$/.test(String(name))) throw new Error(`invalid profile name "${name}"`);
   override = name;
   cached = null;
   return profile();
