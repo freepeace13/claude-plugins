@@ -2,6 +2,7 @@
 // Scout: condense a session, ask a cheap headless Claude for case-study notes, write/update the log.
 
 const fs = require('fs');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -143,15 +144,25 @@ function lockIsStale(file, staleMs) {
   return holder ? !pidAlive(holder.pid) || Date.now() - holder.startedAt > staleMs : ageMs > 10000;
 }
 
+/** One lock per session id. If sanitising changed the id, add a hash so distinct ids never share a lock. */
+function lockName(sessionId) {
+  const id = String(sessionId);
+  const safe = id.replace(/[^\w-]/g, '');
+  return safe === id && safe ? safe : `${safe}-${crypto.createHash('sha1').update(id).digest('hex').slice(0, 8)}`;
+}
+
 function acquireSessionLock(sessionId, { wait, timeoutMs }) {
-  const file = path.join(paths.locks(), `${String(sessionId).replace(/[^\w-]/g, '')}.lock`);
+  const file = path.join(paths.locks(), `${lockName(sessionId)}.lock`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const staleMs = timeoutMs + 60000;
-  const deadline = Date.now() + timeoutMs;
+  // A scout can take up to two model runs (the flag-fallback retry), so a live holder is not stale before that.
+  const staleMs = 2 * timeoutMs + 60000;
+  const deadline = Date.now() + staleMs;
+  const mine = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
   for (;;) {
     try {
-      fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), { flag: 'wx' });
-      return () => fs.rmSync(file, { force: true });
+      fs.writeFileSync(file, mine, { flag: 'wx' });
+      // Only remove the lock if it is still ours (a reclaimed lock now belongs to someone else).
+      return () => { try { if (fs.readFileSync(file, 'utf8') === mine) fs.rmSync(file, { force: true }); } catch { /* gone */ } };
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
     }
@@ -203,6 +214,14 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
     // An auto scout finishes a partial log if the transcript grew at all; otherwise the regrow threshold applies.
     const wasPartial = existing.meta.partial === true || ledger.partial === true;
     const grew = t.userTurns > (ledger.userTurns || 0) || size !== ledger.size;
+    if (wasPartial && !grew) {
+      // The session is over (hook) or settled (catch-up) and nothing was added since the partial scout:
+      // the notes are already complete, so finish the log without another model call.
+      existing.meta.partial = false;
+      store.saveLog(existing);
+      store.setLedger(sessionId, { partial: false, size });
+      return { status: 'updated', logId: existing.meta.id, score: existing.meta.score, title: existing.meta.title, partial: false };
+    }
     if (!(wasPartial && grew) && t.userTurns - (ledger.userTurns || 0) < (config.sweep.regrowTurns || 8)) {
       store.setLedger(sessionId, { size });
       return { status: 'skipped', reason: 'already logged, not enough new activity' };

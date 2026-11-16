@@ -60,7 +60,7 @@ function computeProfile() {
 
   if (process.env.CASEBOOK_HOME) {
     const configDir = envDir || normalizeDir(DEFAULT_CLAUDE_DIR);
-    return { name: process.env.CASEBOOK_PROFILE || profileNameFor(configDir), configDir, home: expandHome(process.env.CASEBOOK_HOME), collided: false };
+    return { name: process.env.CASEBOOK_PROFILE || profileNameFor(configDir), configDir, home: path.resolve(expandHome(process.env.CASEBOOK_HOME)), collided: false };
   }
 
   const wanted = override || process.env.CASEBOOK_PROFILE || null;

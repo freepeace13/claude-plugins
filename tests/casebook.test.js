@@ -283,7 +283,7 @@ test('a manual and a hook scout of one session make exactly one model call', asy
   const results = await Promise.all([go([]), go(['--auto'])]);
   assert.ok(results.every((r) => r.code === 0));
   assert.strictEqual(results.filter((r) => r.status === 'created').length, 1);
-  assert.ok(results.some((r) => r.status === 'skipped' || r.status === 'running'));
+  assert.ok(results.some((r) => ['skipped', 'running', 'updated'].includes(r.status)), 'the other one waits, then skips, finishes the partial log, or reports running');
   assert.strictEqual(s.calls().length, 1);
   assert.strictEqual(idsOf(s.run(['list', '--all']).out).length, 1);
 });
@@ -621,4 +621,36 @@ test('--pending marks a recently active session partial, so SessionEnd can finis
   const fin = JSON.parse(s.run(['scout', '--session', 'live-elsewhere', '--transcript', s.transcript('live-elsewhere', 4), '--auto', '--json']).out);
   assert.strictEqual(fin.status, 'updated');
   assert.match(s.run(['show', r[0].logId]).out, /partial: false/);
+});
+
+test('a partial log with nothing new is finished by the auto scout without a model call', () => {
+  const s = sandbox();
+  const tp = s.transcript('end', 3);
+  const r = JSON.parse(s.run(['scout', '--session', 'end', '--transcript', tp, '--live', '--json']).out);
+  assert.strictEqual(r.partial, true);
+  assert.strictEqual(s.calls().length, 1);
+  const fin = JSON.parse(s.run(['scout', '--session', 'end', '--transcript', tp, '--auto', '--json']).out);
+  assert.strictEqual(fin.status, 'updated');
+  assert.strictEqual(fin.logId, r.logId);
+  assert.strictEqual(fin.partial, false);
+  assert.strictEqual(s.calls().length, 1, 'no second model call');
+  assert.match(s.run(['show', r.logId]).out, /partial: false/);
+  assert.doesNotMatch(s.run(['list']).out, /…/);
+});
+
+test('session ids that sanitise to the same name get separate locks', () => {
+  const s = sandbox();
+  const locks = path.join(s.env.CASEBOOK_HOME, 'state', 'locks');
+  fs.mkdirSync(locks, { recursive: true });
+  // A live lock held for "x" must not block "../x".
+  fs.writeFileSync(path.join(locks, 'x.lock'), JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+  const tp = s.transcript('../x', 3);
+  const r = JSON.parse(s.run(['scout', '--session', '../x', '--transcript', tp, '--json']).out);
+  assert.strictEqual(r.status, 'created');
+});
+
+test('a relative CASEBOOK_HOME resolves to one absolute store', () => {
+  const s = sandbox();
+  const r = s.run(['config'], { env: { CASEBOOK_HOME: 'rel-store' }, cwd: s.root });
+  assert.strictEqual(r.out.split('\n')[0], path.join(fs.realpathSync(s.root), 'rel-store', 'config.json'));
 });
