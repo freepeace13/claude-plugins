@@ -537,20 +537,30 @@ test('--profile rejects path-like names and cannot be combined with CASEBOOK_HOM
   const bad = p.run(['--profile', '../x', 'list']);
   assert.strictEqual(bad.status, 1);
   assert.match(bad.stderr, /invalid profile name/);
+  assert.match(p.run(['--profile', '.hidden', 'list']).stderr, /invalid profile name/);
+  p.seedStore('_odd');
+  fs.writeFileSync(path.join(p.cb, '_odd', 'profile.json'), JSON.stringify({ name: '_odd', claudeConfigDir: path.join(p.home, '.odd') }));
+  assert.strictEqual(p.run(['--profile', '_odd', 'list']).status, 0, 'any store name the code can produce is reachable');
+  fs.mkdirSync(path.join(p.cb, 'broken'), { recursive: true });
+  fs.writeFileSync(path.join(p.cb, 'broken', 'profile.json'), '{}');
+  assert.match(p.run(['--profile', 'broken', 'list']).stderr, /no claudeConfigDir/);
   const home = p.run(['--profile', 'default', 'list'], { env: { CASEBOOK_HOME: path.join(p.root, 'h') } });
-  assert.strictEqual(home.status, 1);
-  assert.match(home.stderr, /CASEBOOK_HOME/);
+  assert.strictEqual(home.status, 0, 'warns instead of failing');
+  assert.match(home.stderr, /ignoring --profile because CASEBOOK_HOME/);
+  assert.strictEqual(p.run(['help', '--profile', 'nope']).status, 0, 'help never needs a profile');
 });
 
 test('a background scout that finds the session already being scouted is logged', async () => {
   const s = sandbox();
   const tp = s.transcript('bgrun', 3);
-  const first = spawn(process.execPath, [BIN, 'scout', '--session', 'bgrun', '--transcript', tp], { cwd: s.repo, env: { ...s.env, STUB_DELAY: '1500' }, stdio: 'ignore' });
-  await new Promise((r) => setTimeout(r, 500));
+  const first = spawn(process.execPath, [BIN, 'scout', '--session', 'bgrun', '--transcript', tp], { cwd: s.repo, env: { ...s.env, STUB_DELAY: '2500' }, stdio: 'ignore' });
+  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'locks', 'bgrun.lock');
+  for (let i = 0; i < 50 && !fs.existsSync(lock); i++) await new Promise((r) => setTimeout(r, 50));
   s.run(['scout', '--session', 'bgrun', '--transcript', tp, '--background']);
   const logFile = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
-  for (let i = 0; i < 30 && !fs.existsSync(logFile); i++) await new Promise((r) => setTimeout(r, 100));
-  assert.match(fs.readFileSync(logFile, 'utf8'), /scout for bgrun not run: A scout for this session is already running/);
+  const read = () => { try { return fs.readFileSync(logFile, 'utf8'); } catch { return ''; } };
+  for (let i = 0; i < 50 && !/not run/.test(read()); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.match(read(), /scout for bgrun not run: A scout for this session is already running/);
   await new Promise((r) => first.on('close', r));
 });
 
@@ -563,4 +573,26 @@ test('a child pinned with CASEBOOK_PROFILE stays in the store when its config di
   const storeOf = (dir) => path.basename(path.dirname(p.run(['config'], { configDir: dir, env: { CASEBOOK_PROFILE: 'shared' } }).out.split('\n')[0]));
   assert.strictEqual(storeOf(real), 'shared');
   assert.strictEqual(storeOf(link), 'shared');
+});
+
+test('a fresh empty lock is respected; a stale one is reclaimed exactly once under contention', async () => {
+  const s = sandbox();
+  const locks = path.join(s.env.CASEBOOK_HOME, 'state', 'locks');
+  fs.mkdirSync(locks, { recursive: true });
+  const lock = path.join(locks, 'race.lock');
+  fs.writeFileSync(lock, '');
+  const tp = s.transcript('race', 3);
+  assert.match(s.run(['scout', '--session', 'race', '--transcript', tp]).out, /already running/, 'just-created lock gets its grace period');
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(lock, old, old);
+  const go = () => new Promise((res) => {
+    let out = '';
+    const p = spawn(process.execPath, [BIN, 'scout', '--session', 'race', '--transcript', tp, '--json'], { cwd: s.repo, env: { ...s.env, STUB_DELAY: '800' } });
+    p.stdout.on('data', (d) => { out += d; });
+    p.on('close', () => res(JSON.parse(out)));
+  });
+  const results = await Promise.all([go(), go(), go()]);
+  assert.strictEqual(results.filter((r) => r.status === 'created').length, 1);
+  assert.strictEqual(s.calls().length, 1);
+  assert.deepStrictEqual(fs.readdirSync(locks), [], 'no leftover lock or aside files');
 });

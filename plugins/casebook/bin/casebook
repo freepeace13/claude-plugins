@@ -145,7 +145,7 @@ const commands = {
       fail(`scout failed: ${err.message}`);
     }
     if (opt.quiet) {
-      if (r.status === 'running') U.logError(`scout for ${sessionId} not run: ${r.reason}`);
+      if (r.status === 'running' || (r.status === 'skipped' && r.reason === 'transcript not found')) U.logError(`scout for ${sessionId} not run: ${r.reason}`);
       return;
     }
     out(opt.json ? JSON.stringify(r) : describe(r));
@@ -352,7 +352,7 @@ const commands = {
 const { pos, opt } = parseArgs(process.argv.slice(2));
 const name = pos.shift() || 'help';
 const fn = commands[name];
-if (opt.profile) {
+if (opt.profile && fn && !opt.help && name !== 'help') {
   try { U.useProfile(opt.profile); } catch (err) { fail(err.message); }
 }
 if (!fn || opt.help) commands.help();

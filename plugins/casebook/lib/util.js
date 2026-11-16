@@ -67,6 +67,7 @@ function computeProfile() {
   if (override) {
     const rec = readJson(profileFile(path.join(root, override)), null);
     if (!rec) throw new Error(`no profile "${override}". Known: ${knownProfiles().join(', ') || '(none)'}`);
+    if (!rec.claudeConfigDir) throw new Error(`profile "${override}" has no claudeConfigDir in its profile.json`);
     return { name: override, configDir: normalizeDir(rec.claudeConfigDir), home: path.join(root, override), collided: false };
   }
   if (wanted) {
@@ -91,8 +92,11 @@ const profile = () => (cached = cached || computeProfile());
 
 /** Point this process at a named store (the CLI's global --profile flag). Throws if unknown. */
 function useProfile(name) {
-  if (process.env.CASEBOOK_HOME) throw new Error('--profile cannot be used while CASEBOOK_HOME is set (it points straight at one store)');
-  if (!/^[A-Za-z0-9][\w.-]*$/.test(String(name))) throw new Error(`invalid profile name "${name}"`);
+  if (!name || /[\\/]/.test(name) || String(name).startsWith('.') || name === true) throw new Error(`invalid profile name "${name}"`);
+  if (process.env.CASEBOOK_HOME) {
+    process.stderr.write('casebook: ignoring --profile because CASEBOOK_HOME points straight at one store\n');
+    return profile();
+  }
   override = name;
   cached = null;
   return profile();

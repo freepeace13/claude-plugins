@@ -112,7 +112,7 @@ function scoutSession(args, config) {
   const timeoutMs = (config.scout.timeoutSec || 240) * 1000;
   const release = acquireSessionLock(args.sessionId, { wait: mode === 'auto', timeoutMs });
   if (!release) {
-    return { status: 'running', reason: mode === 'manual' ? 'A scout for this session is already running. Check /casebook:list in a minute.' : 'another scout is still running' };
+    return { status: 'running', reason: mode === 'manual' ? 'A scout for this session is already running. Check /casebook:list in a minute.' : 'timed out waiting for another scout of this session' };
   }
   try { return scoutSessionLocked({ ...args, mode }, config); } finally { release(); }
 }
@@ -129,6 +129,20 @@ const pidAlive = (pid) => {
  * result. Returns a release function, or null when the lock is held and we were told not to wait
  * (or the wait ran out).
  */
+/** Dead holder, expired lock, or a lock file a crashed scout left empty/garbled (given 10s of grace). */
+function lockIsStale(file, staleMs) {
+  let holder = null;
+  let ageMs = 0;
+  try {
+    const h = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (h && typeof h === 'object' && Number.isInteger(h.pid)) holder = h;
+    ageMs = Date.now() - fs.statSync(file).mtimeMs;
+  } catch {
+    try { ageMs = Date.now() - fs.statSync(file).mtimeMs; } catch { return false; } // released
+  }
+  return holder ? !pidAlive(holder.pid) || Date.now() - holder.startedAt > staleMs : ageMs > 10000;
+}
+
 function acquireSessionLock(sessionId, { wait, timeoutMs }) {
   const file = path.join(paths.locks(), `${String(sessionId).replace(/[^\w-]/g, '')}.lock`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -141,15 +155,13 @@ function acquireSessionLock(sessionId, { wait, timeoutMs }) {
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
     }
-    let raw = '';
-    let holder = null;
-    try { raw = fs.readFileSync(file, 'utf8'); holder = JSON.parse(raw); } catch { /* released, or half-written */ }
-    let ageMs = 0;
-    try { ageMs = Date.now() - fs.statSync(file).mtimeMs; } catch { /* released */ }
-    // An unparseable lock is a holder that died between creating the file and writing it (give a live one a moment).
-    const stale = holder ? !pidAlive(holder.pid) || Date.now() - holder.startedAt > staleMs : ageMs > 10000;
-    if (stale) {
-      try { if (fs.readFileSync(file, 'utf8') === raw) fs.rmSync(file, { force: true }); } catch { /* raced */ }
+    if (lockIsStale(file, staleMs)) {
+      // Move it aside atomically so only one waiter reclaims it, then re-check what we actually moved:
+      // it may have been replaced by a fresh lock between our read and the rename.
+      const aside = `${file}.stale-${process.pid}-${Date.now()}`;
+      try { fs.renameSync(file, aside); } catch { continue; }
+      if (!lockIsStale(aside, staleMs)) { try { fs.linkSync(aside, file); } catch { /* someone else holds it now */ } }
+      fs.rmSync(aside, { force: true });
       continue;
     }
     if (!wait || Date.now() > deadline) return null;
