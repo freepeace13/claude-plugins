@@ -503,9 +503,9 @@ test('--profile: unknown profile fails with the known list; profiles lists store
   assert.match(doc, new RegExp(`^config dir +${p.dirs.personal}$`, 'm'));
 });
 
-test('marketplace is named freepeace13', () => {
+test('marketplace is named kinbasco-plugins', () => {
   const m = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../.claude-plugin/marketplace.json'), 'utf8'));
-  assert.strictEqual(m.name, 'freepeace13');
+  assert.strictEqual(m.name, 'kinbasco-plugins');
 });
 
 // ---------------------------------------------------------------- review follow-ups

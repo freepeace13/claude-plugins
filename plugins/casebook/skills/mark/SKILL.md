@@ -1,6 +1,6 @@
 ---
 name: mark
-description: Mark the current session, or an existing casebook log by ID, as a potential case study, with an optional note.
+description: Mark the current session, or an existing casebook log by ID, as a potential case study, with an optional note. Use when the user wants to flag work worth a case study.
 argument-hint: "[note] | <log-id> [note]"
 disable-model-invocation: true
 allowed-tools: Bash(casebook:*)
@@ -16,6 +16,6 @@ Run exactly one command:
   `casebook mark --session ${CLAUDE_SESSION_ID} -- "<note>"`
   The note is the arguments. If there are none, write a note of at most 15 words naming the most significant problem solved or decision made so far in this session.
 
-Quote the note safely for the shell. If `casebook` is not on PATH, run `node "${CLAUDE_PLUGIN_ROOT}/bin/casebook"` with the same arguments instead.
+Quote the note safely for the shell.
 
 Reply with the command's one-line output and nothing else, then carry on with whatever the user was doing.

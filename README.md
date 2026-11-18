@@ -1,10 +1,10 @@
-# freepeace13's Claude Code plugins
+# Kin Basco's Claude Code plugins
 
 A plugin marketplace for [Claude Code](https://code.claude.com).
 
 ```text
 /plugin marketplace add freepeace13/claude-plugins
-/plugin install <plugin>@freepeace13
+/plugin install <plugin>@kinbasco-plugins
 ```
 
 | Plugin | What it does |

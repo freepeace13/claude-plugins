@@ -1,6 +1,6 @@
 ---
 name: scout
-description: Scout the current session (or another session, or all missed sessions) into a casebook log right now, instead of waiting for the session to end.
+description: Scout the current session (or another session, or all missed sessions) into a casebook log right now, instead of waiting for the session to end. Use when the user asks to log a session now.
 argument-hint: "[<session-id> | --pending] [--background] [--force]"
 disable-model-invocation: true
 allowed-tools: Bash(casebook:*)
@@ -8,7 +8,7 @@ allowed-tools: Bash(casebook:*)
 
 Scout a session for casebook now. Arguments: `$ARGUMENTS`
 
-Each scout is one headless model call, so run exactly what is described here and nothing more. If `casebook` is not on PATH, run `node "${CLAUDE_PLUGIN_ROOT}/bin/casebook"` with the same arguments instead.
+Each scout is one headless model call, so run exactly what is described here and nothing more.
 
 ## Bash timeout
 
