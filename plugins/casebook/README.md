@@ -13,7 +13,7 @@ Casebook keeps a running record of the case studies hiding in your Claude Code s
 
 ```text
 /plugin marketplace add freepeace13/claude-plugins
-/plugin install casebook@freepeace13
+/plugin install casebook@kinbasco-plugins
 ```
 
 Requirements: Claude Code with plugin support, Node.js 18 or newer on PATH, and git. Tested on macOS and Linux.
@@ -37,7 +37,7 @@ casebook config      # prints the path, ~/.casebook/config.json
 | `/casebook:delete <id…>` | Delete specific logs. |
 | `/casebook:delete --below-score 3 --older-than 30d --unmarked` | Delete a batch. It runs as a dry run first and asks before deleting. |
 
-The same commands work from any shell through the `casebook` CLI. Inside Claude Code the plugin's `bin/` is on PATH. Elsewhere, run `node ~/.claude/plugins/…/casebook/bin/casebook`, or add an alias. Run `casebook help` for the full list, including `profiles`, `backfill` and `doctor`.
+The same commands work from any shell through the `casebook` CLI. Inside Claude Code the plugin's `bin/` is on PATH. Elsewhere, run `node <plugin dir>/bin/casebook`, or add an alias. Run `casebook help` for the full list, including `profiles`, `backfill` and `doctor`.
 
 ```text
 $ casebook list --marked
@@ -88,6 +88,10 @@ Projects are named after the git remote's repository name. Without a remote, the
 ```json
 { "project": "client-portal", "policy": "anonymize" }
 ```
+
+Casebook keeps its data in `~/.casebook/` rather than the plugin directory, on purpose: logs are shared by every Claude config directory's own store and must survive plugin updates and reinstalls. Uninstalling the plugin does **not** delete them. Remove `~/.casebook/` yourself if you want them gone.
+
+The `case-study-writer` agent has `Bash`, `Read`, `Write`, `Glob` and `Grep`. It runs `casebook` commands and `git remote get-url origin`, and writes the case study file.
 
 ## Profiles
 

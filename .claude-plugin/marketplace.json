@@ -1,14 +1,27 @@
 {
-  "name": "freepeace13",
+  "name": "kinbasco-plugins",
   "description": "Claude Code plugins by Kin Basco.",
   "owner": {
-    "name": "Kin Basco"
+    "name": "Kin Basco",
+    "url": "https://github.com/freepeace13"
+  },
+  "metadata": {
+    "description": "Claude Code plugins by Kin Basco.",
+    "version": "0.1.0"
   },
   "plugins": [
     {
       "name": "casebook",
       "source": "./plugins/casebook",
-      "description": "Auto-log potential case studies from every session; mark, list, and write them up as Markdown."
+      "description": "Auto-log potential case studies from every session; mark, list, and write them up as Markdown.",
+      "author": {
+        "name": "Kin Basco",
+        "url": "https://github.com/freepeace13"
+      },
+      "homepage": "https://github.com/freepeace13/claude-plugins/tree/main/plugins/casebook",
+      "license": "MIT",
+      "category": "productivity",
+      "tags": ["case-study", "portfolio", "hooks", "writing", "developer-brand"]
     }
   ]
 }

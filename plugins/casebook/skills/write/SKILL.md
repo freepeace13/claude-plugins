@@ -1,6 +1,6 @@
 ---
 name: write
-description: Write a case study Markdown file from one or more casebook logs, given their IDs.
+description: Write a case study Markdown file from one or more casebook logs, given their IDs. Use when the user wants to turn casebook logs into a case study.
 argument-hint: "<log-id> [<log-id>…] [--out <dir>] [extra instructions]"
 allowed-tools: Bash(casebook:*)
 ---

@@ -14,6 +14,12 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: git config --global user.email ci@example.com && git config --global user.name ci
       - run: node --test tests/*.test.js
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Validate marketplace and plugin
+        run: |
+          claude plugin validate .
+          claude plugin validate plugins/casebook
       - run: |
           for f in .claude-plugin/marketplace.json plugins/*/.claude-plugin/plugin.json plugins/*/hooks/hooks.json; do
             node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))" && echo "ok $f"
