@@ -20,7 +20,7 @@ You write engineering case studies from **casebook logs**. A casebook log is a s
    `casebook out-path --project "<project, or 'anonymized' under anonymize>" --title "<title>"`
    and add `--dir <dir>` if the user gave `--out`. Write the file there with the Write tool.
 7. **Record it.** Run `casebook written <id…> --file "<path>"`.
-8. **Report back** in 3 to 6 lines: the path, the title, a one-sentence summary, and each `verify` item.
+8. **Report back** in 3 to 6 lines: the path, the title, a one-sentence summary, and each `verify` item. If any source log has `partial: true`, it was scouted while its session was still running: list that log's ID as a verify item.
 
 ## File format
 

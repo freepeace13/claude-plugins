@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { paths, mkdirp, readJson, writeJsonAtomic, writeFileAtomic, parseDoc, renderDoc, newId, ID_RE } = require('./util');
+const { paths, sessionKey, mkdirp, readJson, writeJsonAtomic, writeFileAtomic, parseDoc, renderDoc, newId, ID_RE } = require('./util');
 
 function listProjects() {
   try {
@@ -68,7 +68,7 @@ function deleteLog(log) {
 
 // ---------- ledger: one small file per session, so concurrent scouts never race ----------
 
-const ledgerFile = (sid) => path.join(paths.sessions(), `${String(sid).replace(/[^\w-]/g, '')}.json`);
+const ledgerFile = (sid) => path.join(paths.sessions(), `${sessionKey(sid)}.json`);
 const getLedger = (sid) => readJson(ledgerFile(sid), null);
 function setLedger(sid, patch) {
   const next = { ...(getLedger(sid) || {}), ...patch, sessionId: sid, at: new Date().toISOString() };
@@ -78,7 +78,7 @@ function setLedger(sid, patch) {
 
 // ---------- pending marks for sessions that have no log yet ----------
 
-const marksFile = (sid) => path.join(paths.marks(), `${String(sid).replace(/[^\w-]/g, '')}.json`);
+const marksFile = (sid) => path.join(paths.marks(), `${sessionKey(sid)}.json`);
 const getMarks = (sid) => readJson(marksFile(sid), []);
 function addPendingMark(sid, note) {
   const marks = getMarks(sid);

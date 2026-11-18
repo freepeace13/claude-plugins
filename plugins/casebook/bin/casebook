@@ -11,7 +11,8 @@ const { resolveProject } = require('../lib/project');
 const { scoutSession, sweep } = require('../lib/scout');
 const F = require('../lib/filter');
 
-const BOOL = new Set(['all', 'marked', 'unmarked', 'written', 'unwritten', 'json', 'path', 'yes', 'force', 'dry-run', 'help']);
+const BOOL = new Set(['all', 'marked', 'unmarked', 'written', 'unwritten', 'json', 'path', 'yes', 'force', 'dry-run', 'help',
+  'auto', 'live', 'pending', 'background', 'quiet']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -43,11 +44,10 @@ function readStdinJson() {
 }
 
 function detach(args) {
-  const child = spawn(process.execPath, [__filename, ...args], {
-    detached: true,
-    stdio: 'ignore',
-    env: { ...process.env },
-  });
+  // Pin the child to this profile, including when we were started from a terminal with --profile.
+  const env = { ...process.env, CASEBOOK_PROFILE: U.paths.profileName() };
+  if (U.paths.claudeConfigDirExplicit()) env.CLAUDE_CONFIG_DIR = U.paths.claudeConfigDir();
+  const child = spawn(process.execPath, [__filename, ...args], { detached: true, stdio: 'ignore', env });
   child.unref();
 }
 
@@ -64,10 +64,51 @@ function pad(s, n) {
 function row(log) {
   const m = log.meta;
   const date = String(m.started_at || m.created_at || '').slice(0, 10);
-  return `${pad(m.id, 10)} ${pad(date, 11)} ${pad(m.score ?? '-', 5)} ${pad(m.marked ? '📌' : '', 3)} ${pad(F.isWritten(log) ? '✓' : '', 3)} ${m.title || ''}`;
+  const score = `${m.score ?? '-'}${m.partial ? '…' : ''}`;
+  return `${pad(m.id, 10)} ${pad(date, 11)} ${pad(score, 5)} ${pad(m.marked ? '📌' : '', 3)} ${pad(F.isWritten(log) ? '✓' : '', 3)} ${m.title || ''}`;
 }
 
 const HEADER = `${pad('ID', 10)} ${pad('DATE', 11)} ${pad('SCORE', 5)} ${pad('MRK', 3)} ${pad('WRT', 3)} TITLE`;
+
+function parseLimit(v, fallback) {
+  if (v === undefined) return fallback;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) fail(`--limit must be a positive whole number, got "${v}"`);
+  return n;
+}
+
+function describe(r) {
+  const c = r.status === 'created' ? 'Created' : 'Updated';
+  if (r.status === 'created' || r.status === 'updated') return `${c} ${r.logId} (score ${r.score}${r.partial ? ', partial' : ''}): ${r.title}`;
+  if (r.status === 'running') return r.reason;
+  if (r.status === 'error') return `Failed: ${r.reason}`;
+  return `Skipped: ${r.reason}`;
+}
+
+/** `scout --pending`: the catch-up pass, run on demand. Auto-mode gates still apply to each session. */
+function scoutPending(config, opt) {
+  const meta = U.readJson(U.paths.meta(), {});
+  const o = {
+    since: meta.installedAt ? new Date(meta.installedAt) : null,
+    exclude: opt.exclude,
+    limit: parseLimit(opt.limit, config.sweep.maxPerRun),
+    settleMinutes: 0,
+    partialIfRecent: true,
+  };
+  const id8 = (r) => r.sessionId.slice(0, 8);
+  if (opt.dryRun) {
+    const { results } = sweep(config, { ...o, dryRun: true });
+    if (opt.json) return out(JSON.stringify(results.map(({ sessionId, project, mtimeMs, userTurns }) => ({ sessionId, project, modified: new Date(mtimeMs).toISOString(), userTurns })), null, 2));
+    if (!results.length) return out('No sessions to catch up on.');
+    for (const r of results) out(`${id8(r)}  ${pad(r.project || '?', 24)} ${new Date(r.mtimeMs).toISOString().slice(0, 16).replace('T', ' ')}  ${r.userTurns ?? '?'} turns`);
+    return;
+  }
+  const { results, locked } = sweep(config, o);
+  if (locked) return out('A catch-up is already running. Check /casebook:list in a minute.');
+  if (opt.json) return out(JSON.stringify(results.map(({ sessionId, status, logId, reason, score, title, partial }) => ({ sessionId, status, logId, reason, score, title, partial }))));
+  if (!results.length) return out('No sessions to catch up on.');
+  for (const r of results) out(`${id8(r)}  ${describe(r)}`);
+}
 
 // ------------------------------------------------------------------ commands
 
@@ -80,7 +121,7 @@ const commands = {
     try {
       U.loadConfig();
       if (pos[0] === 'session-end' && sid) {
-        detach(['scout', '--session', sid, ...(input.transcript_path ? ['--transcript', input.transcript_path] : []), ...(input.cwd ? ['--cwd', input.cwd] : []), '--quiet', '1']);
+        detach(['scout', '--session', sid, ...(input.transcript_path ? ['--transcript', input.transcript_path] : []), ...(input.cwd ? ['--cwd', input.cwd] : []), '--auto', '--quiet']);
       } else if (pos[0] === 'session-start') {
         detach(['maintenance', ...(sid ? ['--exclude', sid] : [])]);
       }
@@ -89,16 +130,31 @@ const commands = {
     }
   },
 
-  scout({ opt }) {
+  scout({ pos, opt }) {
     const config = U.loadConfig();
-    if (!opt.session) fail('scout needs --session <id>');
-    try {
-      const r = scoutSession({ sessionId: opt.session, transcriptPath: opt.transcript, cwd: opt.cwd, force: opt.force }, config);
-      if (!opt.quiet) out(JSON.stringify(r));
-    } catch (err) {
-      U.logError(`scout failed for ${opt.session}`, err);
-      if (!opt.quiet) fail(err.message);
+    if (opt.pending) return scoutPending(config, opt);
+    const sessionId = opt.session || pos[0];
+    if (!sessionId) fail('scout needs --session <id>, a session id, or --pending');
+
+    if (opt.background) {
+      detach(['scout', '--session', sessionId, ...(opt.transcript ? ['--transcript', opt.transcript] : []), ...(opt.cwd ? ['--cwd', opt.cwd] : []),
+        ...(opt.live ? ['--live'] : []), ...(opt.force ? ['--force'] : []), ...(opt.auto ? ['--auto'] : []), '--quiet']);
+      return opt.json ? out(JSON.stringify({ status: 'background' })) : out('Scouting in the background. Run /casebook:list in a minute.');
     }
+
+    let r;
+    try {
+      r = scoutSession({ sessionId, transcriptPath: opt.transcript, cwd: opt.cwd, force: Boolean(opt.force), live: Boolean(opt.live), mode: opt.auto ? 'auto' : 'manual' }, config);
+    } catch (err) {
+      U.logError(`scout failed for ${sessionId}`, err);
+      if (opt.quiet) return;
+      fail(`scout failed: ${err.message}`);
+    }
+    if (opt.quiet) {
+      if (r.status === 'running' || (r.status === 'skipped' && r.reason === 'transcript not found')) U.logError(`scout for ${sessionId} not run: ${r.reason}`);
+      return;
+    }
+    out(opt.json ? JSON.stringify(r) : describe(r));
   },
 
   maintenance({ opt }) {
@@ -114,6 +170,16 @@ const commands = {
     }
   },
 
+  profiles({ opt }) {
+    const list = U.listProfiles();
+    if (opt.json) return out(JSON.stringify(list, null, 2));
+    if (!list.length) return out('No casebook stores yet.');
+    const w = Math.max(7, ...list.map((p) => p.name.length));
+    const wd = Math.max(10, ...list.map((p) => String(p.claudeConfigDir || '-').length));
+    out(`  ${pad('PROFILE', w)}  ${pad('CONFIG DIR', wd)}  LOGS  LAST LOG`);
+    for (const p of list) out(`${p.current ? '*' : ' '} ${pad(p.name, w)}  ${pad(p.claudeConfigDir || '-', wd)}  ${String(p.logs).padStart(4)}  ${p.lastLog || '-'}`);
+  },
+
   list({ opt }) {
     const config = U.loadConfig();
     const project = currentProject(opt, config);
@@ -126,6 +192,7 @@ const commands = {
     if (since) logs = logs.filter((l) => new Date(l.meta.started_at || l.meta.created_at) >= since);
 
     if (opt.json) return out(JSON.stringify(logs.map((l) => ({ ...l.meta, file: l.file })), null, 2));
+    out(`[profile: ${U.paths.profileName()}]`);
     if (!logs.length) {
       const others = store.listProjects().filter((p) => p !== project);
       out(project ? `No casebook logs for "${project}" match.` : 'No casebook logs match.');
@@ -230,16 +297,17 @@ const commands = {
   backfill({ opt }) {
     const config = U.loadConfig();
     const since = U.parseAge(opt.since || '30d');
-    const limit = opt.limit ? Number(opt.limit) : 20;
+    const limit = parseLimit(opt.limit, 20);
     if (!opt.yes) {
       out(`Backfill would scout up to ${limit} past session(s) since ${since.toISOString().slice(0, 10)}, one headless ${config.scout.model} call each.`);
       out('Re-run with --yes to start.');
       return;
     }
-    sweep(config, {
-      since, limit, settleMinutes: 0,
+    const { locked } = sweep(config, {
+      since, limit, settleMinutes: 0, partialIfRecent: true,
       onResult: (c, r) => out(`${c.sessionId.slice(0, 8)}  ${r.status}${r.logId ? ' ' + r.logId : ''}${r.reason ? ' (' + r.reason + ')' : ''}${r.title ? ' — ' + r.title : ''}`),
     });
+    if (locked) out('A catch-up is already running. Check /casebook:list in a minute.');
   },
 
   config() {
@@ -250,12 +318,17 @@ const commands = {
 
   doctor() {
     const config = U.loadConfig();
-    const which = spawnSync(config.scout.command, ['--version'], { encoding: 'utf8' });
+    // Probe the way the real scout runs: CLAUDE_CONFIG_DIR is set only when it matters (see paths.claudeConfigDirExplicit).
+    const probeEnv = { ...process.env };
+    if (U.paths.claudeConfigDirExplicit()) probeEnv.CLAUDE_CONFIG_DIR = U.paths.claudeConfigDir();
+    const which = spawnSync(config.scout.command, ['--version'], { encoding: 'utf8', env: probeEnv });
     const project = resolveProject(process.cwd(), config);
     const meta = U.readJson(U.paths.meta(), {});
     out(`node        ${process.version}`);
-    out(`home        ${U.paths.home()}`);
-    out(`scout       ${config.scout.command} → ${which.status === 0 ? which.stdout.trim() : 'NOT FOUND'} (model ${config.scout.model})`);
+    out(`profile     ${U.paths.profileName()}`);
+    out(`config dir  ${U.paths.claudeConfigDir()}`);
+    out(`store       ${U.paths.home()}`);
+    out(`scout       ${config.scout.command} → ${which.status === 0 ? which.stdout.trim() : 'NOT FOUND'} (model ${config.scout.model}, CLAUDE_CONFIG_DIR ${U.paths.claudeConfigDirExplicit() ? 'set' : 'left unset'})`);
     out(`this dir    project "${project.project}", policy ${project.policy}${project.repo ? `, ${project.repo}` : ''}`);
     out(`logs        ${store.allLogs().length} across ${store.listProjects().length} project(s)`);
     out(`installed   ${meta.installedAt || '-'}`);
@@ -275,16 +348,22 @@ const commands = {
   unmark <id>
   delete <id…>                                     delete specific logs
   delete [--project P] [--below-score N] [--older-than 30d] [--unmarked] [--written|--unwritten] [--yes]
+  scout [<session-id>] [--live] [--background] [--force]   scout one session now (default: manual)
+  scout --pending [--dry-run] [--limit N] [--exclude <session-id>]   catch up on missed sessions now
+  profiles [--json]                                list every profile's store
   backfill [--since 30d] [--limit 20] [--yes]      scout past sessions
   written <id…> --file <path>                      record that logs were written up
   out-path --project P --title T [--dir D]         where a case study file should go
-  config | doctor | help`);
+  config | doctor | help\n\nGlobal: --profile <name> runs against another profile's store (see: casebook profiles).`);
   },
 };
 
 const { pos, opt } = parseArgs(process.argv.slice(2));
 const name = pos.shift() || 'help';
 const fn = commands[name];
+if ('profile' in opt && fn && !opt.help && name !== 'help') {
+  try { U.useProfile(opt.profile); } catch (err) { fail(err.message); }
+}
 if (!fn || opt.help) commands.help();
 else {
   try {

@@ -1,11 +1,11 @@
 ---
 name: list
 description: List casebook logs (potential case studies) for the current project or all projects, with IDs, scores and marks. Use when the user asks what is in their casebook or which sessions could become case studies.
-argument-hint: "[--marked] [--all | --project <name>] [--min-score N] [--unwritten | --written] [--since 30d]"
+argument-hint: "[--marked] [--all | --project <name>] [--min-score N] [--unwritten | --written] [--since 30d] [--profile <name>]"
 allowed-tools: Bash(casebook:*)
 ---
 
-Run `casebook list $ARGUMENTS` in the current directory. With no `--project` or `--all`, it lists the project of the current repository.
+Run `casebook list $ARGUMENTS` in the current directory. Logs are kept per Claude config directory (profile); the first line of the output names the profile, and `--profile <name>` shows another one. With no `--project` or `--all`, it lists the project of the current repository.
 
 If `casebook` is not on PATH, run `node "${CLAUDE_PLUGIN_ROOT}/bin/casebook" list $ARGUMENTS` instead.
 
