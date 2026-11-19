@@ -964,3 +964,62 @@ test('discovery: new angles, nothing-new topics, deleted topics, and the score, 
   assert.match(s.run(['discover'], { env }).out, /No topic matched/);
   assert.match(s.run(['discover', '--force'], { env }).out, /Testing reconnects across deploys/);
 });
+
+// ---------------------------------------------------------------- topics review follow-ups
+
+test('a session mark on a session with several logs is placed by the next auto scan, even with little new activity', () => {
+  const s = sandbox();
+  const tp = s.transcript('pm', 3);
+  const two = reply(topic({ title: 'Debugging the reconnect storm' }), topic({ title: 'Choosing Redis Streams', angle: 'architecture' }));
+  s.run(['scout', '--session', 'pm', '--transcript', tp, '--auto'], { env: two });
+  const dbg = logsJson(s).find((l) => l.title === 'Debugging the reconnect storm').id;
+  s.run(['mark', '--session', 'pm', 'the', 'root', 'cause']);
+  const tp2 = s.transcript('pm', 4); // one more turn: far below regrowTurns
+  const r = JSON.parse(s.run(['scout', '--session', 'pm', '--transcript', tp2, '--auto', '--json'], {
+    env: reply(topic({ title: 'Debugging the reconnect storm', same_as: [dbg], marks: true }), topic({ title: 'Choosing Redis Streams', angle: 'architecture' })),
+  }).out);
+  assert.strictEqual(r.status, 'updated');
+  assert.match(s.run(['show', dbg]).out, /"note":"the root cause"/);
+});
+
+test('a one-session rescan never lowers the score of a log that spans more sessions, and keeps it partial', () => {
+  const s = sandbox();
+  const id = JSON.parse(s.run(['scout', '--session', 'w1', '--transcript', s.transcript('w1', 3), '--json'], { env: { STUB_SCORE: '5' } }).out).logId;
+  s.run(['scout', '--session', 'w2', '--transcript', s.transcript('w2', 3)], { env: reply(topic({ title: 'Reconnects over two days', same_as: [id], score: 5 })) });
+  const long = 'x'.repeat(5000);
+  const file = s.run(['show', id, '--path']).out;
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('## Problem', `## Problem\n${long}END-OF-LONG`));
+  const r = JSON.parse(s.run(['scout', '--session', 'w2', '--json'], { env: reply(topic({ title: 'Reconnects over two days', same_as: [id], score: 3 })) }).out);
+  assert.strictEqual(r.score, 5);
+  assert.match(s.run(['show', id]).out, /score: 5/);
+  assert.match(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8'), /END-OF-LONG/, 'the model sees the whole log it may rewrite');
+});
+
+test('an unknown same_as id does not let a low-score topic past the gate', () => {
+  const s = sandbox();
+  const r = s.run(['scout', '--session', 'ghost', '--transcript', s.transcript('ghost', 3), '--auto'], { env: reply(topic({ title: 'Renamed a variable', score: 1, same_as: ['cb-zzzzzz'] })) });
+  assert.strictEqual(r.out, 'Skipped: score 1', 'the made-up id is ignored, so the score gate applies');
+  assert.strictEqual(logsJson(s).length, 0);
+});
+
+test('a deleted topic stays deleted when reworded; a session that gets a log again is scanned automatically again', () => {
+  const s = sandbox();
+  const tp = s.transcript('tomb', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'tomb', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixing websocket reconnect storms' })) }).out).logId;
+  s.run(['delete', id]);
+  assert.match(s.run(['scout', '--session', 'tomb'], { env: reply(topic({ title: 'Fixing WebSocket reconnect storm on deploy' })) }).out, /ones you deleted/);
+  assert.match(s.run(['scout', '--session', 'tomb', '--auto']).out, /logs were deleted/);
+
+  // Discovery logs a new angle for it: the session is no longer treated as deleted.
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Load-testing the gateway', angle: 'testing' })) }).out)[1];
+  s.run(['discover', 'pick', did, '1']);
+  assert.doesNotMatch(s.run(['scout', '--session', 'tomb', '--auto']).out, /logs were deleted/);
+});
+
+test('tags with regex characters are matched literally and never crash discovery', () => {
+  const s = sandbox();
+  s.transcript('rx', 3);
+  const r = s.run(['discover', '--dry-run', '--tags', 'c(,[slug]']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.out, /0 eligible/);
+});

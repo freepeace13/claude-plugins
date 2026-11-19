@@ -152,7 +152,8 @@ function linkSessions(sessions) {
 
 const norm = (s) => String(s || '').toLowerCase().replace(/[-_/]+/g, ' ');
 const keywords = (note) => [...new Set(norm(note).split(/[^a-z0-9.+#]+/).filter((w) => w.length >= 3 && !STOP.has(w) && !/^\d+$/.test(w)))];
-const hasWord = (text, w) => new RegExp(`(^|[^a-z0-9])${w.replace(/[.+#]/g, '\\$&')}`, 'i').test(text);
+// Whole words only, and any character in a tag or file name is taken literally.
+const hasWord = (text, w) => new RegExp(`(^|[^a-z0-9])${w.replace(/[.*+?^${}()|[\]\\#/-]/g, '\\$&')}(?![a-z0-9])`, 'i').test(text);
 
 function groupText(g) {
   return norm(g.members.map((m) => [m.aiTitle, m.text, ...m.logs.flatMap((l) => [l.title, ...l.tags]), ...m.files.map(base)].join('\n')).join('\n'));

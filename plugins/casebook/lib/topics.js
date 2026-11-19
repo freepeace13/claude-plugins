@@ -10,7 +10,6 @@ const store = require('./store');
 
 const NEAR_DAYS = 14;     // logs of the same project this close in time are shown to the model
 const MAX_CONTEXT = 8;    // existing logs shown to the model
-const BODY_CHARS = 3000;  // of each existing log's notes
 
 const t0 = (iso) => (iso ? new Date(iso).getTime() : 0);
 const normTitle = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -59,8 +58,8 @@ function renderExisting(logs, sids, deleted) {
     const mine = sessionsOf(l).filter((s) => sids.includes(s)).length;
     const others = sessionsOf(l).length - mine;
     const where = mine ? `draws on ${mine === sids.length && sids.length === 1 ? 'this session' : `${mine} of these sessions`}${others ? ` and ${others} other(s)` : ''}` : `from other sessions of this project`;
-    const body = l.body.length > BODY_CHARS ? `${l.body.slice(0, BODY_CHARS)} …` : l.body;
-    parts.push(`### ${m.id} · ${m.angle || 'general'} · score ${m.score ?? '-'} · ${where}\n${body.trim()}`);
+    // In full: a topic that matches this log rewrites all of its notes, so the model must see all of them.
+    parts.push(`### ${m.id} · ${m.angle || 'general'} · score ${m.score ?? '-'} · ${where}\n${l.body.trim()}`);
   }
   if (deleted.length) {
     parts.push('### Deleted by the developer (never return these topics)');
@@ -105,7 +104,18 @@ function parseTopics(text, max) {
     .sort((a, b) => b.score - a.score).slice(0, max || 3);
 }
 
-const isTombstoned = (topic, deleted) => deleted.some((d) => normTitle(d.title) === normTitle(topic.title));
+// A deleted topic stays deleted even when the model words its title a little differently: titles that share
+// most of their words (plurals folded, filler dropped) count as the same topic.
+const TITLE_FILLER = new Set(['a', 'an', 'the', 'and', 'or', 'of', 'for', 'to', 'in', 'on', 'with', 'by', 'from', 'at', 'after', 'via']);
+const titleWords = (s) => new Set(normTitle(s).split(' ').filter((w) => w && !TITLE_FILLER.has(w)).map((w) => (w.length > 3 ? w.replace(/s$/, '') : w)));
+function sameTitle(a, b) {
+  const x = titleWords(a);
+  const y = titleWords(b);
+  if (!x.size || !y.size) return normTitle(a) === normTitle(b);
+  const shared = [...x].filter((w) => y.has(w)).length;
+  return shared / new Set([...x, ...y]).size >= 0.6;
+}
+const isTombstoned = (topic, deleted) => deleted.some((d) => sameTitle(d.title, topic.title));
 
 function renderBody(n) {
   const list = (xs) => (xs.length ? xs.map((x) => `- ${x}`).join('\n') : '_none noted_');
@@ -188,7 +198,20 @@ function applyTopic(topic, ctx) {
   meta.marked = meta.marks.length > 0;
   const note = ctx.note || (survivor && survivor.meta.discovery_note);
   if (note) meta.discovery_note = note;
+  // A scan that sees only some of a log's sessions must not lower its score, or call it finished while a
+  // session it did not see may still be running.
+  const unseen = prior.some((l) => sessionsOf(l).some((sid) => !sids.includes(sid)));
+  if (unseen) {
+    meta.score = Math.max(meta.score, ...prior.map((l) => l.meta.score || 0));
+    meta.partial = ctx.partial || prior.some((l) => l.meta.partial === true);
+  }
   const body = renderBody(topic);
+
+  // A session whose logs were all deleted has one again: hooks and catch-ups may scan it again.
+  for (const sid of sids) {
+    const l = store.getLedger(sid);
+    if (l && l.deleted) store.setLedger(sid, { deleted: undefined, deletedAt: undefined });
+  }
 
   if (!survivor) {
     const log = store.createLogFile(ctx.info.project, { ...meta, written_to: [] }, body);
@@ -206,10 +229,10 @@ function applyTopic(topic, ctx) {
     fs.rmSync(l.file, { force: true });
     try { fs.rmdirSync(path.dirname(l.file)); } catch { /* not empty */ }
   }
-  return { status: 'updated', logId: survivor.meta.id, score: topic.score, title: topic.title, angle: meta.angle, merged: merged.map((l) => l.meta.id) };
+  return { status: 'updated', logId: survivor.meta.id, score: meta.score, title: topic.title, angle: meta.angle, merged: merged.map((l) => l.meta.id) };
 }
 
 module.exports = {
   sessionsOf, logsForSessions, contextLogs, tombstones, renderExisting, parseTopics, normalizeTopic,
-  isTombstoned, renderBody, applyTopic, normTitle,
+  isTombstoned, sameTitle, renderBody, applyTopic, normTitle,
 };

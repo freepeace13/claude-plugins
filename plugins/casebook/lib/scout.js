@@ -211,15 +211,20 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
     if (wasPartial && !grew && !live && !(partialIfRecent && recent)) {
       // The session is over (hook) or settled and nothing was added since the partial scout:
       // the notes are already complete, so finish the logs without another model call.
-      const done = mine.filter((l) => l.meta.partial === true);
-      store.withWriteLock(() => { for (const l of done) { l.meta.partial = false; store.saveLog(l); } });
+      // Read each log again under the lock: another session's scan may have updated it since.
+      const done = mine.filter((l) => l.meta.partial === true).map((l) => l.meta.id);
+      store.withWriteLock(() => {
+        for (const id of done) { const l = store.findLog(id); if (l && l.meta.partial === true) { l.meta.partial = false; store.saveLog(l); } }
+      });
       store.setLedger(sessionId, { partial: false, size });
       const best = [...mine].sort((a, b) => (b.meta.score || 0) - (a.meta.score || 0))[0];
       if (!best) return { status: 'skipped', reason: 'nothing new since the last scan' };
       return { status: 'updated', logId: best.meta.id, score: best.meta.score, title: best.meta.title, partial: false,
         logs: mine.map((l) => ({ status: 'updated', logId: l.meta.id, score: l.meta.score, title: l.meta.title, angle: l.meta.angle || '' })) };
     }
-    if (!(wasPartial && grew) && t.userTurns - (ledger.userTurns || 0) < (config.sweep.regrowTurns || 8)) {
+    // A pending mark always earns a rescan: with several logs, the mark waits for the scan to place it.
+    const hasPending = store.getMarks(sessionId).length > 0 || t.commandMarks.some((n) => !mine.some((l) => (l.meta.marks || []).some((m) => m.note === n)));
+    if (!(wasPartial && grew) && !hasPending && t.userTurns - (ledger.userTurns || 0) < (config.sweep.regrowTurns || 8)) {
       store.setLedger(sessionId, { size });
       return { status: 'skipped', reason: 'already scanned, not enough new activity' };
     }
@@ -251,6 +256,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   // A topic the developer deleted never comes back (unless --force). A new topic must clear keepMinScore
   // unless it carries a mark; a manual scout keeps at least its best topic.
   const allowed = found.filter((x) => !T.isTombstoned(x, deleted));
+  for (const x of allowed) x.same_as = x.same_as.filter((id) => store.findLog(id));
   let keep = allowed.filter((x) => x.same_as.length || x.score >= config.scout.keepMinScore || (x.marks && pending.length));
   if (manual && !keep.length && allowed.length) keep = [allowed[0]];
   if (!keep.length) {
