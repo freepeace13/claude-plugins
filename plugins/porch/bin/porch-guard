@@ -1,0 +1,38 @@
+#!/usr/bin/env node
+'use strict';
+// PreToolUse guard: block publishing through Porch's MCP tools.
+// Exit 2 with a reason on stderr when status is "published" or is_published is truthy.
+
+function check(input) {
+  const args = (input && input.tool_input) || {};
+  if (args.status === 'published') return 'status "published"';
+  if (args.is_published === true || args.is_published === 'true' || args.is_published === 1) {
+    return 'is_published true';
+  }
+  return null;
+}
+
+module.exports = { check };
+
+if (require.main === module) {
+  let data = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (c) => (data += c));
+  process.stdin.on('end', () => {
+    let input;
+    try {
+      input = JSON.parse(data);
+    } catch {
+      process.stderr.write('porch-guard: could not read the tool input, blocking to be safe.\n');
+      process.exit(2);
+    }
+    const hit = check(input);
+    if (hit) {
+      process.stderr.write(
+        `Blocked: ${hit}. The porch plugin only saves drafts. Publish from the Porch admin.\n`
+      );
+      process.exit(2);
+    }
+    process.exit(0);
+  });
+}

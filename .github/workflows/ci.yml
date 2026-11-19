@@ -20,6 +20,7 @@ jobs:
         run: |
           claude plugin validate .
           claude plugin validate plugins/casebook
+          claude plugin validate plugins/porch
       - run: |
           for f in .claude-plugin/marketplace.json plugins/*/.claude-plugin/plugin.json plugins/*/hooks/hooks.json; do
             node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))" && echo "ok $f"
