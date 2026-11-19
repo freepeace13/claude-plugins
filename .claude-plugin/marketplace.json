@@ -32,7 +32,7 @@
     {
       "name": "porch",
       "source": "./plugins/porch",
-      "description": "Turn notes or a prompt into a reviewed article or case study and save it to Porch as a draft. You publish it in the admin.",
+      "description": "Turn a notes file, folder or draft into a reviewed article or case study and save it to Porch as a draft. You publish it in the admin.",
       "author": {
         "name": "Kin Basco",
         "url": "https://github.com/freepeace13"

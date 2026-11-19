@@ -13,4 +13,4 @@ The body is one Markdown string. Porch renders it with `Str::markdown` (GitHub-f
 | Open with a paragraph, not a heading or a "TL;DR" label. | Matches existing articles and the card excerpt. |
 | Case studies use the headings The problem, What I did, The result. | The admin helper text and the MCP tool suggest them. |
 
-The draft file keeps its frontmatter and a self-check block while in `.porch/`. `/porch:push` removes both before sending the body.
+The draft file keeps its frontmatter and a self-check block while in its work folder. `/porch:push` removes both before sending the body.
