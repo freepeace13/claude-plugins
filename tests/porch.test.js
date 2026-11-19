@@ -243,7 +243,7 @@ test('brief skill checks the intake before porch init; draft gates on the check'
   const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
   const brief = read('skills/brief/SKILL.md');
   const check = brief.indexOf('**Check the intake**');
-  const init = brief.indexOf('porch init "');
+  const init = brief.indexOf("porch init '");
   assert.ok(check > 0 && init > check, 'intake check comes before porch init');
   assert.match(brief, /references\/intake\.md/);
   assert.doesNotMatch(brief.slice(0, init), /porch delete/);
@@ -513,4 +513,66 @@ test('draft_source must be a file inside intake/, and draft copies it', () => {
   const draft = fs.readFileSync(path.join(ROOT, 'skills/draft/SKILL.md'), 'utf8');
   assert.match(draft, /copy `dir\/<draft_source>` to `dir\/draft\.md`/);
   assert.match(fs.readFileSync(path.join(ROOT, 'skills/brief/SKILL.md'), 'utf8'), /draft_source=intake\//);
+});
+
+test('import --json stays valid JSON when a folder was already imported', () => {
+  const { base, cli } = sandbox();
+  const dir = path.join(base, 'p/.porch/a');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'brief.md'), '---\ntype: article\nslug: a\n---\n');
+  assert.strictEqual(cli('import', dir, '--json').status, 0);
+  const r = cli('import', dir, '--json');
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(JSON.parse(r.stdout), []);
+  assert.match(r.stderr, /already imported/);
+});
+
+test('import checks every folder before creating any', () => {
+  const { base, cli } = sandbox();
+  const a = path.join(base, 'p/.porch/a');
+  const b = path.join(base, 'p/.porch/b');
+  fs.mkdirSync(a, { recursive: true });
+  fs.mkdirSync(b, { recursive: true });
+  fs.writeFileSync(path.join(a, 'brief.md'), '---\ntype: article\nslug: a\n---\n');
+  fs.writeFileSync(path.join(b, 'brief.md'), '---\ntype: post\nslug: b\n---\n');
+  assert.strictEqual(cli('import', a, b, '--json').status, 1);
+  assert.deepStrictEqual(JSON.parse(cli('list', '--json').stdout), []);
+});
+
+test('a value flag refuses another flag as its value, and a boolean flag refuses a value', () => {
+  const { base, cli } = sandbox();
+  fs.writeFileSync(path.join(base, 'n.md'), 'x');
+  const r = cli('init', path.join(base, 'n.md'), '--type', 'article', '--topic', '--json');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /--topic needs a value/);
+  assert.strictEqual(cli('list', '--json=false').status, 1);
+  assert.deepStrictEqual(JSON.parse(cli('list', '--json').stdout), []);
+});
+
+test('default title keeps dots in folder names and names dotfiles', () => {
+  const { base, cli } = sandbox();
+  const dir = path.join(base, 'api.v2');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'a.md'), 'a');
+  fs.writeFileSync(path.join(base, '.notes'), 'n');
+  const title = (p) => JSON.parse(cli('init', p, '--type', 'article', '--topic', 'T', '--json').stdout).title;
+  assert.strictEqual(title(dir), 'api.v2');
+  assert.strictEqual(title(path.join(base, '.notes')), '.notes');
+});
+
+test('skills pass values in single quotes, allow spaced paths, and keep drafts pushable', () => {
+  const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+  const brief = read('skills/brief/SKILL.md');
+  const draft = read('skills/draft/SKILL.md');
+  for (const [f, s] of [['brief', brief], ['draft', draft]]) {
+    assert.doesNotMatch(s, /(--topic|--note|title=|topic=|note=) ?"/, f);
+  }
+  assert.match(brief, /--topic '<topic>'/);
+  assert.match(brief, /first word that is exactly `article` or `case-study`/);
+  assert.match(brief, /note='<note>'/);
+  // draft_source is checked before the status changes, and finished statuses are not re-drafted silently.
+  assert.ok(draft.indexOf('draft_source` is not set') < draft.indexOf('status=drafting'));
+  assert.match(draft, /`approved` or `pushed`/);
+  assert.match(draft, /no frontmatter with `type`, `title` and `slug`/);
+  assert.match(read('agents/writer.md'), /finished draft, copied in unchanged/);
 });

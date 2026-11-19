@@ -53,9 +53,11 @@ function parseArgs(argv, bools) {
     if (a === '--') { pos.push(...argv.slice(i + 1)); break; }
     if (a.startsWith('--')) {
       const [k, inline] = a.slice(2).split(/=(.*)/s);
-      if (inline !== undefined) opt[k] = inline;
-      else if (bools.has(k)) opt[k] = true;
-      else if (i + 1 >= argv.length) fail(`--${k} needs a value`);
+      if (bools.has(k)) {
+        if (inline !== undefined) fail(`--${k} takes no value`);
+        opt[k] = true;
+      } else if (inline !== undefined) opt[k] = inline;
+      else if (i + 1 >= argv.length || argv[i + 1].startsWith('--')) fail(`--${k} needs a value`);
       else opt[k] = argv[++i];
     } else pos.push(a);
   }
@@ -253,7 +255,7 @@ function cmdInit(argv) {
       id,
       type: opt.type,
     status: 'new',
-    title: name.replace(/\.[^.]+$/, ''),
+    title: (st.isDirectory() ? name : name.replace(/(.)\.[^.]+$/, '$1')) || name,
     topic: String(opt.topic).trim(),
     slug: '',
     tags: [],
@@ -280,8 +282,8 @@ function cmdInit(argv) {
 function cmdImport(argv) {
   const { pos, opt } = parseArgs(argv, new Set(['json']));
   if (!pos.length) fail('usage: porch import <project>/.porch/<slug>… [--json]');
-  const done = [];
-  const voices = new Set();
+  // Check every folder before creating anything, so a bad one later in the list leaves nothing half done.
+  const plan = [];
   for (const src of pos) {
     let abs;
     try { abs = fs.realpathSync(path.resolve(expandHome(src))); } catch { fail(`no such folder: ${src}`); }
@@ -291,8 +293,18 @@ function cmdImport(argv) {
     if (!brief && !draft) fail(`${abs} has no brief.md or draft.md; is it a .porch/<slug> folder?`);
     const type = (brief && brief.type) || (draft && draft.type);
     if (!has(TYPES, type)) fail(`${abs}: type must be article or case-study, got "${type || ''}"`);
+    plan.push({ abs, brief, draft, type });
+  }
+  const done = [];
+  const voices = new Set();
+  for (const { abs, brief, draft, type } of plan) {
     const dup = all().find((w) => w.state.source === abs);
-    if (dup) { out(`skipped ${abs}: already imported as ${dup.state.id.slice(0, 8)}`); continue; }
+    if (dup) {
+      const msg = `skipped ${abs}: already imported as ${dup.state.id.slice(0, 8)}`;
+      if (opt.json) process.stderr.write(`porch: ${msg}\n`);
+      else out(msg);
+      continue;
+    }
 
     const slug = (brief && brief.slug) || (draft && draft.slug) || path.basename(abs);
     let review = '';

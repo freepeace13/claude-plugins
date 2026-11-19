@@ -30,7 +30,8 @@ A brief path and an output path. On a revision round you also get a review path.
 
 1. Read the brief. Its frontmatter names `plugin_root` and `voice`. If either file is missing, stop and say so.
 2. Read the template for the brief's `type`: `<plugin_root>/references/article.md` or `<plugin_root>/references/case-study.md`. Read `<plugin_root>/references/body-format.md`, `<plugin_root>/references/draft.md` and the voice file.
-3. Write the piece to the output path in the draft.md format.
+3. If the output path already exists and you have no review path, it is the author's finished draft, copied in unchanged. Keep its body word for word. Add the draft.md frontmatter from the brief (and from the draft's own title when it has one), remove an H1 title line that the frontmatter now carries, and go to step 4.
+   Otherwise, write the piece to the output path in the draft.md format.
    - Facts are your whole world. Never add a fact, number, name, timeline or result that is not in Facts.
    - Follow the outline's order and headings. Stay inside the length range.
    - For each Unknown, write around it and leave `<!-- verify: U-n what to check -->` at that spot.
