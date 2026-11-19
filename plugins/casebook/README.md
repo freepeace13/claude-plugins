@@ -2,8 +2,10 @@
 
 Casebook keeps a running record of the case studies hiding in your Claude Code sessions. Install it once and it works in every project.
 
-- **Captures automatically.** When a session ends, a cheap headless scout (Haiku by default) reads the transcript and the git commits made during it. It scores the session from 1 to 5 as a potential case study and writes a structured log. Routine sessions are dropped.
+- **Captures automatically.** When a session ends, a cheap headless scout (Haiku by default) reads the transcript and the git commits made during it. It pulls out the session's potential case studies (up to 3 topics, each from its own angle), scores each from 1 to 5 and writes one structured log per topic. Routine sessions are dropped.
 - **Lets you flag the good ones.** Run `/casebook:mark "the queue redesign"` at the moment it matters. A marked session is always logged, and the scout focuses on what you marked.
+- **Logs topics, not sessions.** A session can feed several logs, and a log can draw on several sessions. Every scan sees the logs already near it, so a topic is updated rather than logged twice: each log is unique in its profile.
+- **Finds topics across sessions.** Work carried over several sessions (a resumed branch, a handoff file, one pull request) belongs in one log. `/casebook:discovery` links those sessions, scans them again for topics, ranks the best 3 and logs the one you pick.
 - **Lists them per project** with IDs, scores and marks. `--marked` shows only what you flagged.
 - **Writes case studies by ID.** `/casebook:write cb-7k2m9q cb-p3x8aa` merges logs into one publish-ready Markdown file, with frontmatter that a downstream tool (a CMS agent, a static site) can consume.
 - **Cleans up.** You can delete one log, or delete a filtered batch.
@@ -32,6 +34,7 @@ casebook config      # prints the path, ~/.casebook/config.json
 | `/casebook:mark <id> [note]` | Mark an existing log. |
 | `/casebook:list [--marked] [--all \| --project P] [--min-score N] [--unwritten] [--since 30d]` | List logs. Defaults to the current repository's project. |
 | `/casebook:scout [<session-id> \| --pending] [--background] [--force]` | Scout the current session now (or another one, or all missed sessions). See Manual scouting. |
+| `/casebook:discovery [note] [--score N] [--tags a,b] [--all \| --project P] [--since 90d]` | Find topics across linked sessions, rank the best 3 and log the one you pick. See Discovery. |
 | `/casebook:show <id>` | Read one log. |
 | `/casebook:write <id…> [--out dir] [instructions]` | Write a case study `.md` with the `case-study-writer` agent. |
 | `/casebook:delete <id…>` | Delete specific logs. |
@@ -61,8 +64,8 @@ next session starts ─► SessionStart hook ─► (detached) sweep missed sess
 - **Never blocks you.** Both hooks hand off to a detached process and return immediately. They never print anything, so no text gets injected into your session.
 - **No recursion.** The scout runs with `CASEBOOK_SCOUT=1`, `--restricted` (no user settings, so no plugins) and `--no-session-persistence` (no transcript of its own).
 - **The sweep** catches sessions whose SessionEnd never fired, such as a killed terminal or a crash. It scouts at most `sweep.maxPerRun` per start, and only sessions from after installation. Use `casebook backfill --since 30d --yes` to process older ones.
-- **Resumed sessions** are scouted again once they've grown by `sweep.regrowTurns` turns. The same log is updated and keeps its ID and marks.
-- **Deleted logs stay deleted.** Their sessions are never scouted again.
+- **Resumed sessions** are scanned again once they've grown by `sweep.regrowTurns` turns. Topics already logged are updated and keep their IDs and marks; a new angle becomes a new log.
+- **Deleted topics stay deleted.** No later scan logs them again. A session whose logs were all deleted is not scanned automatically any more; `/casebook:scout <id>` can still look in it for other topics.
 - **Cost.** Sessions with fewer than `scout.minTurns` user turns are skipped unless marked. Transcripts are condensed (tool output dropped, the middle elided past `scout.maxChars`) before the single Haiku call.
 
 ## Storage
@@ -72,7 +75,7 @@ next session starts ─► SessionStart hook ─► (detached) sweep missed sess
   default/                      one store per Claude config dir, see Profiles
     profile.json                { name, claudeConfigDir, createdAt }
     config.json
-    logs/<project>/cb-xxxxxx.md   one log per session (frontmatter + notes)
+    logs/<project>/cb-xxxxxx.md   one log per topic (frontmatter + notes)
     case-studies/<project>/YYYY-MM-DD-<slug>.md   writer output (or output.dir)
     marks/                      pending marks for sessions still running
     state/                      per-session ledger and locks, install timestamp
@@ -120,11 +123,44 @@ Don't want to wait for the session to end? `/casebook:scout` scouts the current 
 | `/casebook:scout <session-id>` | Scout another session in this profile. |
 | `/casebook:scout --pending` | Catch up on missed sessions. It lists them first and asks before spending model calls. |
 | `… --background` | Return immediately; the log appears in a minute. |
-| `… --force` | Also re-scout a session whose log you deleted. Never overrides a `skip` policy. |
+| `… --force` | Let a scan log a topic you deleted again. Never overrides a `skip` policy. |
 
-A manual scout skips the `minTurns`, `keepMinScore` and `regrowTurns` gates: you asked, so you get a log. A log written while its session may still be running is **partial** (`partial: true`, shown as `4…` in `casebook list`). When the session ends, the normal scout finishes the same log and sets `partial: false`. The case study writer lists partial logs as things to verify.
+A manual scout skips the `minTurns` and `regrowTurns` gates and always keeps at least its best topic: you asked, so you get a log. You can scout a session as often as you like; topics already logged are updated, never duplicated. A log written while its session may still be running is **partial** (`partial: true`, shown as `4…` in `casebook list`). When the session ends, the normal scout finishes the same logs and sets `partial: false`. The case study writer lists partial logs as things to verify.
 
 Scouts of one session never overlap. If one is already running, a manual scout says so and exits, and a hook scout waits for it and then skips if nothing changed.
+
+## Topics
+
+A log is one topic, not one session.
+
+- **A session can feed several logs.** One scan returns up to `scout.maxTopics` topics, each a story that stands on its own: the debugging hunt, and the architecture decision it led to, are two logs with different `angle`s. A new topic must score `keepMinScore` or more unless it carries a mark.
+- **A log can draw on several sessions.** Its frontmatter lists them in `sessions`, with `session_turns` per session. `session_id` is the first of them.
+- **Every log is unique in its profile.** A scan is shown the logs that already draw on its sessions, plus the project's logs from the 14 days around it, and the topics you deleted. For each topic it finds, the model either names the existing log it is the same as (`same_as`), which is then updated with the notes rewritten to cover both, or calls it new. A topic with the same title as a log of the same sessions is never created twice. When a topic matches several logs, they were duplicates: they merge into one. A log already written up survives the merge, so its ID stays valid; the others are listed in `merged_from`.
+- **Re-scanning is always allowed.** `/casebook:scout` and `/casebook:discovery` can scan a session again to pull out another angle.
+- **Marks.** `/casebook:mark` on a session with one log marks that log. With several, the mark waits for the next scan, which gives it to the topic it points to.
+- **Deleting** a log remembers its topic for each of its sessions, so no scan brings it back (`--force` lifts that).
+
+## Discovery
+
+The scout reads one session at a time, so work carried over several sessions tends to end up as one log per session, each telling part of the story. `/casebook:discovery` looks across sessions:
+
+1. **Collect.** It reads every transcript of this profile from the last 90 days (`--since`), in the current project (`--all` or `--project P` to widen it). Skipped projects stay out. Sessions that are already logged stay in: a new scan can find another angle.
+2. **Link.** Sessions of one project are linked when the later one continues the earlier one, within 14 days:
+   - the same pull request,
+   - the same feature branch (not `main`, `master`, `develop` and the like),
+   - a handoff: the later session opens by naming a file the earlier one wrote, or reads a Markdown file it wrote,
+   - a "continue where we left off" opening right after a session that edited the same files,
+   - or most of the same files edited within 3 days.
+
+   A chain holds at most 6 sessions.
+3. **Shortlist.** With `--tags`, a chain must mention at least one tag. Chains are ranked without a model call (existing log scores, linked chains first, how well they match the note and tags) and the top 5 go on.
+4. **Scan.** Each candidate is one headless model call, side by side, with the merged transcripts as chapters of one story and the existing logs (see Topics). It returns up to `scout.maxTopics` topics, each with a score, how well it fits the note and tags, which of the sessions it draws on, and which existing logs it is the same as.
+5. **Rank.** Topics already logged with exactly those sessions are dropped, and so are deleted topics, topics below `--score`, and, with a note or tags, topics that don't fit. The best 3 across all candidates are shown, highest score first, each marked `new log`, `updates <id>` or `merges <ids>`, and you pick one.
+6. **Log.** The chosen topic becomes a new log, or updates (and merges) the logs it matches. `scout_mode` is `discovery` and your note is kept as `discovery_note`.
+
+The note can name a topic or give rules: `/casebook:discovery look for websocket + redis stream worked together --score 4`. A threshold in words works too ("scores > 3").
+
+The CLI equivalent is `casebook discover` (add `--dry-run` to see the chains without any model call), then `casebook discover pick <discovery-id> <n>`.
 
 ## Configuration
 
@@ -137,7 +173,7 @@ Scouts of one session never overlap. If one is already running, a manual scout s
     { "match": "github.com/your-handle/*", "policy": "public" },
     { "match": "*/client-acme/*", "policy": "skip" }
   ],
-  "scout": { "model": "haiku", "minTurns": 4, "keepMinScore": 2, "maxChars": 60000, "timeoutSec": 240, "command": "claude" },
+  "scout": { "model": "haiku", "minTurns": 4, "keepMinScore": 2, "maxTopics": 3, "maxChars": 60000, "timeoutSec": 240, "command": "claude" },
   "sweep": { "enabled": true, "maxPerRun": 3, "settleMinutes": 15, "regrowTurns": 8 },
   "output": { "dir": null }
 }

@@ -186,6 +186,7 @@ const DEFAULT_CONFIG = {
     model: 'haiku',
     minTurns: 4,
     keepMinScore: 2,
+    maxTopics: 3,
     maxChars: 60000,
     timeoutSec: 240,
   },

@@ -4,9 +4,10 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { PLUGIN_ROOT, paths, sessionKey, readJson, writeJsonAtomic, logError } = require('./util');
 const store = require('./store');
+const T = require('./topics');
 const { condense, findTranscript } = require('./transcript');
 const { resolveProject, commitsBetween } = require('./project');
 
@@ -17,7 +18,7 @@ const POLICY_RULES = {
     'Anonymize: this may be client or employer work. Do NOT name the client, company, product, repository, domain, people, or internal URLs. Describe them generically ("a logistics SaaS", "a fintech client"). Keep the technical story, stack and numbers.',
 };
 
-function buildPrompt(t, info, marks, commits) {
+function buildPrompt(t, info, marks, commits, existing = 'None yet.', maxTopics = 3) {
   const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'prompts', 'scout.md'), 'utf8');
   const notes = marks.map((m) => m.note).filter(Boolean);
   const vars = {
@@ -30,6 +31,8 @@ function buildPrompt(t, info, marks, commits) {
     COMMITS: commits.length ? commits.map((c) => `- ${c}`).join('\n') : '- none',
     FILES: t.files.length ? t.files.slice(0, 40).map((f) => `- ${info.root ? path.relative(info.root, f) || f : f}`).join('\n') : '- none',
     TRANSCRIPT: t.text,
+    EXISTING: existing,
+    MAX_TOPICS: String(maxTopics),
   };
   return tpl.replace(/\{\{(\w+)\}\}/g, (_, k) => (k in vars ? vars[k] : ''));
 }
@@ -40,10 +43,24 @@ function childEnv() {
   return env;
 }
 
-function runClaude(prompt, config) {
+function claudeInvocation(config) {
   const cmd = config.scout.command || 'claude';
   const hardened = ['--restricted', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence'];
   const base = ['-p', '--model', config.scout.model || 'haiku', '--tools', '', '--output-format', 'text'];
+  return { cmd, full: [...base, ...hardened], fallback: [...base, '--no-session-persistence'] };
+}
+
+// Older Claude Code versions may not know every hardening flag: retry with the essentials.
+const unknownFlag = (r) => r.status !== 0 && /unknown option|unrecognized/i.test(`${r.stderr}${r.stdout}`);
+
+function checkRun(r) {
+  if (r.error) throw r.error;
+  if (r.status !== 0) throw new Error(`scout exited ${r.status}: ${(r.stderr || r.stdout || '').slice(0, 500)}`);
+  return r.stdout;
+}
+
+function runClaude(prompt, config) {
+  const { cmd, full, fallback } = claudeInvocation(config);
   const opts = {
     input: prompt,
     encoding: 'utf8',
@@ -53,61 +70,37 @@ function runClaude(prompt, config) {
     // Run as the session's profile, even from a terminal with no inherited value.
     env: childEnv(),
   };
-  let r = spawnSync(cmd, [...base, ...hardened], opts);
-  // Older Claude Code versions may not know every hardening flag: retry with the essentials.
-  if (r.status !== 0 && /unknown option|unrecognized/i.test(`${r.stderr}${r.stdout}`)) {
-    r = spawnSync(cmd, [...base, '--no-session-persistence'], opts);
-  }
-  if (r.error) throw r.error;
-  if (r.status !== 0) throw new Error(`scout exited ${r.status}: ${(r.stderr || r.stdout || '').slice(0, 500)}`);
-  return r.stdout;
+  let r = spawnSync(cmd, full, opts);
+  if (unknownFlag(r)) r = spawnSync(cmd, fallback, opts);
+  return checkRun(r);
 }
 
-function parseNotes(text) {
-  const s = String(text);
-  const start = s.indexOf('{');
-  const end = s.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error(`scout returned no JSON: ${s.slice(0, 200)}`);
-  const n = JSON.parse(s.slice(start, end + 1));
-  const arr = (v) => (Array.isArray(v) ? v.map(String).filter(Boolean) : v ? [String(v)] : []);
-  return {
-    score: Math.max(1, Math.min(5, Math.round(Number(n.score) || 1))),
-    title: String(n.title || 'Untitled session').slice(0, 120),
-    summary: String(n.summary || ''),
-    problem: String(n.problem || ''),
-    constraints: arr(n.constraints),
-    approach: String(n.approach || ''),
-    alternatives: arr(n.alternatives),
-    outcome: String(n.outcome || ''),
-    evidence: arr(n.evidence),
-    tags: arr(n.tags).map((t) => t.toLowerCase()).slice(0, 8),
-    quote: String(n.quote || ''),
-    open_threads: arr(n.open_threads),
-  };
-}
-
-function renderBody(n) {
-  const list = (xs) => (xs.length ? xs.map((x) => `- ${x}`).join('\n') : '_none noted_');
-  const para = (s) => s || '_none noted_';
-  return [
-    `# ${n.title}`,
-    '',
-    n.summary,
-    '',
-    '## Problem', para(n.problem), '',
-    '## Constraints', list(n.constraints), '',
-    '## Approach', para(n.approach), '',
-    '## Alternatives considered', list(n.alternatives), '',
-    '## Outcome', para(n.outcome), '',
-    '## Evidence', list(n.evidence), '',
-    '## Key decision', n.quote ? `> ${n.quote}` : '_none noted_', '',
-    '## Open threads', list(n.open_threads), '',
-  ].join('\n');
+/** runClaude without blocking, so several scouts can run side by side. Resolves to stdout. */
+async function runClaudeAsync(prompt, config) {
+  const { cmd, full, fallback } = claudeInvocation(config);
+  const once = (args) => new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let done = false;
+    const finish = (r) => { if (!done) { done = true; clearTimeout(timer); resolve({ stdout, stderr, ...r }); } };
+    const child = spawn(cmd, args, { cwd: os.tmpdir(), env: childEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    const timer = setTimeout(() => { child.kill('SIGTERM'); finish({ status: null, error: new Error(`scout timed out after ${config.scout.timeoutSec || 240}s`) }); },
+      (config.scout.timeoutSec || 240) * 1000);
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (error) => finish({ status: null, error }));
+    child.on('close', (status) => finish({ status }));
+    child.stdin.on('error', () => { /* the child may exit before reading everything */ });
+    child.stdin.end(prompt);
+  });
+  let r = await once(full);
+  if (unknownFlag(r)) r = await once(fallback);
+  return checkRun(r);
 }
 
 /**
- * Scout one session. Returns { status, logId?, reason?, partial? }.
- * status: created | updated | skipped | running
+ * Scout one session for topics. Returns { status, logs?, logId?, reason?, partial? }; logId, score and title are
+ * the best topic's. status: created (at least one new log) | updated | skipped | running
  *
  * args: { sessionId, transcriptPath?, cwd?, mode: 'auto'|'manual', live?, force? }
  *  - auto (hooks, catch-up) applies every gate; waits for a scout already running on the session.
@@ -192,9 +185,8 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const st = fs.statSync(tp);
   const size = st.size;
   const ledger = store.getLedger(sessionId) || {};
-  if (ledger.deleted && !(manual && force)) {
-    return { status: 'skipped', reason: "this session's log was deleted (use --force to scout it again)" };
-  }
+  // Every log from this session was deleted: hooks and catch-ups leave it alone. A manual scout may look again.
+  if (ledger.deleted && !manual) return { status: 'skipped', reason: "this session's logs were deleted" };
 
   const t = condense(tp, config.scout.maxChars);
   const info = resolveProject(cwd || t.cwd, config);
@@ -209,89 +201,77 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const recent = Date.now() - st.mtimeMs < settleMs;
   const partial = live || ((manual || partialIfRecent) && recent);
 
-  const existing = !ledger.deleted && ledger.logId ? store.findLog(ledger.logId) : null;
-  if (!manual && existing) {
-    // An auto scout finishes a partial log if the transcript grew at all; otherwise the regrow threshold applies.
-    const wasPartial = existing.meta.partial === true || ledger.partial === true;
-    // New marks count as new content: the log has to be re-scouted to pick them up.
+  const mine = T.logsForSessions([sessionId]);
+  const scanned = Boolean(ledger.scoutedAt || ledger.logId || mine.length);
+  if (!manual && scanned) {
+    // An auto scout finishes partial logs if the transcript grew at all; otherwise the regrow threshold applies.
+    const wasPartial = mine.some((l) => l.meta.partial === true) || ledger.partial === true;
+    // New marks count as new content: the session has to be scanned again to pick them up.
     const grew = t.userTurns > (ledger.userTurns || 0) || size !== ledger.size || store.getMarks(sessionId).length > 0;
     if (wasPartial && !grew && !live && !(partialIfRecent && recent)) {
       // The session is over (hook) or settled and nothing was added since the partial scout:
-      // the notes are already complete, so finish the log without another model call.
-      existing.meta.partial = false;
-      store.saveLog(existing);
+      // the notes are already complete, so finish the logs without another model call.
+      const done = mine.filter((l) => l.meta.partial === true);
+      store.withWriteLock(() => { for (const l of done) { l.meta.partial = false; store.saveLog(l); } });
       store.setLedger(sessionId, { partial: false, size });
-      return { status: 'updated', logId: existing.meta.id, score: existing.meta.score, title: existing.meta.title, partial: false };
+      const best = [...mine].sort((a, b) => (b.meta.score || 0) - (a.meta.score || 0))[0];
+      if (!best) return { status: 'skipped', reason: 'nothing new since the last scan' };
+      return { status: 'updated', logId: best.meta.id, score: best.meta.score, title: best.meta.title, partial: false,
+        logs: mine.map((l) => ({ status: 'updated', logId: l.meta.id, score: l.meta.score, title: l.meta.title, angle: l.meta.angle || '' })) };
     }
     if (!(wasPartial && grew) && t.userTurns - (ledger.userTurns || 0) < (config.sweep.regrowTurns || 8)) {
       store.setLedger(sessionId, { size });
-      return { status: 'skipped', reason: 'already logged, not enough new activity' };
+      return { status: 'skipped', reason: 'already scanned, not enough new activity' };
     }
   }
 
-  // Marks: ones already on the log, pending ones from /casebook:mark, and any /casebook:mark
-  // invocations found in the transcript (a fallback in case the mark command itself failed).
-  const prior = existing ? existing.meta.marks || [] : [];
+  // Marks: pending ones from /casebook:mark, and any /casebook:mark invocations found in the transcript
+  // (a fallback in case the mark command itself failed) that no log of this session has yet.
   const pending = store.getMarks(sessionId);
-  const seen = new Set([...prior, ...pending].map((m) => m.note));
+  const seen = new Set([...mine.flatMap((l) => l.meta.marks || []), ...pending].map((m) => m.note));
   for (const note of t.commandMarks) {
     if (!seen.has(note)) { pending.push({ at: t.endedAt, note }); seen.add(note); }
   }
-  const marks = [...prior, ...pending];
+  const promptMarks = [...mine.flatMap((l) => l.meta.marks || []), ...pending];
 
-  // The turn and score gates decide whether a session earns a log at all; a session that already has one is just updated.
-  const gated = !manual && !existing && !marks.length;
+  // The turn and score gates decide whether a session earns a log at all; a session already scanned is just rescanned.
+  const gated = !manual && !scanned && !pending.length;
   if (gated && t.userTurns < config.scout.minTurns) {
     store.setLedger(sessionId, { skipped: 'short', userTurns: t.userTurns, size });
     return { status: 'skipped', reason: `only ${t.userTurns} turns` };
   }
 
   const commits = commitsBetween(info.root, t.startedAt, t.endedAt);
-  const notes = parseNotes(runClaude(buildPrompt(t, info, marks, commits), config));
+  const context = T.contextLogs(info.project, [sessionId], t.startedAt, t.endedAt);
+  const deleted = force ? [] : T.tombstones([sessionId]);
+  const maxTopics = config.scout.maxTopics || 3;
+  const prompt = buildPrompt(t, info, promptMarks, commits, T.renderExisting(context, [sessionId], deleted), maxTopics);
+  const found = T.parseTopics(runClaude(prompt, config), maxTopics);
 
-  if (gated && notes.score < config.scout.keepMinScore) {
-    store.setLedger(sessionId, { skipped: 'low-score', score: notes.score, userTurns: t.userTurns, size });
-    return { status: 'skipped', reason: `score ${notes.score}` };
+  // A topic the developer deleted never comes back (unless --force). A new topic must clear keepMinScore
+  // unless it carries a mark; a manual scout keeps at least its best topic.
+  const allowed = found.filter((x) => !T.isTombstoned(x, deleted));
+  let keep = allowed.filter((x) => x.same_as.length || x.score >= config.scout.keepMinScore || (x.marks && pending.length));
+  if (manual && !keep.length && allowed.length) keep = [allowed[0]];
+  if (!keep.length) {
+    const best = found.reduce((n, x) => Math.max(n, x.score), 0);
+    store.setLedger(sessionId, { skipped: allowed.length ? 'low-score' : 'deleted-topics', score: best, userTurns: t.userTurns, size, scoutedAt: new Date().toISOString() });
+    return { status: 'skipped', reason: allowed.length ? `score ${best}` : 'the only topics found were ones you deleted (use --force to log them again)' };
   }
 
-  const meta = {
-    title: notes.title,
-    project: info.project,
-    repo: info.repo || null,
-    policy: info.policy,
-    profile: paths.profileName(),
-    score: notes.score,
-    marked: marks.length > 0,
-    marks,
-    tags: notes.tags,
-    session_id: sessionId,
-    branch: t.branch,
-    started_at: t.startedAt,
-    ended_at: t.endedAt,
-    user_turns: t.userTurns,
-    partial,
-    scouted_at: new Date().toISOString(),
-    scout_mode: mode,
-    commits,
-    files: info.root ? t.files.map((f) => path.relative(info.root, f) || f) : t.files,
-  };
-  const body = renderBody(notes);
-
-  let log;
-  if (existing) {
-    log = existing;
-    log.meta = { ...existing.meta, ...meta, written_to: existing.meta.written_to };
-    log.body = body;
-    store.saveLog(log);
-  } else {
-    log = store.createLogFile(info.project, { ...meta, written_to: [] }, body);
-  }
+  // Pending marks go to the topics they point to, or to the best one.
+  const markTargets = keep.some((x) => x.marks) ? keep.filter((x) => x.marks) : [keep[0]];
+  const member = { sessionId, startedAt: t.startedAt, endedAt: t.endedAt, userTurns: t.userTurns, branch: t.branch, files: t.files };
+  const logs = store.withWriteLock(() => keep.map((topic) => T.applyTopic(topic, {
+    members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits,
+  })));
   store.clearMarks(sessionId);
   store.setLedger(sessionId, {
-    logId: log.meta.id, project: info.project, userTurns: t.userTurns, size, partial,
-    skipped: undefined, deleted: undefined, deletedAt: undefined,
+    project: info.project, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
+    logId: undefined, skipped: undefined, deleted: undefined, deletedAt: undefined,
   });
-  return { status: existing ? 'updated' : 'created', logId: log.meta.id, score: notes.score, title: notes.title, partial };
+  const best = logs[0];
+  return { status: logs.some((l) => l.status === 'created') ? 'created' : 'updated', logId: best.logId, score: best.score, title: best.title, partial, logs };
 }
 
 // ---------- sweep: catch sessions whose SessionEnd hook never ran ----------
@@ -398,4 +378,4 @@ function sweep(config, { since, exclude, limit, settleMinutes, dryRun, partialIf
   return { results, locked: false };
 }
 
-module.exports = { scoutSession, sweep, parseNotes, renderBody, buildPrompt };
+module.exports = { scoutSession, sweep, buildPrompt, runClaude, runClaudeAsync, POLICY_RULES, acquireSessionLock };

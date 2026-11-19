@@ -38,7 +38,8 @@ if (!process.argv.includes('--version')) {
 }
 if (process.env.STUB_DELAY) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,Number(process.env.STUB_DELAY));
 if (process.argv.includes('--version')) { console.log('stub 1.0'); process.exit(0); }
-console.log('Here you go:\\n' + JSON.stringify({score:Number(process.env.STUB_SCORE||4),title:'Fixed websocket reconnect storms',summary:'s',problem:'p',constraints:['c'],approach:'a',alternatives:['x'],outcome:'o',evidence:['e'],tags:['Laravel','reverb'],quote:'q',open_threads:[]}));
+if (process.env.STUB_TOPICS) { console.log(process.env.STUB_TOPICS); process.exit(0); }
+console.log('Here you go:\\n' + JSON.stringify({score:Number(process.env.STUB_SCORE||4),fit:Number(process.env.STUB_FIT||2),belongs:process.env.STUB_BELONGS?JSON.parse(process.env.STUB_BELONGS):[],title:'Fixed websocket reconnect storms',summary:'s',problem:'p',constraints:['c'],approach:'a',alternatives:['x'],outcome:'o',evidence:['e'],tags:['Laravel','reverb'],quote:'q',open_threads:[]}));
 `);
   fs.chmodSync(stub, 0o755);
   fs.mkdirSync(env.CASEBOOK_HOME, { recursive: true });
@@ -243,7 +244,7 @@ test('auto scout of a finished (non-partial) log still needs regrowTurns of new 
   assert.match(again.reason, /not enough new activity/);
 });
 
-test('manual scout: skip policy writes nothing; deleted sessions need --force', () => {
+test('manual scout: skip policy writes nothing; a deleted topic stays deleted unless --force', () => {
   const s = sandbox();
   fs.writeFileSync(path.join(s.repo, '.casebook.json'), JSON.stringify({ policy: 'skip' }));
   const sk = s.run(['scout', '--session', 'sk', '--transcript', s.transcript('sk', 3)]);
@@ -255,8 +256,11 @@ test('manual scout: skip policy writes nothing; deleted sessions need --force', 
 
   const first = JSON.parse(s.run(['scout', '--session', 'del', '--transcript', s.transcript('del', 3), '--json']).out);
   s.run(['delete', first.logId]);
+  // Hooks leave a session whose logs were all deleted alone; a manual scan may look again but not bring the topic back.
+  assert.match(s.run(['scout', '--session', 'del', '--auto']).out, /^Skipped: this session's logs were deleted$/);
   const blocked = s.run(['scout', '--session', 'del']);
-  assert.match(blocked.out, /^Skipped: this session's log was deleted \(use --force to scout it again\)$/);
+  assert.match(blocked.out, /^Skipped: the only topics found were ones you deleted \(use --force to log them again\)$/);
+  assert.match(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8'), /Deleted by the developer[\s\S]*"Fixed websocket reconnect storms"/);
   const forced = JSON.parse(s.run(['scout', '--session', 'del', '--force', '--json']).out);
   assert.strictEqual(forced.status, 'created');
   assert.notStrictEqual(forced.logId, first.logId);
@@ -360,6 +364,7 @@ function profileSandbox() {
   fs.writeFileSync(stub, `#!/usr/bin/env node
 const fs=require('fs');fs.readFileSync(0,'utf8');
 if (process.argv.includes('--version')) { console.log('stub 1.0'); process.exit(0); }
+if (process.env.STUB_TOPICS) { console.log(process.env.STUB_TOPICS); process.exit(0); }
 fs.appendFileSync(${JSON.stringify(path.join(root, 'seen-config-dir.log'))}, (process.env.CLAUDE_CONFIG_DIR||'(unset)') + '\\n');
 console.log(JSON.stringify({score:4,title:'T',summary:'s',problem:'p',constraints:[],approach:'a',alternatives:[],outcome:'o',evidence:[],tags:[],quote:'',open_threads:[]}));
 `);
@@ -803,4 +808,135 @@ test('a relative CASEBOOK_HOME resolves to one absolute store', () => {
   const s = sandbox();
   const r = s.run(['config'], { env: { CASEBOOK_HOME: 'rel-store' }, cwd: s.root });
   assert.strictEqual(r.out.split('\n')[0], path.join(fs.realpathSync(s.root), 'rel-store', 'config.json'));
+});
+
+// ---------- topics and discovery ----------
+
+// A session on a feature branch: the branch is set by a trailing entry, as Claude Code records it.
+const onBranch = (sid, branch) => [{ type: 'system', sessionId: sid, gitBranch: branch }];
+const topic = (o) => ({ score: 4, angle: 'debugging', title: 'T', summary: 's', problem: 'p', approach: 'a', outcome: 'o', tags: ['redis'], ...o });
+const reply = (...topics) => ({ STUB_TOPICS: JSON.stringify({ topics }) });
+const logsJson = (s) => JSON.parse(s.run(['list', '--json']).out);
+
+test('one session can give several topics; a rescan updates them instead of logging them twice', () => {
+  const s = sandbox();
+  const tp = s.transcript('multi', 3);
+  const two = reply(topic({ title: 'Debugging the reconnect storm' }), topic({ title: 'Choosing Redis Streams over pub/sub', angle: 'architecture', score: 3 }));
+  const r = s.run(['scout', '--session', 'multi', '--transcript', tp], { env: two });
+  assert.match(r.out, /^Created cb-\w{6} \(score 4, partial, debugging\): Debugging the reconnect storm\nCreated cb-\w{6} \(score 3, partial, architecture\): Choosing Redis Streams/);
+  const logs = logsJson(s);
+  assert.strictEqual(logs.length, 2);
+  assert.ok(logs.every((l) => l.sessions.join() === 'multi'));
+
+  // The rescan sees both logs and says so; nothing is duplicated, and a new angle becomes a third log.
+  const [dbg, arch] = ['Debugging the reconnect storm', 'Choosing Redis Streams over pub/sub'].map((t) => logs.find((l) => l.title === t).id);
+  const again = s.run(['scout', '--session', 'multi'], {
+    env: reply(topic({ title: 'Debugging the reconnect storm, with the root cause', same_as: [dbg], score: 5 }), topic({ title: 'Choosing Redis Streams over pub/sub', angle: 'architecture' }), topic({ title: 'Load-testing reconnects', angle: 'testing', score: 3 })),
+  });
+  assert.strictEqual(again.status, 0, again.stderr);
+  const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
+  assert.ok(prompt.includes(`### ${dbg} · debugging`) && prompt.includes(`### ${arch} · architecture`), 'the scan sees the existing logs');
+  assert.match(again.out, new RegExp(`Updated ${dbg} \\(score 5, partial, debugging\\): Debugging the reconnect storm, with the root cause`));
+  assert.match(again.out, new RegExp(`Updated ${arch} .*Choosing Redis Streams`), 'same title for the same session is never logged twice');
+  assert.match(again.out, /Created cb-\w{6} \(score 3, partial, testing\): Load-testing reconnects/);
+  assert.strictEqual(logsJson(s).length, 3);
+
+  // With several logs, a session mark waits for the next scan, which gives it to the topic it points to.
+  assert.match(s.run(['mark', '--session', 'multi', 'the', 'root', 'cause']).out, /Marked this session: the root cause/);
+  s.run(['scout', '--session', 'multi'], { env: reply(topic({ title: 'Debugging the reconnect storm, with the root cause', same_as: [dbg], marks: true }), topic({ title: 'Choosing Redis Streams over pub/sub', same_as: [arch] })) });
+  assert.match(s.run(['show', dbg]).out, /"note":"the root cause"/);
+  assert.doesNotMatch(s.run(['show', arch]).out, /the root cause/);
+
+  // Deleting one topic keeps the session scannable for others; the deleted one never comes back.
+  s.run(['delete', arch]);
+  const after = s.run(['scout', '--session', 'multi', '--json'], { env: reply(topic({ title: 'Choosing Redis Streams over pub/sub' }), topic({ title: 'Debugging the reconnect storm, with the root cause', same_as: [dbg] })) });
+  const res = JSON.parse(after.out);
+  assert.deepStrictEqual(res.logs.map((l) => l.logId), [dbg]);
+  assert.ok(!logsJson(s).some((l) => l.title.startsWith('Choosing Redis')));
+});
+
+test('a continued session can extend a log from an earlier session', () => {
+  const s = sandbox();
+  const first = JSON.parse(s.run(['scout', '--session', 'day1', '--transcript', s.transcript('day1', 3), '--json']).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'day2', '--transcript', s.transcript('day2', 3), '--json'], { env: reply(topic({ title: 'Reconnect storms, fixed over two days', same_as: [first] })) }).out);
+  assert.strictEqual(r.status, 'updated');
+  assert.strictEqual(r.logId, first);
+  const doc = s.run(['show', first]).out;
+  assert.match(doc, /sessions: \["day1","day2"\]/);
+  assert.match(doc, /user_turns: 6/);
+  assert.strictEqual(logsJson(s).length, 1);
+});
+
+test('discovery links a feature branch, sees its logs and merges the duplicates on pick', () => {
+  const s = sandbox();
+  const a = s.transcript('chain-a', 3, onBranch('chain-a', 'feat/ws'));
+  const b = s.transcript('chain-b', 3, onBranch('chain-b', 'feat/ws'));
+  s.transcript('lone-c', 3); // on main, unlogged: its own candidate
+  const la = JSON.parse(s.run(['scout', '--session', 'chain-a', '--transcript', a, '--json']).out).logId;
+  const lb = JSON.parse(s.run(['scout', '--session', 'chain-b', '--transcript', b, '--json']).out).logId;
+  assert.notStrictEqual(la, lb, 'one-session scouts log the halves separately');
+  s.run(['mark', la, 'redis streams part']);
+  s.run(['written', lb, '--file', path.join(s.root, 'cs.md')]);
+
+  const before = s.calls().length;
+  const shortlist = JSON.parse(s.run(['discover', '--dry-run', '--json']).out);
+  assert.strictEqual(s.calls().length, before, 'dry run makes no model calls');
+  const chain = shortlist.find((g) => g.sessions.length === 2);
+  assert.deepStrictEqual(chain.sessions.sort(), ['chain-a', 'chain-b']);
+  assert.match(chain.reasons.join(), /same branch feat\/ws/);
+  assert.deepStrictEqual(chain.logs.sort(), [la, lb].sort(), 'logged sessions are scanned again');
+  assert.ok(shortlist.some((g) => g.sessions.join() === 'lone-c'));
+
+  const env = reply(topic({ title: 'Websocket reconnects backed by Redis Streams', same_as: [la, lb], belongs: [1, 2], fit: 2, score: 5 }));
+  const r = s.run(['discover', '--note', 'websocket redis', '--min-score', '3'], { env });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(s.calls().length, before + 2, 'one model call per candidate');
+  assert.match(r.out, /\n1\. \[5…?\] Websocket reconnects backed by Redis Streams\n {3}acme-api · debugging · 2 sessions/);
+  assert.match(r.out, new RegExp(`merges: ${la}, ${lb} \\(duplicates of this topic\\)`));
+  const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
+  assert.match(prompt, /Note: websocket redis/);
+  assert.ok(prompt.includes(`### ${la} ·`), 'the chain scan sees existing logs');
+
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 0, p.stderr);
+  assert.match(p.out, new RegExp(`^Updated ${lb} \\(score 5.*2 sessions\\): Websocket reconnects`), 'the written-up log survives');
+  assert.match(p.out, new RegExp(`Merged into it: ${la}`));
+  const doc = s.run(['show', lb]).out;
+  assert.match(doc, /sessions: \["chain-b","chain-a"\]|sessions: \["chain-a","chain-b"\]/);
+  assert.match(doc, /"note":"redis streams part"/, 'marks carry over');
+  assert.match(doc, /written_to: \[".*cs\.md"\]/);
+  assert.match(doc, new RegExp(`merged_from: \\["${la}"\\]`));
+  assert.ok(!logsJson(s).some((l) => l.id === la));
+  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`Already logged as ${lb}`));
+});
+
+test('discovery: new angles, nothing-new topics, deleted topics, and the score, fit and tag filters', () => {
+  const s = sandbox();
+  const a = s.transcript('fa', 3, onBranch('fa', 'feat/y'));
+  s.transcript('fb', 3, onBranch('fb', 'feat/y'));
+  const la = JSON.parse(s.run(['scout', '--session', 'fa', '--transcript', a, '--json']).out).logId;
+
+  assert.match(s.run(['discover', '--min-score', '5']).out, /No topic matched\. Scored 1 candidate\(s\) .*best scored 4/);
+  assert.match(s.run(['discover', '--note', 'kafka'], { env: { STUB_FIT: '0' } }).out, /No topic matched/);
+  assert.match(s.run(['discover', '--tags', 'kafka,graphql']).out, /Nothing to discover/);
+  assert.strictEqual(s.run(['discover', '--min-score', '9']).status, 1);
+
+  // Already logged with exactly these sessions: not a discovery.
+  assert.match(s.run(['discover'], { env: reply(topic({ title: 'x', same_as: [la], belongs: [1] })) }).out, /No topic matched/);
+
+  // A new angle on the chain becomes its own log; the old one stays.
+  const r = s.run(['discover', '--tags', 'user turn'], { env: reply(topic({ title: 'Testing reconnects across deploys', angle: 'testing', belongs: [2], fit: 2 })) });
+  assert.match(r.out, /testing · 1 session ·[\s\S]*new log/);
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
+  const logs = logsJson(s);
+  assert.deepStrictEqual(logs.map((l) => l.id).sort(), [la, id].sort());
+  assert.deepStrictEqual(logs.find((l) => l.id === id).sessions, ['fb']);
+
+  // A deleted topic is not offered again, unless --force.
+  s.run(['delete', id]);
+  const env = reply(topic({ title: 'Testing reconnects across deploys', belongs: [2] }));
+  assert.match(s.run(['discover'], { env }).out, /No topic matched/);
+  assert.match(s.run(['discover', '--force'], { env }).out, /Testing reconnects across deploys/);
 });

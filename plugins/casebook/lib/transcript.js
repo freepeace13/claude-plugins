@@ -55,7 +55,11 @@ function condense(file, maxChars = 60000) {
   const raw = fs.readFileSync(file, 'utf8');
   const out = [];
   const files = new Set();
+  const readFiles = new Set();
+  const prUrls = new Set();
   const commandMarks = [];
+  const opening = [];
+  let aiTitle = null;
   let userTurns = 0;
   let startedAt = null;
   let endedAt = null;
@@ -74,6 +78,8 @@ function condense(file, maxChars = 60000) {
     cwd = cwd || e.cwd || null;
     branch = e.gitBranch || branch;
     sessionId = sessionId || e.sessionId || null;
+    if (e.type === 'pr-link' && e.prUrl) prUrls.add(String(e.prUrl));
+    if (e.type === 'ai-title' && e.aiTitle) aiTitle = String(e.aiTitle);
     if (e.isSidechain || e.isMeta || !e.message) continue;
 
     if (e.type === 'user') {
@@ -89,6 +95,7 @@ function condense(file, maxChars = 60000) {
         const t = stripNoise(b.text);
         if (!t || t.startsWith('Caveat:')) continue;
         out.push(`USER: ${clip(t)}`);
+        if (opening.length < 2) opening.push(clip(t, 1000));
         userTurns++;
       }
     } else if (e.type === 'assistant') {
@@ -98,6 +105,7 @@ function condense(file, maxChars = 60000) {
           out.push(`  ${describeTool(b)}`);
           const fp = b.input && (b.input.file_path || b.input.notebook_path);
           if (fp && /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(b.name)) files.add(fp);
+          if (fp && b.name === 'Read') readFiles.add(fp);
         }
       }
     }
@@ -109,7 +117,10 @@ function condense(file, maxChars = 60000) {
     const tail = maxChars - head;
     text = `${text.slice(0, head)}\n\n[… ${text.length - maxChars} chars omitted from the middle …]\n\n${text.slice(-tail)}`;
   }
-  return { text, userTurns, startedAt, endedAt, cwd, branch, sessionId, files: [...files], commandMarks };
+  return {
+    text, userTurns, startedAt, endedAt, cwd, branch, sessionId, files: [...files], commandMarks,
+    readFiles: [...readFiles], prUrls: [...prUrls], aiTitle, opening: opening.join('\n'),
+  };
 }
 
 module.exports = { condense, findTranscript, parseCommand };

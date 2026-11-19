@@ -1,6 +1,6 @@
 ---
 name: scout
-description: Scout the current session (or another session, or all missed sessions) into a casebook log right now, instead of waiting for the session to end. Use when the user asks to log a session now.
+description: Scout the current session (or another session, or all missed sessions) for casebook topics right now, instead of waiting for the session to end. A session can be scouted again to pull out another angle. Use when the user asks to log a session now.
 argument-hint: "[<session-id> | --pending] [--background] [--force]"
 disable-model-invocation: true
 allowed-tools: Bash(casebook:*)
