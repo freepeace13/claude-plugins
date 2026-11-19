@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- casebook: `/casebook:handoff <id…>` checks logs against `handoff.md` and writes a handoff folder (`handoff.md` + `logs/`) for a writer; `casebook out-path --handoff` names the folder
+- casebook: `out-path` names files and folders with the local date instead of the UTC date
+
 ## porch 0.2.0 — 2026-11-19
 - One store for all work: `$PORCH_HOME` (default `~/.porch`), so the plugin works from any folder; replaces per-project `.porch/<slug>/`
 - `/porch:brief <path> <article|case-study> [note]` checks the intake first (subject, first-hand part, 3+ concrete facts, point; see `references/intake.md`), then copies it into `<store>/{articles|case-studies}/<uuid>/` and writes `brief.md`; a thin intake creates nothing

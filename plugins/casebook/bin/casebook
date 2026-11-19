@@ -11,7 +11,7 @@ const { resolveProject } = require('../lib/project');
 const { scoutSession, sweep } = require('../lib/scout');
 const F = require('../lib/filter');
 
-const BOOL = new Set(['all', 'marked', 'unmarked', 'written', 'unwritten', 'json', 'path', 'yes', 'force', 'dry-run', 'help',
+const BOOL = new Set(['all', 'marked', 'unmarked', 'written', 'unwritten', 'json', 'path', 'yes', 'force', 'dry-run', 'help', 'handoff',
   'auto', 'live', 'pending', 'background', 'quiet']);
 
 function parseArgs(argv) {
@@ -267,10 +267,18 @@ const commands = {
   'out-path'({ opt }) {
     const config = U.loadConfig();
     if (!opt.project) fail('out-path needs --project <name>');
-    const dir = U.mkdirp(path.join(U.expandHome(opt.dir || config.output.dir || path.join(U.paths.home(), 'case-studies')), U.slugify(opt.project)));
-    const base = `${new Date().toISOString().slice(0, 10)}-${U.slugify(opt.title)}`;
-    let file = path.join(dir, `${base}.md`);
-    for (let n = 2; fs.existsSync(file); n++) file = path.join(dir, `${base}-${n}.md`);
+    // --handoff names a new folder (not a file) under handoffs/, for /casebook:handoff.
+    const root = opt.handoff
+      ? opt.dir || path.join(U.paths.home(), 'handoffs')
+      : opt.dir || config.output.dir || path.join(U.paths.home(), 'case-studies');
+    const dir = U.mkdirp(path.join(U.expandHome(root), U.slugify(opt.project)));
+    // Local date, so a file written late in the evening is not named after tomorrow (UTC).
+    const now = new Date();
+    const day = [now.getFullYear(), now.getMonth() + 1, now.getDate()].map((n) => String(n).padStart(2, '0')).join('-');
+    const base = `${day}-${U.slugify(opt.title)}`;
+    const ext = opt.handoff ? '' : '.md';
+    let file = path.join(dir, `${base}${ext}`);
+    for (let n = 2; fs.existsSync(file); n++) file = path.join(dir, `${base}-${n}${ext}`);
     out(file);
   },
 
@@ -353,7 +361,7 @@ const commands = {
   profiles [--json]                                list every profile's store
   backfill [--since 30d] [--limit 20] [--yes]      scout past sessions
   written <id…> --file <path>                      record that logs were written up
-  out-path --project P --title T [--dir D]         where a case study file should go
+  out-path --project P --title T [--dir D] [--handoff]   where a case study file (or handoff folder) should go
   config | doctor | help\n\nGlobal: --profile <name> runs against another profile's store (see: casebook profiles).`);
   },
 };
