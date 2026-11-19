@@ -6,6 +6,7 @@
 - `/porch:draft <id>` and `/porch:push <id>` now take a work id
 - `porch` CLI: `init`, `list`, `read`, `set`, `delete`, `home`; each work folder keeps its state (title, slug, tags, status, timestamps) in `state.json`
 - Voice override moves to `$PORCH_HOME/voice.md`
+- Breaking: `<project>/.porch/<slug>/` is no longer read; `porch import` brings those folders into the store (approved drafts stay pushable)
 
 ## casebook 0.1.0 — 2026-11-16
 - SessionEnd scout with Haiku, per-project privacy policies (public / anonymize / skip)

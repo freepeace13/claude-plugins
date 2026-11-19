@@ -23,6 +23,7 @@ const SETTABLE = ['title', 'topic', 'slug', 'tags', 'status', 'kind', 'note', 'p
 const SKIP = new Set(['.git', 'node_modules', '.DS_Store', '.porch']);
 const MAX_BYTES = 25 * 1024 * 1024;
 const MAX_FILES = 2000;
+const has = (obj, k) => typeof k === 'string' && Object.prototype.hasOwnProperty.call(obj, k);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const out = (s = '') => process.stdout.write(s + '\n');
@@ -31,7 +32,17 @@ const fail = (msg) => { process.stderr.write(`porch: ${msg}\n`); process.exit(1)
 function expandHome(p) {
   return p === '~' || p.startsWith('~/') ? path.join(os.homedir(), p.slice(1)) : p;
 }
-const home = () => path.resolve(expandHome(process.env.PORCH_HOME || '~/.porch'));
+function home() {
+  const raw = process.env.PORCH_HOME || '~/.porch';
+  const p = expandHome(raw);
+  if (!path.isAbsolute(p)) fail(`PORCH_HOME must be an absolute path or start with ~/, got "${raw}"`);
+  return path.resolve(p);
+}
+/** The store path with symlinks resolved, for comparing against real intake paths. */
+function realHome() {
+  try { return fs.realpathSync(home()); } catch { return home(); }
+}
+const inside = (child, parent) => child === parent || child.startsWith(parent + path.sep);
 const now = () => new Date().toISOString();
 
 function parseArgs(argv, bools) {
@@ -100,21 +111,75 @@ function filesIn(dir) {
   return Object.values(FILES).filter((f) => f !== FILES.state && fs.existsSync(path.join(dir, f)));
 }
 
-/** Count files and bytes the copy would take, skipping SKIP entries. */
-function measure(src) {
+/** Whether the copy leaves this path out: SKIP names, symlinks (the intake is a snapshot), and the store itself. */
+function skipped(p, root) {
+  if (p === root) return false;
+  if (SKIP.has(path.basename(p))) return true;
+  if (inside(p, realHome())) return true;
+  try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; }
+}
+
+/** Count what the copy would take. Fails with a porch error on anything unreadable. */
+function measure(root) {
   let files = 0;
   let bytes = 0;
+  let links = 0;
+  const store = realHome();
   const walk = (p) => {
-    const st = fs.lstatSync(p);
+    let st;
+    try { st = fs.lstatSync(p); } catch (e) { fail(`cannot read ${p} (${e.code || e.message})`); }
+    if (st.isSymbolicLink()) { links++; return; }
     if (st.isDirectory()) {
-      for (const n of fs.readdirSync(p)) if (!SKIP.has(n)) walk(path.join(p, n));
+      let names;
+      try { names = fs.readdirSync(p); } catch (e) { fail(`cannot read ${p} (${e.code || e.message})`); }
+      for (const n of names) {
+        const c = path.join(p, n);
+        if (!SKIP.has(n) && !inside(c, store)) walk(c);
+      }
     } else if (st.isFile()) {
+      try { fs.accessSync(p, fs.constants.R_OK); } catch (e) { fail(`cannot read ${p} (${e.code || e.message})`); }
       files++;
       bytes += st.size;
     }
   };
-  walk(src);
-  return { files, bytes };
+  walk(root);
+  return { files, bytes, links };
+}
+
+/**
+ * Build a work folder in <home>/.staging/<id>, then rename it into <home>/<type dir>/<id>.
+ * A failure anywhere removes the staging folder, so a failed create leaves nothing in the store.
+ */
+function createWork(type, build) {
+  const id = crypto.randomUUID();
+  const staging = path.join(home(), '.staging', id);
+  const dir = path.join(home(), TYPES[type], id);
+  try {
+    fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(home(), 0o700); } catch { /* best effort */ }
+    const state = build(staging, id);
+    writeState(staging, state);
+    fs.mkdirSync(path.dirname(dir), { recursive: true, mode: 0o700 });
+    fs.renameSync(staging, dir);
+    return { ...state, dir };
+  } catch (e) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    fail(`could not create the work folder: ${e.message}`);
+  }
+}
+
+/** Minimal frontmatter reader: top-level `key: value` lines only. */
+function frontmatter(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!m) return {};
+  const fm = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = /^([A-Za-z_]+):\s*(.*?)\s*(?:#.*)?$/.exec(line);
+    if (kv) fm[kv[1]] = kv[2].replace(/^(["'])(.*)\1$/, '$2');
+  }
+  return fm;
 }
 
 // ---------- commands ----------
@@ -123,37 +188,32 @@ function cmdInit(argv) {
   const { pos, opt } = parseArgs(argv, new Set(['json', 'force']));
   const src = pos[0];
   if (!src) fail('usage: porch init <path> --type article|case-study --topic text [--note text] [--force] [--json]');
-  if (!TYPES[opt.type]) fail(`--type must be article or case-study, got "${opt.type ?? ''}"`);
+  if (!has(TYPES, opt.type)) fail(`--type must be article or case-study, got "${opt.type ?? ''}"`);
   if (!opt.topic || !String(opt.topic).trim()) {
     fail('--topic is required: run the intake check (references/intake.md) first and pass the topic it found');
   }
-  const abs = path.resolve(expandHome(src));
-  let st;
-  try { st = fs.statSync(abs); } catch { fail(`no such file or folder: ${abs}`); }
+  const given = path.resolve(expandHome(src));
+  let abs;
+  try { abs = fs.realpathSync(given); } catch { fail(`no such file or folder: ${given}`); }
+  const st = fs.statSync(abs);
   if (!st.isFile() && !st.isDirectory()) fail(`not a file or folder: ${abs}`);
-  if (abs === home() || abs.startsWith(home() + path.sep)) fail(`the intake is inside the store (${home()})`);
+  if (inside(abs, realHome())) fail(`the intake is inside the store (${home()})`);
 
-  const size = st.isFile() ? { files: 1, bytes: st.size } : measure(abs);
+  const size = measure(abs);
   if (size.files === 0) fail(`nothing to copy in ${abs}`);
   if (!opt.force && (size.files > MAX_FILES || size.bytes > MAX_BYTES)) {
     fail(`${abs} has ${size.files} files, ${(size.bytes / 1048576).toFixed(1)} MB; ` +
       `the limit is ${MAX_FILES} files and ${MAX_BYTES / 1048576} MB. Point at a smaller folder or pass --force.`);
   }
 
-  const id = crypto.randomUUID();
-  const dir = path.join(home(), TYPES[opt.type], id);
-  const name = path.basename(abs);
-  fs.mkdirSync(path.join(dir, 'intake'), { recursive: true, mode: 0o700 });
-  try { fs.chmodSync(home(), 0o700); } catch { /* best effort */ }
-  fs.cpSync(abs, path.join(dir, 'intake', name), {
-    recursive: true,
-    filter: (p) => !SKIP.has(path.basename(p)) || p === abs,
-  });
-
-  const t = now();
-  const state = {
-    id,
-    type: opt.type,
+  const name = path.basename(given);
+  const work = createWork(opt.type, (staging, id) => {
+    fs.mkdirSync(path.join(staging, 'intake'));
+    fs.cpSync(abs, path.join(staging, 'intake', name), { recursive: true, filter: (p) => !skipped(p, abs) });
+    const t = now();
+    return {
+      id,
+      type: opt.type,
     status: 'new',
     title: name.replace(/\.[^.]+$/, ''),
     topic: String(opt.topic).trim(),
@@ -161,15 +221,74 @@ function cmdInit(argv) {
     tags: [],
     kind: null,
     note: opt.note || '',
-    source: abs,
+    source: given,
     intake: `intake/${name}`,
     porch_id: null,
     created_at: t,
     updated_at: t,
-  };
-  writeState(dir, state);
-  if (opt.json) out(JSON.stringify({ ...state, dir }, null, 2));
-  else out(`${id}\n${dir}`);
+    };
+  });
+  if (size.links) process.stderr.write(`porch: skipped ${size.links} symlink(s); the intake is a snapshot of real files only\n`);
+  if (opt.json) out(JSON.stringify({ ...work, skipped_links: size.links }, null, 2));
+  else out(`${work.id}\n${work.dir}`);
+}
+
+/** Import 0.1.0 work folders (<project>/.porch/<slug>/ with brief.md, draft.md, review.md). */
+function cmdImport(argv) {
+  const { pos, opt } = parseArgs(argv, new Set(['json']));
+  if (!pos.length) fail('usage: porch import <project>/.porch/<slug>… [--json]');
+  const done = [];
+  const voices = new Set();
+  for (const src of pos) {
+    let abs;
+    try { abs = fs.realpathSync(path.resolve(expandHome(src))); } catch { fail(`no such folder: ${src}`); }
+    if (!fs.statSync(abs).isDirectory()) fail(`not a folder: ${abs}`);
+    const brief = frontmatter(path.join(abs, 'brief.md'));
+    const draft = frontmatter(path.join(abs, 'draft.md'));
+    if (!brief && !draft) fail(`${abs} has no brief.md or draft.md; is it a .porch/<slug> folder?`);
+    const type = (brief && brief.type) || (draft && draft.type);
+    if (!has(TYPES, type)) fail(`${abs}: type must be article or case-study, got "${type || ''}"`);
+    const dup = all().find((w) => w.state.source === abs);
+    if (dup) { out(`skipped ${abs}: already imported as ${dup.state.id.slice(0, 8)}`); continue; }
+
+    const slug = (brief && brief.slug) || (draft && draft.slug) || path.basename(abs);
+    let review = '';
+    try { review = fs.readFileSync(path.join(abs, 'review.md'), 'utf8'); } catch { /* none */ }
+    const approved = /(^|\n)\s*approved\s*$/.test(review);
+    const work = createWork(type, (staging, id) => {
+      for (const f of ['brief.md', 'draft.md', 'review.md']) {
+        if (fs.existsSync(path.join(abs, f))) fs.copyFileSync(path.join(abs, f), path.join(staging, f));
+      }
+      const t = now();
+      return {
+        id,
+        type,
+        status: approved ? 'approved' : 'new',
+        title: (draft && draft.title) || slug,
+        topic: (brief && brief.thesis) || (draft && draft.title) || slug,
+        slug: /^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug) ? slug : '',
+        tags: [],
+        kind: null,
+        note: 'imported from porch 0.1.0',
+        source: abs,
+        intake: null,
+        porch_id: null,
+        created_at: t,
+        updated_at: t,
+      };
+    });
+    done.push(work);
+    const voice = path.join(path.dirname(abs), 'voice.md');
+    if (path.basename(path.dirname(abs)) === '.porch' && fs.existsSync(voice)) voices.add(voice);
+    if (!opt.json) out(`imported ${work.id.slice(0, 8)}  ${work.type}  ${work.status}  ${work.title}`);
+  }
+  if (opt.json) out(JSON.stringify(done, null, 2));
+  const target = path.join(home(), 'voice.md');
+  for (const v of voices) {
+    process.stderr.write(fs.existsSync(target)
+      ? `porch: ${v} is not used any more; the store's ${target} applies\n`
+      : `porch: ${v} is not used any more; copy it to ${target} to keep that voice\n`);
+  }
 }
 
 const pad = (s, n) => {
@@ -179,11 +298,12 @@ const pad = (s, n) => {
 
 function cmdList(argv) {
   const { opt } = parseArgs(argv, new Set(['json']));
-  if (opt.type && !TYPES[opt.type]) fail('--type must be article or case-study');
-  if (opt.status && !STATUSES.includes(opt.status)) fail(`--status must be one of ${STATUSES.join(', ')}`);
+  if (opt.type && !has(TYPES, opt.type)) fail('--type must be article or case-study');
+  const statuses = opt.status ? String(opt.status).split(',').map((x) => x.trim()) : null;
+  if (statuses && !statuses.every((x) => STATUSES.includes(x))) fail(`--status must be one or more of ${STATUSES.join(', ')}`);
   let items = all();
   if (opt.type) items = items.filter((w) => w.state.type === opt.type);
-  if (opt.status) items = items.filter((w) => w.state.status === opt.status);
+  if (statuses) items = items.filter((w) => statuses.includes(w.state.status));
   if (opt.tag) items = items.filter((w) => (w.state.tags || []).includes(opt.tag));
   items.sort((a, b) => String(b.state.updated_at).localeCompare(String(a.state.updated_at)));
 
@@ -201,9 +321,10 @@ function cmdRead(argv) {
   const { pos, opt } = parseArgs(argv, new Set(['json', 'path']));
   const w = resolve(pos[0]);
   const which = pos[1];
-  if (opt.path) return out(which ? path.join(w.dir, FILES[which] || fail(`unknown file "${which}"`)) : w.dir);
+  if (which && !has(FILES, which)) fail(`file must be one of ${Object.keys(FILES).join(', ')}`);
+  if (opt.path) return out(which ? path.join(w.dir, FILES[which]) : w.dir);
   if (which) {
-    if (!FILES[which]) fail(`file must be one of ${Object.keys(FILES).join(', ')}`);
+    if (!has(FILES, which)) fail(`file must be one of ${Object.keys(FILES).join(', ')}`);
     const f = path.join(w.dir, FILES[which]);
     if (!fs.existsSync(f)) fail(`${w.state.id} has no ${FILES[which]} yet`);
     return process.stdout.write(fs.readFileSync(f, 'utf8'));
@@ -225,7 +346,7 @@ function cmdRead(argv) {
   out(`created:  ${s.created_at}`);
   out(`updated:  ${s.updated_at}`);
   out(`dir:      ${w.dir}`);
-  out(`files:    ${[s.intake, ...files].join(', ')}`);
+  out(`files:    ${[s.intake, ...files].filter(Boolean).join(', ')}`);
 }
 
 function cmdSet(argv) {
@@ -273,11 +394,13 @@ function cmdDelete(argv) {
   }
 }
 
-const HELP = `porch: manage Porch work folders in ${home()}  (set PORCH_HOME to move it)
+const help = () => `porch: manage Porch work folders in ${home()}  (set PORCH_HOME to move it)
 
   porch init <path> --type article|case-study --topic text [--note text] [--force] [--json]
       copy a file or folder that passed the intake check into a new work folder
-  porch list [--type t] [--status s] [--tag x] [--json]
+  porch import <project>/.porch/<slug>… [--json]
+      bring 0.1.0 work folders into the store (approved drafts stay pushable)
+  porch list [--type t] [--status s[,s…]] [--tag x] [--json]
   porch read <id> [brief|draft|review|state] [--path] [--json]
   porch set <id> key=value…      keys: ${SETTABLE.join(', ')}
       status: ${STATUSES.join(' | ')}   tags: comma-separated
@@ -288,6 +411,7 @@ An <id> may be any unique prefix of at least 4 characters.`;
 
 const COMMANDS = {
   init: cmdInit,
+  import: cmdImport,
   list: cmdList,
   ls: cmdList,
   read: cmdRead,
@@ -300,8 +424,8 @@ const COMMANDS = {
 
 if (require.main === module) {
   const [cmd, ...rest] = process.argv.slice(2);
-  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') out(HELP);
-  else if (COMMANDS[cmd]) COMMANDS[cmd](rest);
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') out(help());
+  else if (has(COMMANDS, cmd)) COMMANDS[cmd](rest);
   else fail(`unknown command "${cmd}". Run \`porch help\`.`);
 }
 

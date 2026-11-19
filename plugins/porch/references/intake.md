@@ -48,6 +48,7 @@ A case study tells one engagement: The problem, What I did, The result. Its thes
 
 - **Reject** elements cannot be filled by asking. The facts must come from the intake, not from a conversation.
 - **Ask** elements share one message of at most 3 questions. If more than 3 are missing, the intake is `thin`.
+- Whether numbers may be published is one question for all numbers, and it counts toward the 3. Ask it only when there is room left. If there is none, each number's permission becomes an Unknown, so the writer leaves a verify marker and `/porch:push` refuses until it is settled. It never makes the intake `thin`.
 - An answer can fill an ask element, and becomes a fact with source `answer`. If an answer leaves the element empty, the intake is `thin`.
 - **More than one topic** (common for a folder): the note may pick one. If it does not, offer up to 3 candidate topics in one message, each with its subject and the facts behind it, and let the author pick. Then check the chosen topic from the start. Never cover all of them together.
 - **Finished draft:** check it the same way, using the draft as the intake.

@@ -253,3 +253,146 @@ test('brief skill checks the intake before porch init; draft gates on the check'
   for (const h of ['## Common elements (article and case study)', '## Article elements', '## Case study elements']) assert.ok(intake.includes(h), h);
   for (const v of ['`pass`', '`pass-with-answers`', '`thin`']) assert.ok(intake.includes(v), v);
 });
+
+// Review fixes on PR #4.
+const ids = (home) => ['articles', 'case-studies'].flatMap((t) => {
+  try { return fs.readdirSync(path.join(home, t)); } catch { return []; }
+});
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+test('a failed copy leaves nothing in the store', { skip: isRoot && 'root can read chmod 000 files' }, () => {
+  const { base, home, cli } = sandbox();
+  const src = path.join(base, 'src');
+  fs.mkdirSync(src);
+  fs.writeFileSync(path.join(src, 'a.md'), 'a');
+  fs.writeFileSync(path.join(src, 'b.md'), 'b');
+  fs.chmodSync(path.join(src, 'b.md'), 0o000);
+  const r = cli('init', src, '--type', 'article', '--topic', 'T');
+  fs.chmodSync(path.join(src, 'b.md'), 0o644);
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /^porch: cannot read .*b\.md/);
+  assert.doesNotMatch(r.stderr, /at .*node:/);
+  assert.deepStrictEqual(ids(home), []);
+  assert.ok(!fs.existsSync(path.join(home, '.staging')) || fs.readdirSync(path.join(home, '.staging')).length === 0);
+});
+
+test('an unreadable subfolder fails with a porch error, not a stack trace', { skip: isRoot && 'root can read it' }, () => {
+  const { base, cli } = sandbox();
+  const src = path.join(base, 'src');
+  fs.mkdirSync(path.join(src, 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(src, 'a.md'), 'a');
+  fs.chmodSync(path.join(src, 'sub'), 0o000);
+  const r = cli('init', src, '--type', 'article', '--topic', 'T');
+  fs.chmodSync(path.join(src, 'sub'), 0o755);
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /^porch: cannot read .*sub/);
+});
+
+test('a store inside the intake folder is left out of the copy', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'porch-test-'));
+  const proj = path.join(base, 'proj');
+  const home = path.join(proj, 'st');
+  fs.mkdirSync(proj);
+  fs.writeFileSync(path.join(proj, 'notes.md'), 'n');
+  const env = { ...process.env, PORCH_HOME: home };
+  const run = () => spawnSync('node', [CLI, 'init', proj, '--type', 'article', '--topic', 'T', '--json'], { encoding: 'utf8', env });
+  const first = run();
+  assert.strictEqual(first.status, 0, first.stderr);
+  const second = run();
+  assert.strictEqual(second.status, 0, second.stderr);
+  const { dir } = JSON.parse(second.stdout);
+  assert.ok(fs.existsSync(path.join(dir, 'intake/proj/notes.md')));
+  assert.ok(!fs.existsSync(path.join(dir, 'intake/proj/st')));
+});
+
+test('symlinks are not copied, so the intake is a snapshot', () => {
+  const { base, cli } = sandbox();
+  const src = path.join(base, 'src');
+  fs.mkdirSync(src);
+  fs.writeFileSync(path.join(base, 'outside.md'), 'o');
+  fs.writeFileSync(path.join(src, 'a.md'), 'a');
+  fs.symlinkSync(path.join(base, 'outside.md'), path.join(src, 'link.md'));
+  const r = cli('init', src, '--type', 'article', '--topic', 'T', '--json');
+  assert.strictEqual(r.status, 0, r.stderr);
+  const s = JSON.parse(r.stdout);
+  assert.strictEqual(s.skipped_links, 1);
+  assert.match(r.stderr, /skipped 1 symlink/);
+  assert.ok(fs.existsSync(path.join(s.dir, 'intake/src/a.md')));
+  assert.throws(() => fs.lstatSync(path.join(s.dir, 'intake/src/link.md')));
+});
+
+test('PORCH_HOME must be absolute', () => {
+  const r = spawnSync('node', [CLI, 'home'], { encoding: 'utf8', env: { ...process.env, PORCH_HOME: 'rel/store' } });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /PORCH_HOME must be an absolute path/);
+  const ok = spawnSync('node', [CLI, 'home'], { encoding: 'utf8', env: { ...process.env, PORCH_HOME: '~/x-porch' } });
+  assert.strictEqual(ok.stdout.trim(), path.join(os.homedir(), 'x-porch'));
+});
+
+test('Object property names are not valid types, files or commands', () => {
+  const { base, cli } = sandbox();
+  fs.writeFileSync(path.join(base, 'n.md'), 'x');
+  const r = cli('init', path.join(base, 'n.md'), '--type', 'constructor', '--topic', 'T');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /^porch: --type must be article or case-study/);
+  const { id } = JSON.parse(cli('init', path.join(base, 'n.md'), '--type', 'article', '--topic', 'T', '--json').stdout);
+  for (const args of [['read', id, 'toString'], ['read', id, 'toString', '--path'], ['list', '--type', '__proto__'], ['toString']]) {
+    const x = cli(...args);
+    assert.strictEqual(x.status, 1, args.join(' '));
+    assert.match(x.stderr, /^porch: /, args.join(' '));
+  }
+});
+
+test('list takes several statuses', () => {
+  const { base, cli } = sandbox();
+  fs.writeFileSync(path.join(base, 'n.md'), 'x');
+  const mk = (st) => {
+    const { id } = JSON.parse(cli('init', path.join(base, 'n.md'), '--type', 'article', '--topic', 'T', '--json').stdout);
+    cli('set', id, `status=${st}`);
+  };
+  ['briefed', 'drafting', 'escalated', 'pushed'].forEach(mk);
+  assert.strictEqual(JSON.parse(cli('list', '--status', 'briefed,drafting,escalated', '--json').stdout).length, 3);
+  assert.strictEqual(cli('list', '--status', 'briefed,nope').status, 1);
+});
+
+test('import brings 0.1.0 .porch/<slug> folders into the store', () => {
+  const { base, home, cli } = sandbox();
+  const old = path.join(base, 'proj/.porch');
+  const ok = path.join(old, 'backoff-after-deploys');
+  const wip = path.join(old, 'half-done');
+  fs.mkdirSync(ok, { recursive: true });
+  fs.mkdirSync(wip, { recursive: true });
+  fs.writeFileSync(path.join(old, 'voice.md'), 'my voice');
+  fs.writeFileSync(path.join(ok, 'brief.md'), '---\ntype: article\nslug: backoff-after-deploys\nthesis: Back off after deploys\n---\n');
+  fs.writeFileSync(path.join(ok, 'draft.md'), '---\ntype: article\ntitle: "Backoff after deploys"\n---\nBody\n');
+  fs.writeFileSync(path.join(ok, 'review.md'), 'AC-1 pass\napproved\n');
+  fs.writeFileSync(path.join(wip, 'brief.md'), '---\ntype: case-study   # comment\nslug: half-done\n---\n');
+
+  const r = cli('import', ok, wip);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.stderr, /voice\.md is not used any more; copy it to/);
+  const items = JSON.parse(cli('list', '--json').stdout);
+  const a = items.find((w) => w.slug === 'backoff-after-deploys');
+  const c = items.find((w) => w.slug === 'half-done');
+  assert.strictEqual(a.status, 'approved');
+  assert.strictEqual(a.type, 'article');
+  assert.strictEqual(a.title, 'Backoff after deploys');
+  assert.strictEqual(a.topic, 'Back off after deploys');
+  assert.strictEqual(fs.readFileSync(path.join(a.dir, 'draft.md'), 'utf8'), '---\ntype: article\ntitle: "Backoff after deploys"\n---\nBody\n');
+  assert.ok(a.dir.startsWith(path.join(home, 'articles')));
+  assert.strictEqual(c.status, 'new');
+  assert.strictEqual(c.type, 'case-study');
+  assert.match(cli('read', a.id).stdout, /files: {4}brief\.md, draft\.md, review\.md/);
+
+  assert.match(cli('import', ok).stdout, /already imported/);
+  assert.strictEqual(JSON.parse(cli('list', '--json').stdout).length, 2);
+  assert.strictEqual(cli('import', base).status, 1);
+});
+
+test('draft and push point 0.1.0 users at porch import; brief counts the publish question in the 3', () => {
+  const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+  for (const f of ['skills/draft/SKILL.md', 'skills/push/SKILL.md']) assert.match(read(f), /porch import \.porch\/<id>/, f);
+  assert.match(read('skills/draft/SKILL.md'), /porch list --status briefed,drafting,escalated/);
+  assert.match(read('skills/brief/SKILL.md'), /only when there is room left in the 3/);
+  assert.match(read('references/intake.md'), /counts toward the 3/);
+});
