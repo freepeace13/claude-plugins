@@ -14,6 +14,7 @@ status: ready            # draft | ready
 plugin_root: /abs/path/to/plugin
 voice: /abs/path/to/voice.md   # .porch/voice.md when present, else references/voice.md
 reader: Backend engineers running queue workers
+pov: first person, the site owner is the author   # fixed; never "the owner" or "the user"
 thesis: One sentence the whole piece defends
 length: 700-1100         # words
 never_name: [Acme Corp]  # names that must not appear
@@ -41,7 +42,7 @@ stack: [Laravel, Redis]  # case study only
 - AC-2 States the thesis in the first two paragraphs
 - AC-3 Follows the outline's section order and headings
 - AC-4 Length within range
-- AC-5 Passes voice.md rules
+- AC-5 Passes voice.md rules; first person throughout, no "the owner", "the user" or operator
 - AC-6 Never names anything in never_name
 - AC-7 Follows body-format.md and the type's template
 - AC-8+ Piece-specific criteria added by intake
@@ -49,6 +50,7 @@ stack: [Laravel, Redis]  # case study only
 
 ## Rules
 
+- Point of view: the site owner is the author and writes in first person. Source notes often call the author "the owner" or "the user" and name an assistant or operator who did the work. Intake restates every fact as the author's own action ("I chose ...", not "the owner chose ...") and drops mentions of the assistant or operator unless the piece is about them.
 - Facts are the writer's whole world. Each fact has an ID and a source path (or `prompt`). The writer may not add claims, numbers, names or timelines that are not facts.
 - Unknowns are listed, not guessed. The writer writes around them and leaves `<!-- verify: U-n what to check -->` at the spot.
 - AC-1 to AC-7 are standard. Intake adds criteria specific to the piece, such as "mentions the ruled-out option".

@@ -106,3 +106,13 @@ test('.mcp.json is valid and the guard is executable', () => {
   assert.ok(mcp.mcpServers.porch.url.startsWith('https://'));
   fs.accessSync(path.join(ROOT, 'bin/porch-guard'), fs.constants.X_OK);
 });
+
+test('point-of-view rule is in the brief, voice, intake, review and writer', () => {
+  const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+  for (const f of ['references/brief.md', 'references/voice.md', 'agents/writer.md']) {
+    assert.match(read(f), /first person/i, f);
+    assert.match(read(f), /the owner/, f);
+  }
+  assert.match(read('skills/draft/SKILL.md'), /point of view/);
+  assert.match(read('skills/draft/SKILL.md'), /"the owner", "the user", "operator" and "Claude"/);
+});

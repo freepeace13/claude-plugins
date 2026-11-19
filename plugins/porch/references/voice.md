@@ -2,7 +2,8 @@
 
 Used when the project has no `.porch/voice.md`.
 
-- First person, plain and specific. Say what happened and what you did.
+- Write as the site owner, in first person, from start to finish. Never call the author "the owner" or "the user", and do not mention an AI assistant or operator unless a fact in the brief requires it.
+- Plain and specific. Say what happened and what you did.
 - Short sentences. Prefer concrete nouns and verbs over abstractions.
 - No hype or filler: avoid "game-changing", "seamless", "robust", "leverage", "delve", "in today's fast-paced world".
 - No section that only restates the previous one. No closing summary of what you just said.
