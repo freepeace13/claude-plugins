@@ -105,9 +105,11 @@ function parseTopics(text, max) {
 }
 
 // A deleted topic stays deleted even when the model words its title a little differently: titles that share
-// most of their words (plurals folded, filler dropped) count as the same topic.
+// most of their words (word endings folded, filler dropped) count as the same topic.
 const TITLE_FILLER = new Set(['a', 'an', 'the', 'and', 'or', 'of', 'for', 'to', 'in', 'on', 'with', 'by', 'from', 'at', 'after', 'via']);
-const titleWords = (s) => new Set(normTitle(s).split(' ').filter((w) => w && !TITLE_FILLER.has(w)).map((w) => (w.length > 3 ? w.replace(/s$/, '') : w)));
+// Crude stemming, enough for titles: fixing / fixed / fixes → fix, storms → storm.
+const stem = (w) => (w.length > 4 ? w.replace(/(ing|ed|es|s)$/, '') : w);
+const titleWords = (s) => new Set(normTitle(s).split(' ').filter((w) => w && !TITLE_FILLER.has(w)).map(stem));
 function sameTitle(a, b) {
   const x = titleWords(a);
   const y = titleWords(b);
@@ -116,6 +118,31 @@ function sameTitle(a, b) {
   return shared / new Set([...x, ...y]).size >= 0.6;
 }
 const isTombstoned = (topic, deleted) => deleted.some((d) => sameTitle(d.title, topic.title));
+
+/** A log by id, following merges: an id merged into another log resolves to the log that absorbed it. */
+function resolveLog(id) {
+  return store.findLog(id) || store.allLogs().find((l) => (l.meta.merged_from || []).includes(id)) || null;
+}
+
+/** A ledger from before topics: the session's one log was deleted, and no topic was remembered. */
+const legacyDeleted = (ledger) => Boolean(ledger && ledger.deleted && !(ledger.deletedTopics || []).length);
+
+/**
+ * Drop deleted topics (unless the topic updates a log that still exists), keep only same_as ids that resolve,
+ * and let each existing log be claimed by one topic only: the best-scored one. Topics come best first.
+ */
+function screenTopics(found, deleted) {
+  const claimed = new Set();
+  const out = [];
+  for (const x of found) {
+    const live = [...new Set(x.same_as.map(resolveLog).filter(Boolean).map((l) => l.meta.id))];
+    if (!live.length && isTombstoned(x, deleted)) continue;
+    x.same_as = live.filter((id) => !claimed.has(id));
+    for (const id of x.same_as) claimed.add(id);
+    out.push(x);
+  }
+  return out;
+}
 
 function renderBody(n) {
   const list = (xs) => (xs.length ? xs.map((x) => `- ${x}`).join('\n') : '_none noted_');
@@ -152,10 +179,13 @@ function uniqMarks(marks) {
  */
 function applyTopic(topic, ctx) {
   const sids = ctx.members.map((m) => m.sessionId);
-  let targets = topic.same_as.map((id) => store.findLog(id)).filter(Boolean);
+  const claimed = ctx.claimed || new Set();
+  let targets = [...new Map(topic.same_as.map(resolveLog).filter(Boolean).map((l) => [l.meta.id, l])).values()];
   if (!targets.length) {
-    // Never log the same title twice for the same sessions, even if the model did not say so.
-    const twin = logsForSessions(sids).find((l) => normTitle(l.meta.title) === normTitle(topic.title));
+    // Never log the same story twice for the same sessions, even if the model reworded the title and did not
+    // say so. A log another topic of this scan already wrote is a different angle, not a twin.
+    const mine = logsForSessions(sids).filter((l) => !claimed.has(l.meta.id));
+    const twin = mine.find((l) => normTitle(l.meta.title) === normTitle(topic.title)) || mine.find((l) => sameTitle(l.meta.title, topic.title));
     if (twin) targets = [twin];
   }
   const relFiles = (m) => (ctx.info.root ? m.files.map((f) => path.relative(ctx.info.root, f) || f) : m.files);
@@ -215,6 +245,7 @@ function applyTopic(topic, ctx) {
 
   if (!survivor) {
     const log = store.createLogFile(ctx.info.project, { ...meta, written_to: [] }, body);
+    claimed.add(log.meta.id);
     return { status: 'created', logId: log.meta.id, score: topic.score, title: topic.title, angle: meta.angle, merged: [] };
   }
   survivor.meta = {
@@ -225,6 +256,7 @@ function applyTopic(topic, ctx) {
   if (!survivor.meta.merged_from.length) delete survivor.meta.merged_from;
   survivor.body = body;
   store.saveLog(survivor);
+  claimed.add(survivor.meta.id);
   for (const l of merged) {
     fs.rmSync(l.file, { force: true });
     try { fs.rmdirSync(path.dirname(l.file)); } catch { /* not empty */ }
@@ -234,5 +266,5 @@ function applyTopic(topic, ctx) {
 
 module.exports = {
   sessionsOf, logsForSessions, contextLogs, tombstones, renderExisting, parseTopics, normalizeTopic,
-  isTombstoned, sameTitle, renderBody, applyTopic, normTitle,
+  isTombstoned, sameTitle, renderBody, applyTopic, normTitle, resolveLog, legacyDeleted, screenTopics,
 };

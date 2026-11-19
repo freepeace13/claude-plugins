@@ -61,6 +61,10 @@ function createLogFile(project, meta, body) {
 }
 
 function deleteLog(log) {
+  withWriteLock(() => deleteLogLocked(log));
+}
+
+function deleteLogLocked(log) {
   fs.rmSync(log.file, { force: true });
   try { fs.rmdirSync(path.dirname(log.file)); } catch { /* not empty */ }
   // The topic is remembered per session so no later scan logs it again. A session left with no logs at all
@@ -84,8 +88,9 @@ function withWriteLock(fn) {
   const file = path.join(paths.home(), 'state', 'write.lock');
   mkdirp(path.dirname(file));
   const deadline = Date.now() + 60000;
+  const mine = `${process.pid}:${Date.now()}:${Math.random()}`;
   for (;;) {
-    try { fs.writeFileSync(file, String(process.pid), { flag: 'wx' }); break; } catch (err) {
+    try { fs.writeFileSync(file, mine, { flag: 'wx' }); break; } catch (err) {
       if (err.code !== 'EEXIST') throw err;
     }
     // A holder that crashed leaves the file behind; writes take milliseconds, so 30s means it is stale.
@@ -93,7 +98,8 @@ function withWriteLock(fn) {
     if (Date.now() > deadline) throw new Error('timed out waiting for the casebook write lock');
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
-  try { return fn(); } finally { fs.rmSync(file, { force: true }); }
+  // Remove the lock only while it is still ours: a waiter may have reclaimed it as stale.
+  try { return fn(); } finally { try { if (fs.readFileSync(file, 'utf8') === mine) fs.rmSync(file, { force: true }); } catch { /* gone */ } }
 }
 
 // ---------- ledger: one small file per session, so concurrent scouts never race ----------

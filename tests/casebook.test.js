@@ -1023,3 +1023,74 @@ test('tags with regex characters are matched literally and never crash discovery
   assert.strictEqual(r.status, 0, r.stderr);
   assert.match(r.out, /0 eligible/);
 });
+
+test('a marked session always gets a log, even when its only topic scores low', () => {
+  const s = sandbox();
+  s.run(['mark', '--session', 'lowm', 'queue', 'idea']);
+  const r = JSON.parse(s.run(['scout', '--session', 'lowm', '--transcript', s.transcript('lowm', 3), '--auto', '--json'], { env: reply(topic({ title: 'Tiny tweak', score: 1 })) }).out);
+  assert.strictEqual(r.status, 'created');
+  assert.match(s.run(['show', r.logId]).out, /"note":"queue idea"/);
+});
+
+test('a log deleted before topics existed keeps its session closed unless --force', () => {
+  const s = sandbox();
+  const tp = s.transcript('old', 3);
+  const ledger = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions', 'old.json');
+  fs.mkdirSync(path.dirname(ledger), { recursive: true });
+  fs.writeFileSync(ledger, JSON.stringify({ sessionId: 'old', deleted: true, logId: 'cb-aaaaaa' }));
+  assert.match(s.run(['scout', '--session', 'old', '--transcript', tp]).out, /log was deleted \(use --force/);
+  assert.ok(!JSON.parse(s.run(['discover', '--dry-run', '--json']).out).some((g) => g.sessions.includes('old')));
+  assert.strictEqual(JSON.parse(s.run(['scout', '--session', 'old', '--force', '--json']).out).status, 'created');
+});
+
+test('two topics of one scan never write into the same log; reworded rescans update, merged ids resolve', () => {
+  const s = sandbox();
+  const tp = s.transcript('claim', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'claim', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixed websocket reconnect storms' })) }).out).logId;
+
+  // Both name the same log: the better one updates it, the other becomes its own log.
+  const r = JSON.parse(s.run(['scout', '--session', 'claim', '--json'], {
+    env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [id], score: 5 }), topic({ title: 'Picking Redis Streams for fan-out', angle: 'architecture', same_as: [id], score: 3 })),
+  }).out);
+  assert.deepStrictEqual(r.logs.map((l) => l.status), ['updated', 'created']);
+  assert.strictEqual(r.logs[0].logId, id);
+  assert.strictEqual(r.score, 5);
+  assert.strictEqual(logsJson(s).length, 2);
+
+  // A reworded title without same_as is still the same story.
+  const again = JSON.parse(s.run(['scout', '--session', 'claim', '--json'], { env: reply(topic({ title: 'Fixing websocket reconnect storms on deploy' })) }).out);
+  assert.strictEqual(again.logId, id);
+  assert.strictEqual(logsJson(s).length, 2);
+});
+
+test('discover pick checks again: a deleted target or topic is refused, not logged anew', () => {
+  const s = sandbox();
+  const a = s.transcript('pa', 3, onBranch('pa', 'feat/p'));
+  s.transcript('pb', 3, onBranch('pb', 'feat/p'));
+  const la = JSON.parse(s.run(['scout', '--session', 'pa', '--transcript', a, '--json']).out).logId;
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Something else entirely', same_as: [la], belongs: [1, 2] })) }).out)[1];
+  s.run(['delete', la]);
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, new RegExp(`the log this topic updates is gone \\(${la}\\)`));
+  assert.strictEqual(logsJson(s).length, 0);
+
+  const did2 = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Load-testing the gateway', belongs: [2] })) }).out)[1];
+  const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did2, '1']).out)[1];
+  s.run(['delete', id]);
+  const fresh = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover', '--force'], { env: reply(topic({ title: 'Load-testing the gateway', belongs: [2] })) }).out)[1];
+  assert.match(s.run(['discover', 'pick', fresh, '1']).out, /Created/, '--force carries over to the pick');
+});
+
+test('a topic updating a live log is not dropped because a deleted log had a similar title', () => {
+  const s = sandbox();
+  const tp = s.transcript('live', 3);
+  const r = JSON.parse(s.run(['scout', '--session', 'live', '--transcript', tp, '--json'], {
+    env: reply(topic({ title: 'Debugging Redis stream consumer lag' }), topic({ title: 'Debugging Redis stream consumer restarts', angle: 'reliability' })),
+  }).out);
+  const [lag, restarts] = r.logs.map((l) => l.logId);
+  s.run(['delete', restarts]);
+  const up = JSON.parse(s.run(['scout', '--session', 'live', '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer lag', same_as: [lag], score: 5 })) }).out);
+  assert.strictEqual(up.logId, lag);
+  assert.match(s.run(['show', lag]).out, /score: 5/);
+});

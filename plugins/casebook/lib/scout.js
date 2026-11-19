@@ -100,7 +100,7 @@ async function runClaudeAsync(prompt, config) {
 
 /**
  * Scout one session for topics. Returns { status, logs?, logId?, reason?, partial? }; logId, score and title are
- * the best topic's. status: created (at least one new log) | updated | skipped | running
+ * the highest-scored log's (after merging). status: created (at least one new log) | updated | skipped | running
  *
  * args: { sessionId, transcriptPath?, cwd?, mode: 'auto'|'manual', live?, force? }
  *  - auto (hooks, catch-up) applies every gate; waits for a scout already running on the session.
@@ -187,6 +187,8 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const ledger = store.getLedger(sessionId) || {};
   // Every log from this session was deleted: hooks and catch-ups leave it alone. A manual scout may look again.
   if (ledger.deleted && !manual) return { status: 'skipped', reason: "this session's logs were deleted" };
+  // Deleted before topics existed: nothing says which topic it was, so the whole session stays closed.
+  if (T.legacyDeleted(ledger) && !force) return { status: 'skipped', reason: "this session's log was deleted (use --force to scout it again)" };
 
   const t = condense(tp, config.scout.maxChars);
   const info = resolveProject(cwd || t.cwd, config);
@@ -254,12 +256,13 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const found = T.parseTopics(runClaude(prompt, config), maxTopics);
 
   // A topic the developer deleted never comes back (unless --force). A new topic must clear keepMinScore
-  // unless it carries a mark; a manual scout keeps at least its best topic.
-  const allowed = found.filter((x) => !T.isTombstoned(x, deleted));
-  for (const x of allowed) x.same_as = x.same_as.filter((id) => store.findLog(id));
+  // unless it carries a mark; a manual scout, and a marked session, keep at least their best topic.
+  const allowed = T.screenTopics(found, deleted);
   let keep = allowed.filter((x) => x.same_as.length || x.score >= config.scout.keepMinScore || (x.marks && pending.length));
-  if (manual && !keep.length && allowed.length) keep = [allowed[0]];
+  if ((manual || pending.length) && !keep.length && allowed.length) keep = [allowed[0]];
   if (!keep.length) {
+    // Marks that only pointed at deleted topics are dropped, so they do not force a rescan every time.
+    if (!allowed.length) store.clearMarks(sessionId);
     const best = found.reduce((n, x) => Math.max(n, x.score), 0);
     store.setLedger(sessionId, { skipped: allowed.length ? 'low-score' : 'deleted-topics', score: best, userTurns: t.userTurns, size, scoutedAt: new Date().toISOString() });
     return { status: 'skipped', reason: allowed.length ? `score ${best}` : 'the only topics found were ones you deleted (use --force to log them again)' };
@@ -268,15 +271,16 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   // Pending marks go to the topics they point to, or to the best one.
   const markTargets = keep.some((x) => x.marks) ? keep.filter((x) => x.marks) : [keep[0]];
   const member = { sessionId, startedAt: t.startedAt, endedAt: t.endedAt, userTurns: t.userTurns, branch: t.branch, files: t.files };
+  const claimed = new Set();
   const logs = store.withWriteLock(() => keep.map((topic) => T.applyTopic(topic, {
-    members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits,
+    members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits, claimed,
   })));
   store.clearMarks(sessionId);
   store.setLedger(sessionId, {
     project: info.project, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
     logId: undefined, skipped: undefined, deleted: undefined, deletedAt: undefined,
   });
-  const best = logs[0];
+  const best = logs.reduce((a, b) => (b.score > a.score ? b : a));
   return { status: logs.some((l) => l.status === 'created') ? 'created' : 'updated', logId: best.logId, score: best.score, title: best.title, partial, logs };
 }
 
