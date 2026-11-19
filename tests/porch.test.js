@@ -124,6 +124,7 @@ test('point-of-view rule is in the brief, voice, intake, review and writer', () 
 
 // porch CLI: work folders in $PORCH_HOME.
 const os = require('os');
+const crypto = require('crypto');
 const CLI = path.join(ROOT, 'bin/porch');
 
 function sandbox() {
@@ -260,32 +261,37 @@ const ids = (home) => ['articles', 'case-studies'].flatMap((t) => {
 });
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 
-test('a failed copy leaves nothing in the store', { skip: isRoot && 'root can read chmod 000 files' }, () => {
+test('a failed create leaves nothing in the store', { skip: isRoot && 'root ignores folder modes' }, () => {
   const { base, home, cli } = sandbox();
-  const src = path.join(base, 'src');
-  fs.mkdirSync(src);
-  fs.writeFileSync(path.join(src, 'a.md'), 'a');
-  fs.writeFileSync(path.join(src, 'b.md'), 'b');
-  fs.chmodSync(path.join(src, 'b.md'), 0o000);
-  const r = cli('init', src, '--type', 'article', '--topic', 'T');
-  fs.chmodSync(path.join(src, 'b.md'), 0o644);
+  fs.writeFileSync(path.join(base, 'n.md'), 'x');
+  assert.strictEqual(cli('init', path.join(base, 'n.md'), '--type', 'article', '--topic', 'T').status, 0);
+  fs.chmodSync(path.join(home, 'articles'), 0o500);
+  const r = cli('init', path.join(base, 'n.md'), '--type', 'article', '--topic', 'T');
+  fs.chmodSync(path.join(home, 'articles'), 0o700);
   assert.strictEqual(r.status, 1);
-  assert.match(r.stderr, /^porch: cannot read .*b\.md/);
-  assert.doesNotMatch(r.stderr, /at .*node:/);
-  assert.deepStrictEqual(ids(home), []);
-  assert.ok(!fs.existsSync(path.join(home, '.staging')) || fs.readdirSync(path.join(home, '.staging')).length === 0);
+  assert.match(r.stderr, /^porch: could not create the work folder/);
+  assert.strictEqual(ids(home).length, 1);
+  assert.deepStrictEqual(fs.readdirSync(path.join(home, '.staging')), []);
 });
 
-test('an unreadable subfolder fails with a porch error, not a stack trace', { skip: isRoot && 'root can read it' }, () => {
+test('unreadable files and folders are skipped with a warning', { skip: isRoot && 'root can read them' }, () => {
   const { base, cli } = sandbox();
   const src = path.join(base, 'src');
   fs.mkdirSync(path.join(src, 'sub'), { recursive: true });
   fs.writeFileSync(path.join(src, 'a.md'), 'a');
+  fs.writeFileSync(path.join(src, 'b.md'), 'b');
+  fs.chmodSync(path.join(src, 'b.md'), 0o000);
   fs.chmodSync(path.join(src, 'sub'), 0o000);
-  const r = cli('init', src, '--type', 'article', '--topic', 'T');
+  const r = cli('init', src, '--type', 'article', '--topic', 'T', '--json');
+  fs.chmodSync(path.join(src, 'b.md'), 0o644);
   fs.chmodSync(path.join(src, 'sub'), 0o755);
-  assert.strictEqual(r.status, 1);
-  assert.match(r.stderr, /^porch: cannot read .*sub/);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.stderr, /skipped 2 unreadable path/);
+  assert.doesNotMatch(r.stderr, /at .*node:/);
+  const w = JSON.parse(r.stdout);
+  assert.strictEqual(w.skipped_unreadable.length, 2);
+  assert.ok(fs.existsSync(path.join(w.dir, 'intake/src/a.md')));
+  assert.ok(!fs.existsSync(path.join(w.dir, 'intake/src/b.md')));
 });
 
 test('a store inside the intake folder is left out of the copy', () => {
@@ -395,4 +401,116 @@ test('draft and push point 0.1.0 users at porch import; brief counts the publish
   assert.match(read('skills/draft/SKILL.md'), /porch list --status briefed,drafting,escalated/);
   assert.match(read('skills/brief/SKILL.md'), /only when there is room left in the 3/);
   assert.match(read('references/intake.md'), /counts toward the 3/);
+});
+
+// Second review round on PR #4.
+test('a broken state.json is skipped with a warning, not a crash', () => {
+  const { base, home, cli } = sandbox();
+  fs.writeFileSync(path.join(base, 'n.md'), 'x');
+  const { id } = JSON.parse(cli('init', path.join(base, 'n.md'), '--type', 'article', '--topic', 'T', '--json').stdout);
+  const bad = [
+    ['articles', '{}'],
+    ['articles', '[]'],
+    ['articles', 'not json'],
+    ['case-studies', null], // id matches, but the folder is the wrong type
+  ];
+  for (const [t, body] of bad) {
+    const u = crypto.randomUUID();
+    fs.mkdirSync(path.join(home, t, u), { recursive: true });
+    fs.writeFileSync(path.join(home, t, u, 'state.json'),
+      body ?? JSON.stringify({ id: u, type: 'article', tags: 'oops' }));
+  }
+  const tagsBad = crypto.randomUUID();
+  fs.mkdirSync(path.join(home, 'articles', tagsBad));
+  fs.writeFileSync(path.join(home, 'articles', tagsBad, 'state.json'), JSON.stringify({ id: tagsBad, type: 'article', tags: 'x' }));
+
+  const list = cli('list');
+  assert.strictEqual(list.status, 0, list.stderr);
+  assert.strictEqual((list.stderr.match(/^porch: skipping /gm) || []).length, 4);
+  assert.strictEqual(JSON.parse(cli('list', '--json').stdout).length, 2);
+  for (const args of [['read', id], ['set', id, 'title=x'], ['delete', id]]) {
+    assert.strictEqual(cli(...args).status, 0, args.join(' '));
+  }
+});
+
+test('import keeps # and quotes in frontmatter values', () => {
+  const { base, cli } = sandbox();
+  const dir = path.join(base, '.porch/c-sharp');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'brief.md'),
+    "---\ntype: article   # kind of piece\nslug: c-sharp # the slug\nthesis: 'It''s C# all the way'\n---\n");
+  fs.writeFileSync(path.join(dir, 'draft.md'), '---\ntype: article\ntitle: "C# in 2026: \\"why\\" # not a comment"\n---\n');
+  fs.writeFileSync(path.join(dir, 'review.md'), 'approved\n');
+  assert.strictEqual(cli('import', dir).status, 0);
+  const [w] = JSON.parse(cli('list', '--json').stdout);
+  assert.strictEqual(w.title, 'C# in 2026: "why" # not a comment');
+  assert.strictEqual(w.topic, "It's C# all the way");
+  assert.strictEqual(w.slug, 'c-sharp');
+});
+
+test('init stops at the size limit and tells you to pass --force', () => {
+  const { base, home, cli } = sandbox();
+  const src = path.join(base, 'big');
+  fs.mkdirSync(src);
+  for (let i = 0; i <= 2000; i++) fs.writeFileSync(path.join(src, `f${i}.md`), '');
+  const r = cli('init', src, '--type', 'article', '--topic', 'T');
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /more than 2000 files .* pass --force/);
+  assert.deepStrictEqual(ids(home), []);
+  const forced = cli('init', src, '--type', 'article', '--topic', 'T', '--force', '--json');
+  assert.strictEqual(forced.status, 0, forced.stderr);
+  assert.strictEqual(fs.readdirSync(path.join(JSON.parse(forced.stdout).dir, 'intake/big')).length, 2001);
+});
+
+test('init only sets the mode of a store it creates', () => {
+  const { base, home, cli } = sandbox();
+  fs.writeFileSync(path.join(base, 'n.md'), 'x');
+  cli('init', path.join(base, 'n.md'), '--type', 'article', '--topic', 'T');
+  assert.strictEqual(fs.statSync(home).mode & 0o777, 0o700);
+  fs.chmodSync(home, 0o755);
+  cli('init', path.join(base, 'n.md'), '--type', 'article', '--topic', 'T');
+  assert.strictEqual(fs.statSync(home).mode & 0o777, 0o755);
+});
+
+test('init keeps empty folders', () => {
+  const { base, cli } = sandbox();
+  const src = path.join(base, 'src');
+  fs.mkdirSync(path.join(src, 'empty/deeper'), { recursive: true });
+  fs.writeFileSync(path.join(src, 'a.md'), 'a');
+  const { dir } = JSON.parse(cli('init', src, '--type', 'article', '--topic', 'T', '--json').stdout);
+  assert.ok(fs.statSync(path.join(dir, 'intake/src/empty/deeper')).isDirectory());
+});
+
+test('unapproved imports become the intake of a work folder that /porch:brief <id> picks up', () => {
+  const { base, cli } = sandbox();
+  const dir = path.join(base, '.porch/wip');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'brief.md'), '---\ntype: article\nslug: wip\n---\n');
+  fs.writeFileSync(path.join(dir, 'draft.md'), '---\ntitle: WIP\n---\nBody\n');
+  const r = cli('import', dir);
+  assert.match(r.stdout, /brief it again with \/porch:brief [0-9a-f]{8}/);
+  const [w] = JSON.parse(cli('list', '--json').stdout);
+  assert.strictEqual(w.status, 'new');
+  assert.strictEqual(w.intake, 'intake/wip');
+  assert.ok(fs.existsSync(path.join(w.dir, 'intake/wip/draft.md')));
+  assert.ok(!fs.existsSync(path.join(w.dir, 'brief.md')));
+  const brief = fs.readFileSync(path.join(ROOT, 'skills/brief/SKILL.md'), 'utf8');
+  assert.match(brief, /\*\*Imported folder\.\*\*/);
+  assert.match(brief, /status `new` and an `intake`/);
+});
+
+test('draft_source must be a file inside intake/, and draft copies it', () => {
+  const { base, cli } = sandbox();
+  const src = path.join(base, 'proj');
+  fs.mkdirSync(src);
+  fs.writeFileSync(path.join(src, 'post.md'), 'p');
+  const { id } = JSON.parse(cli('init', src, '--type', 'article', '--topic', 'T', '--json').stdout);
+  assert.strictEqual(cli('set', id, 'draft_source=intake/proj/post.md').status, 0);
+  assert.strictEqual(JSON.parse(cli('read', id, '--json').stdout).draft_source, 'intake/proj/post.md');
+  for (const bad of ['intake/proj/nope.md', 'intake/proj', 'state.json', 'intake/../state.json', '../x']) {
+    assert.strictEqual(cli('set', id, `draft_source=${bad}`).status, 1, bad);
+  }
+  const draft = fs.readFileSync(path.join(ROOT, 'skills/draft/SKILL.md'), 'utf8');
+  assert.match(draft, /copy `dir\/<draft_source>` to `dir\/draft\.md`/);
+  assert.match(fs.readFileSync(path.join(ROOT, 'skills/brief/SKILL.md'), 'utf8'), /draft_source=intake\//);
 });

@@ -49,12 +49,12 @@ porch init <path> --type article|case-study --topic text [--note text] [--force]
 porch import <project>/.porch/<slug>… [--json]
 porch list [--type t] [--status s[,s…]] [--tag x] [--json]
 porch read <id> [brief|draft|review|state] [--path] [--json]
-porch set <id> key=value…      title, topic, slug, tags, status, kind, note, porch_id
+porch set <id> key=value…      title, topic, slug, tags, status, kind, draft_source, note, porch_id
 porch delete <id>… [--yes]     dry run without --yes
 porch home
 ```
 
-An id may be any unique prefix of 4 or more characters. `init` copies real files only: it skips `.git`, `node_modules`, symlinks and the store itself, and refuses intakes over 2000 files or 25 MB unless you pass `--force`. A failed `init` leaves nothing in the store.
+An id may be any unique prefix of 4 or more characters. `init` copies real files and folders only. It skips `.git`, `node_modules`, symlinks, the store itself and anything it cannot read (it lists those). It stops as soon as an intake passes 2000 files or 25 MB unless you pass `--force`. A failed `init` leaves nothing in the store, and only a new store gets mode 0700.
 
 The writer agent writes `draft.md` in the store, outside your project, so Claude Code may ask before the first write. Allow `Write(~/.porch/**)` to skip the prompt.
 
@@ -66,6 +66,6 @@ The writer agent writes `draft.md` in the store, outside your project, so Claude
 porch import .porch/*/
 ```
 
-Each folder becomes a work folder holding its `brief.md`, `draft.md` and `review.md`. An approved draft keeps status `approved` and can be pushed with `/porch:push <id>`. Anything else comes in as `new`. Its brief has no intake check, so start it again with `/porch:brief`. A project's `.porch/voice.md` is not used any more; `import` tells you to copy it to `$PORCH_HOME/voice.md`.
+Each folder becomes a work folder holding its `brief.md`, `draft.md` and `review.md`. An approved draft keeps status `approved` and can be pushed with `/porch:push <id>`. Anything else comes in as `new`, with the old files as its intake. Brief it again with `/porch:brief <id>`, which runs the intake check on them. A project's `.porch/voice.md` is not used any more; `import` tells you to copy it to `$PORCH_HOME/voice.md`.
 
 The MCP URL is in `.mcp.json`; edit it to point at a local Porch.
