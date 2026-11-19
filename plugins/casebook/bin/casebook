@@ -272,7 +272,10 @@ const commands = {
       ? opt.dir || path.join(U.paths.home(), 'handoffs')
       : opt.dir || config.output.dir || path.join(U.paths.home(), 'case-studies');
     const dir = U.mkdirp(path.join(U.expandHome(root), U.slugify(opt.project)));
-    const base = `${new Date().toISOString().slice(0, 10)}-${U.slugify(opt.title)}`;
+    // Local date, so a file written late in the evening is not named after tomorrow (UTC).
+    const now = new Date();
+    const day = [now.getFullYear(), now.getMonth() + 1, now.getDate()].map((n) => String(n).padStart(2, '0')).join('-');
+    const base = `${day}-${U.slugify(opt.title)}`;
     const ext = opt.handoff ? '' : '.md';
     let file = path.join(dir, `${base}${ext}`);
     for (let n = 2; fs.existsSync(file); n++) file = path.join(dir, `${base}-${n}${ext}`);

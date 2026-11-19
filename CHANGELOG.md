@@ -2,6 +2,7 @@
 
 ## Unreleased
 - casebook: `/casebook:handoff <id…>` checks logs against `handoff.md` and writes a handoff folder (`handoff.md` + `logs/`) for a writer; `casebook out-path --handoff` names the folder
+- casebook: `out-path` names files and folders with the local date instead of the UTC date
 
 ## casebook 0.1.0 — 2026-11-16
 - SessionEnd scout with Haiku, per-project privacy policies (public / anonymize / skip)
