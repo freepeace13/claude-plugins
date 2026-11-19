@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- casebook: `/casebook:handoff <id…>` checks logs against `handoff.md` and writes a handoff folder (`handoff.md` + `logs/`) for a writer; `casebook out-path --handoff` names the folder
+
 ## casebook 0.1.0 — 2026-11-16
 - SessionEnd scout with Haiku, per-project privacy policies (public / anonymize / skip)
 - `/casebook:mark`, `list` (with `--marked`), `show`, `write`, `delete` (by ID or batch)

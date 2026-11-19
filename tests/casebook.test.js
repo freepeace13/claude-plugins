@@ -148,6 +148,11 @@ test('mark/unmark by ID, written, out-path, delete and batch delete', () => {
   assert.match(file, /case-studies\/acme-api\/\d{4}-\d{2}-\d{2}-reconnect-storms\.md$/);
   fs.writeFileSync(file, '# x');
   assert.match(s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!']).out, /-2\.md$/);
+  const handoff = s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!', '--handoff']).out;
+  assert.match(handoff, /handoffs\/acme-api\/\d{4}-\d{2}-\d{2}-reconnect-storms$/, 'a handoff is a folder under handoffs/');
+  assert.ok(!fs.existsSync(handoff), 'the folder itself is left for the skill to create');
+  fs.mkdirSync(handoff);
+  assert.match(s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!', '--handoff']).out, /reconnect-storms-2$/);
   s.run(['written', a, '--file', file]);
   assert.deepStrictEqual(idsOf(s.run(['list', '--written']).out), [a]);
   assert.deepStrictEqual(idsOf(s.run(['list', '--unwritten']).out), [b]);
