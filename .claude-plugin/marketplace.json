@@ -21,7 +21,33 @@
       "homepage": "https://github.com/freepeace13/claude-plugins/tree/main/plugins/casebook",
       "license": "MIT",
       "category": "productivity",
-      "tags": ["case-study", "portfolio", "hooks", "writing", "developer-brand"]
+      "tags": [
+        "case-study",
+        "portfolio",
+        "hooks",
+        "writing",
+        "developer-brand"
+      ]
+    },
+    {
+      "name": "porch",
+      "source": "./plugins/porch",
+      "description": "Turn notes or a prompt into a reviewed article or case study and save it to Porch as a draft. You publish it in the admin.",
+      "author": {
+        "name": "Kin Basco",
+        "url": "https://github.com/freepeace13"
+      },
+      "homepage": "https://github.com/freepeace13/claude-plugins/tree/main/plugins/porch",
+      "license": "MIT",
+      "category": "productivity",
+      "tags": [
+        "porch",
+        "writing",
+        "articles",
+        "case-study",
+        "mcp",
+        "developer-brand"
+      ]
     }
   ]
 }

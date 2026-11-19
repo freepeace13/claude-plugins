@@ -3,3 +3,4 @@ node_modules/
 *.tmp
 .casebook/
 .claude/settings.local.json
+.porch/

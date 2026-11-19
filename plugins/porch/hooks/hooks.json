@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__.*porch.*__(create|update)-(article|case-study)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/porch-guard\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "porch": {
+      "type": "http",
+      "url": "https://kinbasco.dev/mcp"
+    }
+  }
+}

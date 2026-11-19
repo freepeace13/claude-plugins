@@ -10,6 +10,7 @@ A plugin marketplace for [Claude Code](https://code.claude.com).
 | Plugin | What it does |
 |---|---|
 | [casebook](plugins/casebook) | Logs potential case studies from every session automatically. You can mark and list the logs, and write case studies from them as Markdown by ID. |
+| [porch](plugins/porch) | Turns notes or a prompt into a reviewed article or case study and saves it to Porch as a draft. You publish it in the admin. |
 
 ## Development
 
@@ -17,6 +18,7 @@ A plugin marketplace for [Claude Code](https://code.claude.com).
 node --test tests/*.test.js          # end-to-end tests (no API calls: a stub replaces `claude -p`)
 claude plugin validate .             # marketplace manifest
 claude plugin validate plugins/casebook
+claude plugin validate plugins/porch
 claude --plugin-dir plugins/casebook # try a plugin without installing it
 ```
 
