@@ -146,9 +146,17 @@ test('mark/unmark by ID, written, out-path, delete and batch delete', () => {
   assert.deepStrictEqual(idsOf(s.run(['list', '--marked']).out), []);
 
   const file = s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!']).out;
+  const local = new Date();
+  const today = [local.getFullYear(), local.getMonth() + 1, local.getDate()].map((n) => String(n).padStart(2, '0')).join('-');
+  assert.ok(path.basename(file).startsWith(today + '-'), 'out-path names files with the local date');
   assert.match(file, /case-studies\/acme-api\/\d{4}-\d{2}-\d{2}-reconnect-storms\.md$/);
   fs.writeFileSync(file, '# x');
   assert.match(s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!']).out, /-2\.md$/);
+  const handoff = s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!', '--handoff']).out;
+  assert.match(handoff, /handoffs\/acme-api\/\d{4}-\d{2}-\d{2}-reconnect-storms$/, 'a handoff is a folder under handoffs/');
+  assert.ok(!fs.existsSync(handoff), 'the folder itself is left for the skill to create');
+  fs.mkdirSync(handoff);
+  assert.match(s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!', '--handoff']).out, /reconnect-storms-2$/);
   s.run(['written', a, '--file', file]);
   assert.deepStrictEqual(idsOf(s.run(['list', '--written']).out), [a]);
   assert.deepStrictEqual(idsOf(s.run(['list', '--unwritten']).out), [b]);
@@ -511,6 +519,22 @@ test('--profile: unknown profile fails with the known list; profiles lists store
 test('marketplace is named kinbasco-plugins', () => {
   const m = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../.claude-plugin/marketplace.json'), 'utf8'));
   assert.strictEqual(m.name, 'kinbasco-plugins');
+});
+
+test('handoff skill: same arguments as write, reads handoff.md, thin writes nothing, stays inside casebook', () => {
+  const root = path.resolve(__dirname, '../plugins/casebook');
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
+  const hint = (doc) => doc.match(/^argument-hint: (.+)$/m)[1];
+  const skill = read('skills/handoff/SKILL.md');
+
+  assert.strictEqual(hint(skill), hint(read('skills/write/SKILL.md')));
+  assert.match(skill, /\$\{CLAUDE_PLUGIN_ROOT\}\/handoff\.md/);
+  assert.ok(fs.existsSync(path.join(root, 'handoff.md')), 'the checks it reads ship with the plugin');
+  for (const id of ['E-1', 'E-2', 'E-3', 'E-4', 'A-1', 'A-2', 'A-3']) assert.match(read('handoff.md'), new RegExp(`\\| ${id} \\|`));
+  assert.match(skill, /Nothing was written/);
+  assert.match(skill, /casebook out-path --handoff/);
+  assert.match(skill, /Do not run `casebook written`/);
+  assert.doesNotMatch(skill, /\/porch:|mcp__plugin_porch/, 'a plugin never points at another plugin');
 });
 
 // ---------------------------------------------------------------- review follow-ups

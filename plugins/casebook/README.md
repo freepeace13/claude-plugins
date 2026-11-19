@@ -37,6 +37,7 @@ casebook config      # prints the path, ~/.casebook/config.json
 | `/casebook:discovery [note] [--score N] [--tags a,b] [--all \| --project P] [--since 90d]` | Find topics across linked sessions, rank the best 3 and log the one you pick. See Discovery. |
 | `/casebook:show <id>` | Read one log. |
 | `/casebook:write <id…> [--out dir] [instructions]` | Write a case study `.md` with the `case-study-writer` agent. |
+| `/casebook:handoff <id…> [--out dir] [instructions]` | Gather and check what a writer needs from the logs against `handoff.md`, asking at most 3 questions. Writes a handoff folder: `handoff.md` (checks, facts with sources, unknowns) and `logs/`. Writes nothing when the logs are too thin. |
 | `/casebook:delete <id…>` | Delete specific logs. |
 | `/casebook:delete --below-score 3 --older-than 30d --unmarked` | Delete a batch. It runs as a dry run first and asks before deleting. |
 
@@ -77,6 +78,7 @@ next session starts ─► SessionStart hook ─► (detached) sweep missed sess
     config.json
     logs/<project>/cb-xxxxxx.md   one log per topic (frontmatter + notes)
     case-studies/<project>/YYYY-MM-DD-<slug>.md   writer output (or output.dir)
+    handoffs/<project>/YYYY-MM-DD-<slug>/         /casebook:handoff output (handoff.md + logs/)
     marks/                      pending marks for sessions still running
     state/                      per-session ledger and locks, install timestamp
     casebook.log                errors from background runs (see `casebook doctor`)
