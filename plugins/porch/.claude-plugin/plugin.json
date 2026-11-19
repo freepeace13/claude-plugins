@@ -1,8 +1,8 @@
 {
   "name": "porch",
   "displayName": "Porch",
-  "version": "0.1.0",
-  "description": "Turn notes or a prompt into a reviewed article or case study and save it to Porch as a draft. You publish it in the Porch admin; the plugin never does.",
+  "version": "0.2.0",
+  "description": "Turn a notes file, folder or draft into a reviewed article or case study and save it to Porch as a draft. You publish it in the Porch admin; the plugin never does.",
   "author": {
     "name": "Kin Basco",
     "url": "https://github.com/freepeace13"
