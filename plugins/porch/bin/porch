@@ -111,19 +111,15 @@ function filesIn(dir) {
   return Object.values(FILES).filter((f) => f !== FILES.state && fs.existsSync(path.join(dir, f)));
 }
 
-/** Whether the copy leaves this path out: SKIP names, symlinks (the intake is a snapshot), and the store itself. */
-function skipped(p, root) {
-  if (p === root) return false;
-  if (SKIP.has(path.basename(p))) return true;
-  if (inside(p, realHome())) return true;
-  try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; }
-}
-
-/** Count what the copy would take. Fails with a porch error on anything unreadable. */
+/**
+ * List the files the copy takes: real files only, leaving out SKIP names, symlinks (the intake is a
+ * snapshot) and the store itself. Fails with a porch error on anything unreadable.
+ */
 function measure(root) {
   let files = 0;
   let bytes = 0;
   let links = 0;
+  const list = [];
   const store = realHome();
   const walk = (p) => {
     let st;
@@ -140,10 +136,11 @@ function measure(root) {
       try { fs.accessSync(p, fs.constants.R_OK); } catch (e) { fail(`cannot read ${p} (${e.code || e.message})`); }
       files++;
       bytes += st.size;
+      list.push(p);
     }
   };
   walk(root);
-  return { files, bytes, links };
+  return { files, bytes, links, list };
 }
 
 /**
@@ -209,7 +206,14 @@ function cmdInit(argv) {
   const name = path.basename(given);
   const work = createWork(opt.type, (staging, id) => {
     fs.mkdirSync(path.join(staging, 'intake'));
-    fs.cpSync(abs, path.join(staging, 'intake', name), { recursive: true, filter: (p) => !skipped(p, abs) });
+    // Copy file by file from the measured list. fs.cpSync refuses any destination inside the source,
+    // even one its filter would skip, and the store may sit inside the intake.
+    const dest = path.join(staging, 'intake', name);
+    for (const file of size.list) {
+      const to = file === abs ? dest : path.join(dest, path.relative(abs, file));
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(file, to);
+    }
     const t = now();
     return {
       id,

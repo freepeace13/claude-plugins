@@ -127,7 +127,7 @@ const os = require('os');
 const CLI = path.join(ROOT, 'bin/porch');
 
 function sandbox() {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'porch-test-'));
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'porch-test-'));
   const home = path.join(base, 'store');
   const cli = (...args) => spawnSync('node', [CLI, ...args], {
     encoding: 'utf8',
@@ -289,7 +289,7 @@ test('an unreadable subfolder fails with a porch error, not a stack trace', { sk
 });
 
 test('a store inside the intake folder is left out of the copy', () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'porch-test-'));
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'porch-test-'));
   const proj = path.join(base, 'proj');
   const home = path.join(proj, 'st');
   fs.mkdirSync(proj);
