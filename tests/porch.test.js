@@ -249,6 +249,7 @@ test('brief skill checks the intake before porch init; draft gates on the check'
   assert.match(read('skills/draft/SKILL.md'), /intake_check: pass/);
   assert.match(read('references/brief.md'), /^intake_check: /m);
   const intake = read('references/intake.md');
-  for (const e of ['E-1', 'E-2', 'E-3', 'E-4', 'E-5', 'E-6', 'E-7', 'E-8', 'E-9', 'E-10']) assert.match(intake, new RegExp(`\\| ${e} \\|`), e);
+  for (const e of ['E-1', 'E-2', 'E-3', 'E-4', 'A-1', 'A-2', 'A-3', 'C-1', 'C-2', 'C-3', 'C-4', 'C-5']) assert.match(intake, new RegExp(`\\| ${e} \\|`), e);
+  for (const h of ['## Common elements (article and case study)', '## Article elements', '## Case study elements']) assert.ok(intake.includes(h), h);
   for (const v of ['`pass`', '`pass-with-answers`', '`thin`']) assert.ok(intake.includes(v), v);
 });

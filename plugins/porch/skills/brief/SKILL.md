@@ -17,7 +17,7 @@ Input: `$ARGUMENTS`. The first word is the path, the second is the type (`articl
 2. **Check the intake** against `references/intake.md`, reading the original path only. For a folder, start with READMEs, notes and docs, and skip generated files and lockfiles.
    - Decide whether it is raw material (`notes`) or a finished draft (`draft`).
    - If it holds more than one topic and the note does not pick one, offer up to 3 candidates in one message and wait for the choice. Then check the chosen topic from the start.
-   - Map every element for the type to its source (path and place), mark it inferred, or mark it missing.
+   - Map every common element (E-) and every element for the type (A- for an article, C- for a case study) to its source (path and place), mark it inferred where the table allows, or mark it missing.
    - If a reject element is missing, or more than 3 ask elements are missing, the verdict is `thin`.
    - Otherwise ask the missing ask elements in one message of at most 3 questions, together with any question needed for whether each number may be published. If an answer leaves an element empty, the verdict is `thin`.
    - On `thin`, report it in the format of `references/intake.md` and stop. Nothing is created.

@@ -33,8 +33,10 @@ stack: [Laravel, Redis]  # case study only
 - E-1 Subject: F-1
 - E-2 First-hand part: F-2
 - E-3 Concrete facts: F-1, F-3, F-4
-- E-4 Point: F-5
-- E-5 Reader: inferred
+- E-4 Reader: inferred
+- A-1 Point: F-5          # article: A-1 to A-3; case study: C-1 to C-5
+- A-2 Reasoning: F-3
+- A-3 Takeaway: inferred
 
 ## Facts
 - F-1 (source: intake/queue.md) Claim, number or name, stated exactly as it may be written
