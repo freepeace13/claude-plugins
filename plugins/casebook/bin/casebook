@@ -72,10 +72,10 @@ function row(log) {
 
 const HEADER = `${pad('ID', 10)} ${pad('DATE', 11)} ${pad('SCORE', 5)} ${pad('MRK', 3)} ${pad('WRT', 3)} TITLE`;
 
-function parseLimit(v, fallback) {
+function parseLimit(v, fallback, flag = '--limit') {
   if (v === undefined) return fallback;
   const n = Number(v);
-  if (!Number.isInteger(n) || n < 1) fail(`--limit must be a positive whole number, got "${v}"`);
+  if (!Number.isInteger(n) || n < 1) fail(`${flag} must be a positive whole number, got "${v}"`);
   return n;
 }
 
@@ -173,7 +173,7 @@ const commands = {
     }
     const minScore = opt.minScore === undefined ? null : Number(opt.minScore);
     if (minScore !== null && !(Number.isInteger(minScore) && minScore >= 1 && minScore <= 5)) fail(`--min-score must be a whole number from 1 to 5, got "${opt.minScore}"`);
-    const candidates = Math.min(8, parseLimit(opt.candidates, 5));
+    const candidates = Math.min(8, parseLimit(opt.candidates, 5, '--candidates'));
     const project = currentProject(opt, config);
     const r = await D.discover(config, {
       note: opt.note || pos.join(' ') || '',
@@ -283,42 +283,46 @@ const commands = {
   mark({ pos, opt }) {
     U.loadConfig();
     if (pos[0] && U.ID_RE.test(pos[0])) {
-      const log = store.findLog(pos[0]);
+      // Logs are shared between sessions: read and save under the write lock so a scan cannot undo the change.
+      const log = store.withWriteLock(() => {
+        const l = store.findLog(pos[0]);
+        return l && store.applyMark(l, pos.slice(1).join(' '));
+      });
       if (!log) fail(`no log with id "${pos[0]}"`);
-      store.applyMark(log, pos.slice(1).join(' '));
       return out(`📌 Marked ${log.meta.id}: ${log.meta.title}`);
     }
     if (!opt.session) fail('mark needs a log ID, or --session <id> to mark the current session');
     const note = pos.join(' ');
     // A session with exactly one log: mark that log. With several, the next scan gives the mark to the topic it points to.
-    const logs = T.logsForSessions([opt.session]);
-    if (logs.length === 1) {
-      store.applyMark(logs[0], note);
-      return out(`📌 Marked ${logs[0].meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
-    }
+    const one = store.withWriteLock(() => {
+      const logs = T.logsForSessions([opt.session]);
+      return logs.length === 1 ? store.applyMark(logs[0], note) : null;
+    });
+    if (one) return out(`📌 Marked ${one.meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
     const marks = store.addPendingMark(opt.session, note);
     out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). It goes to the topic it points to when the session is scanned.`);
   },
 
   unmark({ pos }) {
-    const log = store.findLog(pos[0] || '');
+    U.loadConfig();
+    const log = store.withWriteLock(() => { const l = store.findLog(pos[0] || ''); return l && store.clearLogMarks(l); });
     if (!log) fail(`no log with id "${pos[0] || ''}"`);
-    log.meta.marked = false;
-    log.meta.marks = [];
-    store.saveLog(log);
     out(`Unmarked ${log.meta.id}`);
   },
 
   written({ pos, opt }) {
     if (!opt.file) fail('written needs --file <path>');
     for (const id of pos) {
-      const log = store.findLog(id);
+      const log = store.withWriteLock(() => {
+        const l = store.findLog(id);
+        if (!l) return null;
+        const list = new Set(l.meta.written_to || []);
+        list.add(path.resolve(U.expandHome(opt.file)));
+        l.meta.written_to = [...list];
+        l.meta.written_at = new Date().toISOString();
+        return store.saveLog(l);
+      });
       if (!log) fail(`no log with id "${id}"`);
-      const list = new Set(log.meta.written_to || []);
-      list.add(path.resolve(U.expandHome(opt.file)));
-      log.meta.written_to = [...list];
-      log.meta.written_at = new Date().toISOString();
-      store.saveLog(log);
     }
     out(`Recorded ${pos.length} log(s) as written to ${opt.file}`);
   },

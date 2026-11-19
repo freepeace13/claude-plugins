@@ -8,7 +8,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { PLUGIN_ROOT, paths, readJson, writeJsonAtomic, parseAge } = require('./util');
 const store = require('./store');
-const { condense } = require('./transcript');
+const { condense, findTranscript } = require('./transcript');
 const T = require('./topics');
 const { resolveProject, commitsBetween } = require('./project');
 const { runClaudeAsync, POLICY_RULES, acquireSessionLock } = require('./scout');
@@ -336,7 +336,7 @@ function pick(config, id, n) {
   if (!d) throw new Error(`no discovery "${id}" (discoveries are kept for 7 days)`);
   const t = d.topics.find((x) => x.rank === Number(n));
   if (!t) throw new Error(`discovery ${id} has no topic ${n}; pick 1 to ${d.topics.length}`);
-  const done = d.picked && d.picked[t.rank] && store.findLog(d.picked[t.rank]);
+  const done = d.picked && d.picked[t.rank] && T.resolveLog(d.picked[t.rank]);
   if (done) return { status: 'exists', logId: done.meta.id, title: done.meta.title };
 
   // A discovery can be days old: check again that nothing it relied on changed since.
@@ -356,13 +356,16 @@ function pick(config, id, n) {
     const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
     if (!topic) throw new Error('this topic was deleted since the discovery ran; run discovery again, or with --force');
 
+    // Partial as of now, not as of the discovery: a session that has since settled is finished.
+    const settled = Date.now() - (config.sweep.settleMinutes || 0) * 60000;
+    const partial = sids.some((sid) => { const f = findTranscript(sid); try { return f && fs.statSync(f).mtimeMs > settled; } catch { return false; } });
     const pending = topic.marks ? sids.flatMap((sid) => store.getMarks(sid)) : [];
     const r = store.withWriteLock(() => T.applyTopic(topic, {
-      members: t.members, info: t.info, marks: pending, partial: t.partial, mode: 'discovery', note: d.note, commits: t.commits,
+      members: t.members, info: t.info, marks: pending, partial, mode: 'discovery', note: d.note, commits: t.commits,
     }));
     if (pending.length) for (const sid of sids) store.clearMarks(sid);
     writeJsonAtomic(file, { ...d, picked: { ...(d.picked || {}), [t.rank]: r.logId } });
-    return { ...r, sessions: sids, partial: t.partial };
+    return { ...r, sessions: sids, partial };
   } finally {
     for (const release of releases) release();
   }

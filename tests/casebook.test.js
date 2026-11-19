@@ -1094,3 +1094,80 @@ test('a topic updating a live log is not dropped because a deleted log had a sim
   assert.strictEqual(up.logId, lag);
   assert.match(s.run(['show', lag]).out, /score: 5/);
 });
+
+// ---------------------------------------------------------------- topics review, round 3
+
+test('re-picking a topic whose log was merged away reports it, instead of logging it again', () => {
+  const s = sandbox();
+  s.transcript('ma', 3, onBranch('ma', 'feat/m'));
+  s.transcript('mb', 3, onBranch('mb', 'feat/m'));
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Gateway rewrite', belongs: [1, 2] })) }).out)[1];
+  const x = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
+  const y = JSON.parse(s.run(['scout', '--session', 'other', '--transcript', s.transcript('other', 3), '--json'], { env: reply(topic({ title: 'Unrelated', angle: 'data' })) }).out).logId;
+  s.run(['scout', '--session', 'other', '--json'], { env: reply(topic({ title: 'Gateway rewrite, all of it', same_as: [y, x] })) });
+  assert.ok(!logsJson(s).some((l) => l.id === x), 'x was merged away');
+  const again = s.run(['discover', 'pick', did, '1']);
+  assert.match(again.out, /^Already logged as cb-/);
+  assert.strictEqual(logsJson(s).length, 1);
+});
+
+test('a pick works out partial from the sessions as they are now', () => {
+  const s = sandbox();
+  s.transcript('pp', 3);
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Settled work' })) }).out)[1];
+  const file = path.join(s.env.CASEBOOK_HOME, 'state', 'discoveries', `${did}.json`);
+  const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.strictEqual(d.topics[0].partial, true, 'recent when discovered');
+  const old = new Date(Date.now() - 3600000);
+  for (const dir of fs.readdirSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects'))) fs.utimesSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', dir, 'pp.jsonl'), old, old);
+  const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
+  assert.match(s.run(['show', id]).out, /partial: false/);
+});
+
+test('an empty reply keeps pending marks and says no topic was found', () => {
+  const s = sandbox();
+  s.run(['mark', '--session', 'empty', 'keep', 'me']);
+  const r = s.run(['scout', '--session', 'empty', '--transcript', s.transcript('empty', 3)], { env: { STUB_TOPICS: '{"topics":[]}' } });
+  assert.strictEqual(r.out, 'Skipped: the scout found no topic');
+  assert.ok(fs.existsSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'empty.json')), 'the mark is kept');
+});
+
+test('an unmarked note found in the transcript is not re-added and does not force a rescan', () => {
+  const s = sandbox();
+  const cmd = { type: 'user', sessionId: 'um', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args>queue idea</command-args>' } };
+  const tp = s.transcript('um', 3, [cmd]);
+  const id = JSON.parse(s.run(['scout', '--session', 'um', '--transcript', tp, '--auto', '--json']).out).logId;
+  assert.match(s.run(['show', id]).out, /"note":"queue idea"/);
+  s.run(['unmark', id]);
+  const calls = s.calls().length;
+  const tp2 = s.transcript('um', 4, [cmd]);
+  assert.match(s.run(['scout', '--session', 'um', '--transcript', tp2, '--auto']).out, /not enough new activity/);
+  assert.strictEqual(s.calls().length, calls);
+  s.run(['scout', '--session', 'um', '--transcript', tp2]);
+  assert.doesNotMatch(s.run(['show', id]).out, /queue idea/);
+});
+
+test('a log claimed by a title match is not overwritten by a later topic naming it', () => {
+  const s = sandbox();
+  const tp = s.transcript('tw', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'tw', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixing reconnect storms' })) }).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'tw', '--json'], {
+    env: reply(topic({ title: 'Fixed reconnect storms', score: 4 }), topic({ title: 'Why we picked Redis Streams', angle: 'architecture', same_as: [id], score: 3 })),
+  }).out);
+  assert.deepStrictEqual(r.logs.map((l) => l.status), ['updated', 'created']);
+  assert.match(s.run(['show', id]).out, /^# Fixed reconnect storms/m);
+});
+
+test('the write lock: a stale lock is reclaimed once; mark, unmark and written take it', () => {
+  const s = sandbox();
+  const id = JSON.parse(s.run(['scout', '--session', 'wl', '--transcript', s.transcript('wl', 3), '--json']).out).logId;
+  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'write.lock');
+  fs.writeFileSync(lock, 'crashed');
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(lock, old, old);
+  assert.match(s.run(['mark', id, 'after', 'a', 'crash']).out, /Marked/);
+  assert.ok(!fs.existsSync(lock) && !fs.existsSync(`${lock}.reclaim`), 'reclaimed and released');
+  assert.match(s.run(['written', id, '--file', path.join(s.root, 'a.md')]).out, /Recorded 1/);
+  assert.match(s.run(['unmark', id]).out, /Unmarked/);
+  assert.strictEqual(s.run(['discover', '--candidates', '0']).stderr.trim(), 'casebook: --candidates must be a positive whole number, got "0"');
+});

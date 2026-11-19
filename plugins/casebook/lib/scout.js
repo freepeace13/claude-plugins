@@ -204,6 +204,8 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const partial = live || ((manual || partialIfRecent) && recent);
 
   const mine = T.logsForSessions([sessionId]);
+  // Notes the developer unmarked: a /casebook:mark for them in the transcript is not a mark any more.
+  const unmarked = new Set(ledger.unmarked || []);
   const scanned = Boolean(ledger.scoutedAt || ledger.logId || mine.length);
   if (!manual && scanned) {
     // An auto scout finishes partial logs if the transcript grew at all; otherwise the regrow threshold applies.
@@ -225,7 +227,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
         logs: mine.map((l) => ({ status: 'updated', logId: l.meta.id, score: l.meta.score, title: l.meta.title, angle: l.meta.angle || '' })) };
     }
     // A pending mark always earns a rescan: with several logs, the mark waits for the scan to place it.
-    const hasPending = store.getMarks(sessionId).length > 0 || t.commandMarks.some((n) => !mine.some((l) => (l.meta.marks || []).some((m) => m.note === n)));
+    const hasPending = store.getMarks(sessionId).length > 0 || t.commandMarks.some((n) => !unmarked.has(n) && !mine.some((l) => (l.meta.marks || []).some((m) => m.note === n)));
     if (!(wasPartial && grew) && !hasPending && t.userTurns - (ledger.userTurns || 0) < (config.sweep.regrowTurns || 8)) {
       store.setLedger(sessionId, { size });
       return { status: 'skipped', reason: 'already scanned, not enough new activity' };
@@ -237,7 +239,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const pending = store.getMarks(sessionId);
   const seen = new Set([...mine.flatMap((l) => l.meta.marks || []), ...pending].map((m) => m.note));
   for (const note of t.commandMarks) {
-    if (!seen.has(note)) { pending.push({ at: t.endedAt, note }); seen.add(note); }
+    if (!seen.has(note) && !unmarked.has(note)) { pending.push({ at: t.endedAt, note }); seen.add(note); }
   }
   const promptMarks = [...mine.flatMap((l) => l.meta.marks || []), ...pending];
 
@@ -261,11 +263,15 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   let keep = allowed.filter((x) => x.same_as.length || x.score >= config.scout.keepMinScore || (x.marks && pending.length));
   if ((manual || pending.length) && !keep.length && allowed.length) keep = [allowed[0]];
   if (!keep.length) {
-    // Marks that only pointed at deleted topics are dropped, so they do not force a rescan every time.
-    if (!allowed.length) store.clearMarks(sessionId);
     const best = found.reduce((n, x) => Math.max(n, x.score), 0);
-    store.setLedger(sessionId, { skipped: allowed.length ? 'low-score' : 'deleted-topics', score: best, userTurns: t.userTurns, size, scoutedAt: new Date().toISOString() });
-    return { status: 'skipped', reason: allowed.length ? `score ${best}` : 'the only topics found were ones you deleted (use --force to log them again)' };
+    // No topic at all is not the same as only deleted ones: marks are kept for the next scan.
+    const onlyDeleted = found.length > 0 && !allowed.length;
+    // Marks that only pointed at deleted topics are dropped, so they do not force a rescan every time.
+    if (onlyDeleted) store.clearMarks(sessionId);
+    const skipped = onlyDeleted ? 'deleted-topics' : found.length ? 'low-score' : 'no-topic';
+    store.setLedger(sessionId, { skipped, score: best, userTurns: t.userTurns, size, scoutedAt: new Date().toISOString() });
+    const reason = onlyDeleted ? 'the only topics found were ones you deleted (use --force to log them again)' : found.length ? `score ${best}` : 'the scout found no topic';
+    return { status: 'skipped', reason };
   }
 
   // Pending marks go to the topics they point to, or to the best one.

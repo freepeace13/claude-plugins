@@ -180,7 +180,9 @@ function uniqMarks(marks) {
 function applyTopic(topic, ctx) {
   const sids = ctx.members.map((m) => m.sessionId);
   const claimed = ctx.claimed || new Set();
-  let targets = [...new Map(topic.same_as.map(resolveLog).filter(Boolean).map((l) => [l.meta.id, l])).values()];
+  // A log another topic of this scan already wrote (even through a title match) is not this topic's.
+  let targets = [...new Map(topic.same_as.map(resolveLog).filter(Boolean).map((l) => [l.meta.id, l])).values()]
+    .filter((l) => !claimed.has(l.meta.id));
   if (!targets.length) {
     // Never log the same story twice for the same sessions, even if the model reworded the title and did not
     // say so. A log another topic of this scan already wrote is a different angle, not a twin.

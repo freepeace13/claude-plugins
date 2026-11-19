@@ -94,7 +94,20 @@ function withWriteLock(fn) {
       if (err.code !== 'EEXIST') throw err;
     }
     // A holder that crashed leaves the file behind; writes take milliseconds, so 30s means it is stale.
-    try { if (Date.now() - fs.statSync(file).mtimeMs > 30000) fs.rmSync(file, { force: true }); } catch { /* gone */ }
+    // Only the holder of the reclaim gate removes it, after checking again, so two waiters cannot both
+    // reclaim (and one remove the other's fresh lock).
+    const age = () => { try { return Date.now() - fs.statSync(file).mtimeMs; } catch { return -1; } };
+    if (age() > 30000) {
+      const gate = `${file}.reclaim`;
+      try {
+        fs.writeFileSync(gate, mine, { flag: 'wx' });
+        try { if (age() > 30000) fs.rmSync(file, { force: true }); } finally { fs.rmSync(gate, { force: true }); }
+        continue;
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err;
+        try { if (Date.now() - fs.statSync(gate).mtimeMs > 10000) fs.rmSync(gate, { force: true }); } catch { /* gone */ }
+      }
+    }
     if (Date.now() > deadline) throw new Error('timed out waiting for the casebook write lock');
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
@@ -124,6 +137,19 @@ function addPendingMark(sid, note) {
 }
 const clearMarks = (sid) => fs.rmSync(marksFile(sid), { force: true });
 
+/** Remove a log's marks, and remember their notes so a /casebook:mark found in a transcript is not re-added. */
+function clearLogMarks(log) {
+  const notes = (log.meta.marks || []).map((m) => m.note).filter(Boolean);
+  const sessions = Array.isArray(log.meta.sessions) && log.meta.sessions.length ? log.meta.sessions : [log.meta.session_id].filter(Boolean);
+  for (const sid of sessions) {
+    const prev = getLedger(sid) || {};
+    setLedger(sid, { unmarked: [...new Set([...(prev.unmarked || []), ...notes])] });
+  }
+  log.meta.marked = false;
+  log.meta.marks = [];
+  return saveLog(log);
+}
+
 function applyMark(log, note) {
   log.meta.marked = true;
   log.meta.marks = [...(log.meta.marks || []), { at: new Date().toISOString(), note: note || '' }];
@@ -132,5 +158,5 @@ function applyMark(log, note) {
 
 module.exports = {
   listProjects, allLogs, findLog, readLog, saveLog, createLogFile, deleteLog, withWriteLock,
-  getLedger, setLedger, getMarks, addPendingMark, clearMarks, applyMark,
+  getLedger, setLedger, getMarks, addPendingMark, clearMarks, applyMark, clearLogMarks,
 };
