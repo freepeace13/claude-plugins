@@ -1,0 +1,308 @@
+#!/usr/bin/env node
+'use strict';
+// porch CLI: manages work folders in the Porch store. On PATH inside Claude Code while the plugin is enabled.
+//
+// Store: $PORCH_HOME (default ~/.porch)
+//   voice.md                      optional, replaces the plugin's default voice
+//   articles/<uuid>/              one work folder per piece
+//   case-studies/<uuid>/
+//     state.json                  id, type, status, title, topic, slug, tags, timestamps, ...
+//     intake/<file or folder>     copy of what /porch:brief was given
+//     brief.md, draft.md, review.md
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+
+const TYPES = { article: 'articles', 'case-study': 'case-studies' };
+const STATUSES = ['new', 'briefed', 'drafting', 'approved', 'escalated', 'pushed'];
+const KINDS = ['notes', 'draft'];
+const FILES = { brief: 'brief.md', draft: 'draft.md', review: 'review.md', state: 'state.json' };
+const SETTABLE = ['title', 'topic', 'slug', 'tags', 'status', 'kind', 'note', 'porch_id'];
+const SKIP = new Set(['.git', 'node_modules', '.DS_Store', '.porch']);
+const MAX_BYTES = 25 * 1024 * 1024;
+const MAX_FILES = 2000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+const out = (s = '') => process.stdout.write(s + '\n');
+const fail = (msg) => { process.stderr.write(`porch: ${msg}\n`); process.exit(1); };
+
+function expandHome(p) {
+  return p === '~' || p.startsWith('~/') ? path.join(os.homedir(), p.slice(1)) : p;
+}
+const home = () => path.resolve(expandHome(process.env.PORCH_HOME || '~/.porch'));
+const now = () => new Date().toISOString();
+
+function parseArgs(argv, bools) {
+  const pos = [];
+  const opt = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--') { pos.push(...argv.slice(i + 1)); break; }
+    if (a.startsWith('--')) {
+      const [k, inline] = a.slice(2).split(/=(.*)/s);
+      if (inline !== undefined) opt[k] = inline;
+      else if (bools.has(k)) opt[k] = true;
+      else if (i + 1 >= argv.length) fail(`--${k} needs a value`);
+      else opt[k] = argv[++i];
+    } else pos.push(a);
+  }
+  return { pos, opt };
+}
+
+// ---------- store ----------
+
+function readState(dir) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dir, FILES.state), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeState(dir, state) {
+  const file = path.join(dir, FILES.state);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n');
+  fs.renameSync(tmp, file);
+}
+
+/** Every work folder in the store: [{ dir, state }]. Folders without a readable state.json are skipped. */
+function all() {
+  const items = [];
+  for (const sub of Object.values(TYPES)) {
+    const base = path.join(home(), sub);
+    let names = [];
+    try { names = fs.readdirSync(base); } catch { continue; }
+    for (const name of names) {
+      if (!UUID.test(name)) continue;
+      const dir = path.join(base, name);
+      const state = readState(dir);
+      if (state) items.push({ dir, state });
+    }
+  }
+  return items;
+}
+
+/** Resolve a full id or a unique prefix of at least 4 characters. */
+function resolve(ref) {
+  if (!ref) fail('missing work id (see `porch list`)');
+  const r = String(ref).toLowerCase();
+  if (r.length < 4) fail(`id "${ref}" is too short; give at least 4 characters`);
+  const hits = all().filter((w) => w.state.id.startsWith(r));
+  if (hits.length === 0) fail(`no work folder matches "${ref}" in ${home()}`);
+  if (hits.length > 1) fail(`"${ref}" matches ${hits.length} work folders: ${hits.map((w) => w.state.id).join(', ')}`);
+  return hits[0];
+}
+
+function filesIn(dir) {
+  return Object.values(FILES).filter((f) => f !== FILES.state && fs.existsSync(path.join(dir, f)));
+}
+
+/** Count files and bytes the copy would take, skipping SKIP entries. */
+function measure(src) {
+  let files = 0;
+  let bytes = 0;
+  const walk = (p) => {
+    const st = fs.lstatSync(p);
+    if (st.isDirectory()) {
+      for (const n of fs.readdirSync(p)) if (!SKIP.has(n)) walk(path.join(p, n));
+    } else if (st.isFile()) {
+      files++;
+      bytes += st.size;
+    }
+  };
+  walk(src);
+  return { files, bytes };
+}
+
+// ---------- commands ----------
+
+function cmdInit(argv) {
+  const { pos, opt } = parseArgs(argv, new Set(['json', 'force']));
+  const src = pos[0];
+  if (!src) fail('usage: porch init <path> --type article|case-study --topic text [--note text] [--force] [--json]');
+  if (!TYPES[opt.type]) fail(`--type must be article or case-study, got "${opt.type ?? ''}"`);
+  if (!opt.topic || !String(opt.topic).trim()) {
+    fail('--topic is required: run the intake check (references/intake.md) first and pass the topic it found');
+  }
+  const abs = path.resolve(expandHome(src));
+  let st;
+  try { st = fs.statSync(abs); } catch { fail(`no such file or folder: ${abs}`); }
+  if (!st.isFile() && !st.isDirectory()) fail(`not a file or folder: ${abs}`);
+  if (abs === home() || abs.startsWith(home() + path.sep)) fail(`the intake is inside the store (${home()})`);
+
+  const size = st.isFile() ? { files: 1, bytes: st.size } : measure(abs);
+  if (size.files === 0) fail(`nothing to copy in ${abs}`);
+  if (!opt.force && (size.files > MAX_FILES || size.bytes > MAX_BYTES)) {
+    fail(`${abs} has ${size.files} files, ${(size.bytes / 1048576).toFixed(1)} MB; ` +
+      `the limit is ${MAX_FILES} files and ${MAX_BYTES / 1048576} MB. Point at a smaller folder or pass --force.`);
+  }
+
+  const id = crypto.randomUUID();
+  const dir = path.join(home(), TYPES[opt.type], id);
+  const name = path.basename(abs);
+  fs.mkdirSync(path.join(dir, 'intake'), { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(home(), 0o700); } catch { /* best effort */ }
+  fs.cpSync(abs, path.join(dir, 'intake', name), {
+    recursive: true,
+    filter: (p) => !SKIP.has(path.basename(p)) || p === abs,
+  });
+
+  const t = now();
+  const state = {
+    id,
+    type: opt.type,
+    status: 'new',
+    title: name.replace(/\.[^.]+$/, ''),
+    topic: String(opt.topic).trim(),
+    slug: '',
+    tags: [],
+    kind: null,
+    note: opt.note || '',
+    source: abs,
+    intake: `intake/${name}`,
+    porch_id: null,
+    created_at: t,
+    updated_at: t,
+  };
+  writeState(dir, state);
+  if (opt.json) out(JSON.stringify({ ...state, dir }, null, 2));
+  else out(`${id}\n${dir}`);
+}
+
+const pad = (s, n) => {
+  s = String(s ?? '');
+  return s.length > n ? s.slice(0, n - 1) + '…' : s.padEnd(n);
+};
+
+function cmdList(argv) {
+  const { opt } = parseArgs(argv, new Set(['json']));
+  if (opt.type && !TYPES[opt.type]) fail('--type must be article or case-study');
+  if (opt.status && !STATUSES.includes(opt.status)) fail(`--status must be one of ${STATUSES.join(', ')}`);
+  let items = all();
+  if (opt.type) items = items.filter((w) => w.state.type === opt.type);
+  if (opt.status) items = items.filter((w) => w.state.status === opt.status);
+  if (opt.tag) items = items.filter((w) => (w.state.tags || []).includes(opt.tag));
+  items.sort((a, b) => String(b.state.updated_at).localeCompare(String(a.state.updated_at)));
+
+  if (opt.json) return out(JSON.stringify(items.map((w) => ({ ...w.state, dir: w.dir })), null, 2));
+  out(`store: ${home()}`);
+  if (!items.length) return out('no work folders yet; start one with /porch:brief <path> <type>');
+  out(`${pad('ID', 9)} ${pad('TYPE', 11)} ${pad('STATUS', 10)} ${pad('UPDATED', 11)} ${pad('TAGS', 20)} TITLE`);
+  for (const { state: s } of items) {
+    out(`${pad(s.id.slice(0, 8), 9)} ${pad(s.type, 11)} ${pad(s.status, 10)} ${pad(String(s.updated_at).slice(0, 10), 11)} ` +
+      `${pad((s.tags || []).join(','), 20)} ${s.title || ''}`);
+  }
+}
+
+function cmdRead(argv) {
+  const { pos, opt } = parseArgs(argv, new Set(['json', 'path']));
+  const w = resolve(pos[0]);
+  const which = pos[1];
+  if (opt.path) return out(which ? path.join(w.dir, FILES[which] || fail(`unknown file "${which}"`)) : w.dir);
+  if (which) {
+    if (!FILES[which]) fail(`file must be one of ${Object.keys(FILES).join(', ')}`);
+    const f = path.join(w.dir, FILES[which]);
+    if (!fs.existsSync(f)) fail(`${w.state.id} has no ${FILES[which]} yet`);
+    return process.stdout.write(fs.readFileSync(f, 'utf8'));
+  }
+  const files = filesIn(w.dir);
+  if (opt.json) return out(JSON.stringify({ ...w.state, dir: w.dir, files }, null, 2));
+  const s = w.state;
+  out(`id:       ${s.id}`);
+  out(`type:     ${s.type}`);
+  out(`status:   ${s.status}`);
+  out(`title:    ${s.title}`);
+  if (s.topic) out(`topic:    ${s.topic}`);
+  if (s.slug) out(`slug:     ${s.slug}`);
+  out(`tags:     ${(s.tags || []).join(', ') || '-'}`);
+  if (s.kind) out(`kind:     ${s.kind}`);
+  if (s.note) out(`note:     ${s.note}`);
+  if (s.porch_id) out(`porch_id: ${s.porch_id}`);
+  out(`source:   ${s.source}`);
+  out(`created:  ${s.created_at}`);
+  out(`updated:  ${s.updated_at}`);
+  out(`dir:      ${w.dir}`);
+  out(`files:    ${[s.intake, ...files].join(', ')}`);
+}
+
+function cmdSet(argv) {
+  const [ref, ...pairs] = argv;
+  const w = resolve(ref);
+  if (!pairs.length) fail(`usage: porch set <id> key=value…  (keys: ${SETTABLE.join(', ')})`);
+  const s = { ...w.state };
+  for (const p of pairs) {
+    const m = /^([a-z_]+)=(.*)$/s.exec(p);
+    if (!m) fail(`expected key=value, got "${p}"`);
+    const [, k, v] = m;
+    if (!SETTABLE.includes(k)) fail(`cannot set "${k}"; settable keys: ${SETTABLE.join(', ')}`);
+    if (k === 'status' && !STATUSES.includes(v)) fail(`status must be one of ${STATUSES.join(', ')}`);
+    if (k === 'kind' && !KINDS.includes(v)) fail(`kind must be one of ${KINDS.join(', ')}`);
+    if (k === 'slug' && v && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(v)) fail(`slug must be lowercase words joined by "-", got "${v}"`);
+    if (k === 'topic' && !v.trim()) fail('topic cannot be empty');
+    if (k === 'tags') s.tags = v.split(',').map((t) => t.trim()).filter(Boolean);
+    else if (k === 'porch_id') s.porch_id = v || null;
+    else s[k] = v;
+  }
+  s.updated_at = now();
+  writeState(w.dir, s);
+  out(`updated ${s.id}: ${pairs.map((p) => p.split('=')[0]).join(', ')}`);
+}
+
+function cmdDelete(argv) {
+  const { pos, opt } = parseArgs(argv, new Set(['yes']));
+  if (!pos.length) fail('usage: porch delete <id>… [--yes]');
+  const targets = pos.map(resolve);
+  for (const w of targets) {
+    // Belt and braces: only ever remove <home>/<type dir>/<uuid>.
+    const rel = path.relative(home(), w.dir).split(path.sep);
+    if (rel.length !== 2 || !Object.values(TYPES).includes(rel[0]) || !UUID.test(rel[1])) {
+      fail(`refusing to delete ${w.dir}: not a work folder`);
+    }
+  }
+  if (!opt.yes) {
+    out('would delete (run again with --yes):');
+    for (const w of targets) out(`  ${w.state.id.slice(0, 8)}  ${w.state.type}  ${w.state.title}`);
+    return;
+  }
+  for (const w of targets) {
+    fs.rmSync(w.dir, { recursive: true, force: true });
+    out(`deleted ${w.state.id}  ${w.state.title}`);
+  }
+}
+
+const HELP = `porch: manage Porch work folders in ${home()}  (set PORCH_HOME to move it)
+
+  porch init <path> --type article|case-study --topic text [--note text] [--force] [--json]
+      copy a file or folder that passed the intake check into a new work folder
+  porch list [--type t] [--status s] [--tag x] [--json]
+  porch read <id> [brief|draft|review|state] [--path] [--json]
+  porch set <id> key=value…      keys: ${SETTABLE.join(', ')}
+      status: ${STATUSES.join(' | ')}   tags: comma-separated
+  porch delete <id>… [--yes]     without --yes it only shows what it would delete
+  porch home                     print the store path
+
+An <id> may be any unique prefix of at least 4 characters.`;
+
+const COMMANDS = {
+  init: cmdInit,
+  list: cmdList,
+  ls: cmdList,
+  read: cmdRead,
+  show: cmdRead,
+  set: cmdSet,
+  delete: cmdDelete,
+  rm: cmdDelete,
+  home: () => out(home()),
+};
+
+if (require.main === module) {
+  const [cmd, ...rest] = process.argv.slice(2);
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') out(HELP);
+  else if (COMMANDS[cmd]) COMMANDS[cmd](rest);
+  else fail(`unknown command "${cmd}". Run \`porch help\`.`);
+}
+
+module.exports = { home, resolve, all };

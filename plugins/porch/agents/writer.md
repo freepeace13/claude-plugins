@@ -5,8 +5,8 @@ description: |
 
   <example>
   Context: The /porch:draft skill has a ready brief.
-  user: "/porch:draft notes/queue-backoff.md"
-  assistant: "The brief is ready. Starting the writer with .porch/backoff-after-deploys/brief.md."
+  user: "/porch:draft 1a2b3c4d"
+  assistant: "The brief is ready. Starting the writer with ~/.porch/articles/1a2b3c4d-.../brief.md."
   <commentary>The skill hands over only the brief path and the output path.</commentary>
   </example>
 

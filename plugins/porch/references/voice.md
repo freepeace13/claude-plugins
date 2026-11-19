@@ -1,6 +1,6 @@
 # Default voice
 
-Used when the project has no `.porch/voice.md`.
+Used when the Porch store has no `voice.md` (`$PORCH_HOME/voice.md`, default `~/.porch/voice.md`).
 
 - Write as the site owner, in first person, from start to finish. Never call the author "the owner" or "the user", and do not mention an AI assistant or operator unless a fact in the brief requires it.
 - Plain and specific. Say what happened and what you did.
