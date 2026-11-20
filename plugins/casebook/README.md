@@ -66,7 +66,7 @@ cb-p3x8aa  2026-11-12  5     📌  Magic-link chat resume without visitor accoun
 ## Storage
 
 ```text
-~/.casebook/                    (override with CASEBOOK_HOME); one store for every profile
+~/.casebook/                    (override with CASEBOOK_HOME; a pre-0.3 CASEBOOK_ROOT is used too); one store for every profile
   config.json
   logs/<project>/cb-xxxxxx.md   one log per topic (frontmatter + notes)
   handoffs/<project>/YYYY-MM-DD-<slug>/         /casebook:handoff output (handoff.md + logs/)
@@ -105,7 +105,7 @@ A log is one topic, not one session.
 - **A log can draw on several sessions.** Its frontmatter lists them in `sessions`, with `session_turns` per session. `session_id` is the first of them.
 - **Every topic has a `description`**: 1–2 plain sentences naming the work itself (the part of the system, the problem, the change), worded so the same work gets nearly the same description whatever its title. Duplicates are found by what the work is, not only by how it is titled. Logs from before descriptions are compared by their summary.
 - **Every log is unique.** A scan is shown the logs that already draw on its sessions, plus the project's logs from the 14 days around it (each with its description), and the topics you deleted (with theirs). For each topic it finds, the model either names the existing log it is the same as (`same_as`), which is then updated with the notes rewritten to cover both, or calls it new. A topic with the same angle and a similar title or description as a log of its own sessions updates that log. When a topic matches several logs, they were duplicates: they merge into the first one, and the others are listed in `merged_from`, so their IDs keep working.
-- **Re-scanning is always allowed.** A discovery reads sessions that are already logged, to pull out another angle.
+- **Re-scanning is always allowed.** A discovery reads sessions that are already logged, to pull out another angle. It rewrites a log from exactly the same sessions only when they have news for it: turns added since, or marks made since its last scan.
 - **Marks.** `/casebook:mark` on a session with one log marks that log. Otherwise the mark waits, and the discovery pick that covers its session gives it to the topic it points to.
 - **Deleting** a log remembers its topic (title, angle and description) for each of its sessions, so no discovery brings it back under another title (`--force` lifts that).
 
@@ -124,7 +124,7 @@ A log is one topic, not one session.
    A chain holds at most 6 sessions.
 3. **Shortlist.** With `--tags`, a chain must mention at least one tag. Chains are ranked without a model call (existing log scores, linked chains first, how well they match the note and tags) and the top 5 go on.
 4. **Scan.** Each candidate is one headless model call, side by side, with the merged transcripts as chapters of one story and the existing logs (see Topics). It returns up to `scan.maxTopics` topics, each with a score, how well it fits the note and tags, which of the sessions it draws on, and which existing logs it is the same as.
-5. **Rank.** Topics already logged with exactly those sessions are dropped, and so are deleted topics, topics below `--score`, and, with a note or tags, topics that don't fit. A log is updated by one topic only, and a new topic with the same angle and a similar title or description as a better one is dropped.
+5. **Rank.** Topics already logged with exactly those sessions are dropped (unless the sessions have new turns or marks since that log was scanned), and so are deleted topics, topics below `--score`, and, with a note or tags, topics that don't fit. A log is updated by one topic only, and a new topic with the same angle and a similar title or description as a better one is dropped.
 6. **Check for retellings.** Each chain was scanned on its own, so when two or more topics are left, one more model call compares their titles, angles, descriptions and summaries and groups the ones that tell the same story. In each group, the best topic that updates a log stays (else the best one), and the other new topics go. A topic that updates a log is never dropped. If the call fails, the topics are offered unchecked and `casebook.log` says so.
 7. **Pick.** The best 3 are shown, highest score first, each marked `new log`, `updates <id>` or `merges <ids>`, and you pick one. A new topic that retells what an earlier pick of the same discovery logged reports that log instead of logging it again.
 8. **Log.** The chosen topic becomes a new log, or updates (and merges) the logs it matches. Your note is kept as `discovery_note`.

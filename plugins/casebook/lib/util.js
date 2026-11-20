@@ -37,7 +37,8 @@ function profileNameFor(configDir) {
   return slugify(base.replace(/^\.+/, ''));
 }
 
-const home = () => path.resolve(expandHome(process.env.CASEBOOK_HOME || '~/.casebook'));
+// CASEBOOK_ROOT held the per-profile stores before 0.3: it is now the one store, and its old stores merge into it.
+const home = () => path.resolve(expandHome(process.env.CASEBOOK_HOME || process.env.CASEBOOK_ROOT || '~/.casebook'));
 const configDir = () => normalizeDir(process.env.CLAUDE_CONFIG_DIR || DEFAULT_CLAUDE_DIR);
 
 const paths = {
@@ -265,6 +266,6 @@ function globMatch(pattern, value) {
 }
 
 module.exports = {
-  PLUGIN_ROOT, paths, DEFAULT_CONFIG, loadConfig, mkdirp, readJson, writeJsonAtomic, writeFileAtomic,
+  PLUGIN_ROOT, paths, DEFAULT_CONFIG, loadConfig, migrateProfiles, mkdirp, readJson, writeJsonAtomic, writeFileAtomic,
   normNote, logError, normalizeDir, profileNameFor, parseDoc, renderDoc, logSummary, newId, ID_RE, sessionKey, slugify, parseAge, daysSince, globMatch, expandHome,
 };

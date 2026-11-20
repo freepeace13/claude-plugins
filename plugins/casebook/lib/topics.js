@@ -170,7 +170,7 @@ function screenTopics(found, deleted, shown) {
     // Every log it names went to a better topic. Another angle on that work is still a new topic; the same
     // story told again (same angle, a similar title), or a deleted one, is dropped.
     if (live.length && live.every((id) => claimed.has(id))) {
-      const twins = [...live.map(resolveLog).filter(Boolean).map((l) => l.meta), ...out];
+      const twins = [...live.map(resolveLog).filter(Boolean), ...out];
       if (isTombstoned(x, deleted) || twins.some((t) => sameTopic(t, x))) continue;
     }
     x.same_as = live.filter((id) => !claimed.has(id));
@@ -264,6 +264,12 @@ function applyTopic(topic, ctx) {
     if (meta.policy === 'public' && prior.some((l) => l.meta.policy && l.meta.policy !== 'public')) meta.policy = 'anonymize';
   }
   const body = renderBody(topic);
+
+  // A session closed by an older casebook (its log deleted before topics) has a log again: discovery may scan it.
+  for (const sid of sids) {
+    const l = store.getLedger(sid);
+    if (l && l.deleted) store.setLedger(sid, { deleted: undefined, deletedAt: undefined });
+  }
 
   if (!survivor) {
     const log = store.createLogFile(ctx.info.project, meta, body);

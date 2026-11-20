@@ -279,6 +279,16 @@ function memberRecord(m) {
   };
 }
 
+/** Turns or marks a log has not been scanned with yet: a pending mark of its sessions, a mark of the log made since
+ *  its last scan, or a session that grew since. */
+function hasNews(log, members) {
+  const m = log.meta;
+  const since = m.scanned_at || m.created_at || '';
+  const turns = m.session_turns || {};
+  return members.some((x) => store.getMarks(x.sessionId).length || (x.userTurns || 0) > (turns[x.sessionId] || 0))
+    || (m.marks || []).some((k) => String(k.at || '') > since);
+}
+
 /** One model call over a chain. Returns its topics, each cut down to the sessions it belongs to. */
 async function scanChain(g, config, opts) {
   const sids = g.members.map((m) => m.sessionId);
@@ -308,8 +318,9 @@ async function scanChain(g, config, opts) {
       const twin = own.find((l) => T.sameTopic(l, topic));
       if (twin) { same = [twin]; topic.same_as = [twin.meta.id]; }
     }
-    // Already logged with these very sessions and nothing to merge: not a discovery.
-    if (same.length === 1 && members.every((m) => T.sessionsOf(same[0]).includes(m.sessionId))) continue;
+    // Already logged with these very sessions and nothing to merge: not a discovery, unless the sessions have
+    // news for that log (new turns, or marks made since its last scan), and then it refreshes the log.
+    if (same.length === 1 && members.every((m) => T.sessionsOf(same[0]).includes(m.sessionId)) && !hasNews(same[0], members)) continue;
     // Only what concerns this topic's own sessions: their commits, and the links between them.
     const ids = new Set(members.map((m) => m.sessionId));
     out.push({
@@ -344,7 +355,7 @@ async function dedupeTopics(list, config) {
   ].join('\n'));
   let groups;
   try {
-    const text = await runClaudeAsync(tpl.replace('{{TOPICS}}', lines.join('\n\n')), config);
+    const text = await runClaudeAsync(tpl.replace('{{TOPICS}}', lines.join('\n\n')), config, { timeoutSec: Math.min(config.scan.timeoutSec || 240, 90) });
     const raw = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
     groups = Array.isArray(raw.duplicates) ? raw.duplicates : [];
   } catch (err) {
@@ -462,6 +473,8 @@ function pick(config, id, n) {
   const sids = t.members.map((m) => m.sessionId);
   // Every check runs under the write lock, so nothing can change a target between the check and the write.
   const r = store.withWriteLock(() => {
+    // Read the discovery again under the lock: another pick of it may have just recorded its log.
+    const pickedNow = Object.values(readJson(file, d).picked || {}).map((x) => T.resolveLog(x)).filter(Boolean);
     const gone = t.updates.filter((uid) => !T.resolveLog(uid));
     // Any of them: a log deleted since must not come back merged into another.
     if (gone.length) {
@@ -476,15 +489,13 @@ function pick(config, id, n) {
     // A log these sessions gained since may already tell this story: the discovery never weighed it.
     if (t.known) {
       // Logs made by earlier picks of this same discovery are other topics it listed, not news.
-      const mineToo = Object.values(d.picked || {}).map((x) => T.resolveLog(x)).filter(Boolean).map((l) => l.meta.id);
+      const mineToo = pickedNow.map((l) => l.meta.id);
       const fresh = T.logsForSessions(sids).map((l) => l.meta.id).filter((x) => !t.known.includes(x) && !t.updates.includes(x) && !mineToo.includes(x));
       if (fresh.length) throw userError(`these sessions were logged again since the discovery ran (${fresh.join(', ')}); run discovery again`);
     }
-    // A new topic that retells what an earlier pick of this discovery already logged is that log. Read the
-    // discovery again under the lock: another pick may have just recorded its log.
+    // A new topic that retells what an earlier pick of this discovery already logged is that log.
     if (!t.updates.length) {
-      const picked = Object.values(readJson(file, d).picked || {}).map((x) => T.resolveLog(x)).filter(Boolean);
-      const twin = picked.find((l) => T.sameTopic(l, t.topic));
+      const twin = pickedNow.find((l) => T.sameTopic(l, t.topic));
       if (twin) return { status: 'exists', logId: twin.meta.id, title: twin.meta.title };
     }
     const deleted = d.force ? [] : T.tombstones(sids);

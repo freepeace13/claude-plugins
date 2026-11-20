@@ -435,6 +435,71 @@ test('a scan of some of a log\'s sessions never lowers its score, and sees the w
   assert.match(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8'), /END-OF-LONG/, 'the model sees the whole log it may rewrite');
 });
 
+test('a discovery rewrites a log of the same sessions only when they have new marks or turns', () => {
+  const s = sandbox();
+  s.transcript('ra', 3);
+  const la = seedLog(s, { sessions: ['ra'], scanned_at: new Date(Date.now() - 1000).toISOString() });
+  const same = reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [la], belongs: [1] }));
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'nothing new');
+
+  s.run(['mark', la, 'add the before and after numbers']);
+  const r = s.run(['discover'], { env: same });
+  assert.match(r.out, new RegExp(`updates: ${la}`), 'a mark since the last scan is news');
+  assert.match(s.run(['discover', 'pick', didOf(r.out), '1']).out, new RegExp(`Updated ${la}`));
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'scanned with that mark now');
+
+  s.transcript('ra', 5);
+  assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${la}`), 'new turns are news');
+});
+
+test('a --force pick reopens a session closed by an older casebook', () => {
+  const s = sandbox();
+  s.transcript('old', 3);
+  const ledger = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions', 'old.json');
+  fs.mkdirSync(path.dirname(ledger), { recursive: true });
+  fs.writeFileSync(ledger, JSON.stringify({ sessionId: 'old', deleted: true, logId: 'cb-aaaaaa' }));
+  discoverPick(s, reply(topic({ title: 'Back again' })), { args: ['--force'] });
+  assert.ok(JSON.parse(s.run(['discover', '--dry-run', '--json']).out).some((g) => g.sessions.includes('old')), 'no --force needed any more');
+  assert.ok(!JSON.parse(fs.readFileSync(ledger, 'utf8')).deleted);
+});
+
+test('flags removed in 0.3 fail instead of widening a batch delete', () => {
+  const s = sandbox();
+  const id = seedLog(s, { score: 2 });
+  for (const flag of ['--unwritten', '--written', '--pending', '--generated']) {
+    const r = s.run(['delete', '--below-score', '3', '--yes', flag]);
+    assert.strictEqual(r.status, 1, flag);
+    assert.match(r.stderr, new RegExp(`${flag} was removed in 0\\.3`));
+  }
+  assert.strictEqual(s.run(['list', '--unwritten']).status, 1);
+  assert.ok(logsJson(s).some((l) => l.id === id), 'nothing deleted');
+});
+
+test('show and the startup hook merge old stores first; a CASEBOOK_ROOT store is merged into itself', () => {
+  const s = sandbox();
+  const oldStore = (home, name, id) => {
+    const dir = path.join(home, name);
+    seedLog({ env: { CASEBOOK_HOME: dir } }, { id });
+    fs.writeFileSync(path.join(dir, 'profile.json'), JSON.stringify({ name }));
+    return dir;
+  };
+  oldStore(s.env.CASEBOOK_HOME, 'default', 'cb-old001');
+  const shown = s.run(['show', 'cb-old001', '--path']);
+  assert.strictEqual(shown.status, 0, shown.stderr);
+  assert.strictEqual(shown.out, path.join(s.env.CASEBOOK_HOME, 'logs', 'acme-api', 'cb-old001.md'));
+
+  oldStore(s.env.CASEBOOK_HOME, 'work', 'cb-old002');
+  assert.strictEqual(s.run(['hook', 'session-start']).status, 0);
+  assert.ok(fs.existsSync(path.join(s.env.CASEBOOK_HOME, 'logs', 'acme-api', 'cb-old002.md')));
+
+  const root = path.join(s.root, 'cbroot');
+  oldStore(root, 'default', 'cb-old003');
+  fs.copyFileSync(path.join(s.env.CASEBOOK_HOME, 'config.json'), path.join(root, 'default', 'config.json'));
+  const env = { CASEBOOK_HOME: '', CASEBOOK_ROOT: root };
+  assert.deepStrictEqual(JSON.parse(s.run(['list', '--json'], { env }).out).map((l) => l.id), ['cb-old003']);
+  assert.ok(fs.existsSync(path.join(root, 'config.json')));
+});
+
 test('a log deleted before topics existed keeps its session out of discovery unless --force', () => {
   const s = sandbox();
   s.transcript('old', 3);

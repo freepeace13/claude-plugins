@@ -35,9 +35,9 @@ function checkRun(r) {
 }
 
 /** Run the model on a prompt without blocking, so several scans can run side by side. Resolves to stdout. */
-async function runClaudeAsync(prompt, config) {
+async function runClaudeAsync(prompt, config, opts = {}) {
   const { cmd, full, fallback } = claudeInvocation(config);
-  const timeoutSec = config.scan.timeoutSec || 240;
+  const timeoutSec = opts.timeoutSec || config.scan.timeoutSec || 240;
   const once = (args) => new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
