@@ -38,7 +38,7 @@ function isCasebookTool(b) {
   const i = b.input || {};
   if (b.name === 'Skill') return /^casebook:/.test(String(i.skill || i.name || ''));
   // `casebook` as a command word anywhere in the line: after `cd x &&`, a pipe or VAR=value prefixes.
-  if (b.name === 'Bash') return /(^|[;&|(]\s*|\s)casebook(\s|$)/.test(String(i.command || '').split('\n')[0]);
+  if (b.name === 'Bash') return /(^|[;&|(]\s*)(\w+=\S*\s+)*casebook(\s|$)/.test(String(i.command || '').split('\n')[0]);
   const fp = i.file_path || i.path || '';
   return Boolean(fp) && path.resolve(String(fp)).startsWith(paths.home() + path.sep);
 }
@@ -100,14 +100,18 @@ function condense(file, maxChars = 60000) {
         const cmd = parseCommand(b.text);
         if (cmd) {
           // Casebook's own commands are not work: a discovery must not count itself as news for the session.
-          inCasebook = /^\/?casebook:/.test(cmd.name);
-          if (inCasebook) continue;
+          // Those that print other work (listings, logs, a handoff) keep their reply out too; a mark prints none.
+          const ours = /^\/?casebook:/.test(cmd.name);
+          inCasebook = ours && !/^\/?casebook:mark$/.test(cmd.name);
+          if (ours) continue;
           out.push(`USER: ${cmd.name} ${clip(cmd.args, 400)}`.trim());
           userTurns++;
           continue;
         }
         const t = stripNoise(b.text);
         if (!t || t.startsWith('Caveat:')) continue;
+        // A short reply inside a casebook command answers it (a topic number, a yes): not work, and still casebook's.
+        if (inCasebook && t.length <= 20) continue;
         inCasebook = false;
         out.push(`USER: ${clip(t)}`);
         if (opening.length < 2) opening.push(clip(t, 1000));

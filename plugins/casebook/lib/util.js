@@ -164,12 +164,12 @@ function migrateLocked() {
     const old = path.join(dir, 'config.json');
     let config = '';
     if (!fs.existsSync(paths.config())) {
-      try { fs.renameSync(old, paths.config()); config = '; its config.json is the shared one'; } catch { /* none, or another process won */ }
+      // Copied, not moved: a casebook 0.2 process still running (a session opened before the update) keeps its rules.
+      try { fs.copyFileSync(old, paths.config(), fs.constants.COPYFILE_EXCL); config = '; its config.json is the shared one'; } catch { /* none, or another process won */ }
     } else if (fs.existsSync(old)) {
       try {
         const { added, scanDropped } = mergeConfigs(paths.config(), old);
-        fs.renameSync(old, path.join(dir, 'config.migrated.json'));
-        config = `; its default policy and ${added} project rule(s) were merged into ${paths.config()}${scanDropped ? '; its scan settings were not used (see config.migrated.json)' : ''}`;
+        config = `; its default policy and ${added} project rule(s) were merged into ${paths.config()}${scanDropped ? `; its scan settings were not used (see ${old})` : ''}`;
       } catch (err) { config = `; its config.json could not be merged (${err.message}), see ${dir}`; }
     }
     try { fs.renameSync(path.join(dir, 'profile.json'), path.join(dir, 'profile.migrated.json')); } catch { continue; }

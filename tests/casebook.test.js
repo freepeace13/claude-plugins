@@ -396,7 +396,7 @@ test('one model call checks the remaining topics for retellings in other words',
   assert.strictEqual(fs.readFileSync(path.join(s.root, 'dedupe-calls.log'), 'utf8').trim().split('\n').length, calls);
   // Every topic updates a log: nothing could be dropped, no call.
   const y = seedLog(s, { sessions: ['u2'], title: 'Schema for job audit', angle: 'data' });
-  s.run(['mark', x, 'news']); s.run(['mark', y, 'news']);
+  s.transcript('u1', 4, onBranch('u1', 'feat/u')); s.transcript('u2', 4, onBranch('u2', 'feat/u'));
   const all = s.run(['discover'], { env: reply(topic({ title: 'Queue retry budget', same_as: [x], belongs: [1] }), topic({ title: 'Schema for job audit', angle: 'data', same_as: [y], belongs: [2] })) });
   assert.match(all.out, /2 topic\(s\)/);
   assert.strictEqual(fs.readFileSync(path.join(s.root, 'dedupe-calls.log'), 'utf8').trim().split('\n').length, calls);
@@ -441,52 +441,39 @@ test('a scan of some of a log\'s sessions never lowers its score, and sees the w
   assert.match(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8'), /END-OF-LONG/, 'the model sees the whole log it may rewrite');
 });
 
-test('a discovery rewrites a log of the same sessions only when they have new marks or turns', () => {
+test('a discovery rewrites a log of the same sessions only when they have new turns or pending marks for it', () => {
   const s = sandbox();
   s.transcript('ra', 3);
   const la = seedLog(s, { sessions: ['ra'], scanned_at: new Date(Date.now() - 1000).toISOString() });
   const same = reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [la], belongs: [1] }));
   assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'nothing new');
-
   s.run(['mark', la, 'add the before and after numbers']);
-  const r = s.run(['discover'], { env: same });
-  assert.match(r.out, new RegExp(`updates: ${la}`), 'a mark since the last scan is news');
-  assert.match(s.run(['discover', 'pick', didOf(r.out), '1']).out, new RegExp(`Updated ${la}`));
-  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'scanned with that mark now');
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'a mark by ID is in the log already');
 
   s.transcript('ra', 5);
-  assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${la}`), 'new turns are news');
-});
-
-test('a mark made between a discovery and its pick stays news', () => {
-  const s = sandbox();
-  s.transcript('mp', 3);
-  const la = seedLog(s, { sessions: ['mp'], scanned_at: new Date(Date.now() - 60000).toISOString() });
-  s.run(['mark', la, 'first']);
-  const same = reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [la], belongs: [1] }));
   const r = s.run(['discover'], { env: same });
-  s.run(['mark', la, 'made before the pick']);
-  // The mark changed the log: the pick refuses and asks for a new discovery, which sees the mark.
-  assert.match(s.run(['discover', 'pick', didOf(r.out), '1']).stderr, /changed since the discovery ran/);
-  const again = s.run(['discover'], { env: same });
-  assert.match(again.out, new RegExp(`updates: ${la}`));
-  assert.strictEqual(s.run(['discover', 'pick', didOf(again.out), '1']).status, 0);
-  const created = JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'state', 'discoveries', `${didOf(again.out)}.json`), 'utf8')).scan_started_at;
-  assert.strictEqual(logsJson(s).find((l) => l.id === la).scanned_at, created, 'scanned as of the start of the discovery, not the pick');
+  assert.match(r.out, new RegExp(`updates: ${la}`), 'new turns are news');
+  assert.strictEqual(s.run(['discover', 'pick', didOf(r.out), '1']).status, 0);
+  const started = JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'state', 'discoveries', `${didOf(r.out)}.json`), 'utf8')).scan_started_at;
+  assert.strictEqual(logsJson(s).find((l) => l.id === la).scanned_at, started, 'scanned as of the start of the discovery, not the pick');
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'scanned with those turns now');
 });
 
-test('a marked session is a candidate however short', () => {
+test('a session with a pending mark is a candidate however short, even after a scan saw it', () => {
   const s = sandbox();
   s.transcript('tiny', 1);
   const sids = () => JSON.parse(s.run(['discover', '--dry-run', '--json']).out).flatMap((g) => g.sessions);
   assert.deepStrictEqual(sids(), []);
   s.run(['mark', '--session', 'tiny', 'the deadlock fix']);
   assert.deepStrictEqual(sids(), ['tiny']);
-  // Logged, and marked again by ID: still a candidate, so the new mark is scanned.
-  const id = discoverPick(s, reply(topic({ title: 'Deadlock fix', marks: true })));
-  assert.deepStrictEqual(sids(), [], 'its marks are placed: short again');
-  s.run(['mark', id, 'the before and after numbers']);
+  // A narrowed scan that places nothing leaves the mark unseen; an open one marks it seen, and it stays a candidate.
+  s.run(['discover', '--tags', 'user turn'], { env: reply(topic({ title: 'Other', fit: 0 })) });
+  assert.ok(!JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'tiny.json'), 'utf8'))[0].seen);
+  s.run(['discover'], { env: { STUB_TOPICS: '{"topics":[]}' } });
+  assert.ok(JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'tiny.json'), 'utf8'))[0].seen);
   assert.deepStrictEqual(sids(), ['tiny']);
+  discoverPick(s, reply(topic({ title: 'Deadlock fix', marks: true })));
+  assert.deepStrictEqual(sids(), [], 'its mark is placed: short again');
 });
 
 test('a pending mark a scan saw and placed nowhere is no longer news', () => {
@@ -520,8 +507,8 @@ test('older logs and marks a scan already saw are not news', () => {
   fs.mkdirSync(path.dirname(marks), { recursive: true });
   fs.writeFileSync(marks, JSON.stringify([{ at: new Date(Date.now() - 86400000).toISOString(), note: 'seen', session: 'v1' }]));
   assert.match(s.run(['discover'], { env: same }).out, /No topic matched/);
-  s.run(['mark', '--session', 'v1', 'fresh']);
-  assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${old}`), 'a mark of its one log since it was made is news');
+  s.transcript('v1', 4);
+  assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${old}`), 'a turn more than it recorded is news');
 });
 
 test('a --force pick reopens a session closed by an older casebook', () => {
@@ -1103,7 +1090,7 @@ test('old per-profile stores are merged into the one store', () => {
   assert.strictEqual(merged.defaultPolicy, 'skip', 'the strictest default policy wins');
   assert.deepStrictEqual(merged.projects[0], { match: '*/client-x/*', policy: 'skip' }, 'another profile\'s privacy rules are kept, first');
   assert.ok(merged.scan.command, 'the default profile\'s scan settings stay');
-  assert.ok(fs.existsSync(path.join(p.cb, 'personal', 'config.migrated.json')));
+  assert.ok(fs.existsSync(path.join(p.cb, 'personal', 'config.json')), 'kept for a 0.2 process still running');
   for (const name of ['default', 'personal']) {
     assert.ok(fs.existsSync(path.join(p.cb, name, 'profile.migrated.json')));
     assert.ok(!fs.existsSync(path.join(p.cb, name, 'profile.json')));
@@ -1192,8 +1179,13 @@ test('casebook\'s own commands are not turns of the session', () => {
   fs.writeFileSync(f, raw2);
   const c2 = condense(f);
   assert.doesNotMatch(c2.text, /casebook list|casebook:show|handoffs/);
-  fs.writeFileSync(f, tools(use('Bash', { command: 'cd ~/proj && casebook list --all' }), use('Bash', { command: 'casebook-lint .' })));
-  assert.deepStrictEqual(condense(f).text.split('\n'), ['  [Bash] casebook-lint .']);
+  fs.writeFileSync(f, tools(use('Bash', { command: 'cd ~/proj && CASEBOOK_HOME=/x casebook list --all' }), use('Bash', { command: 'casebook-lint .' }), use('Bash', { command: 'grep -rn casebook lib' })));
+  assert.deepStrictEqual(condense(f).text.split('\n'), ['  [Bash] casebook-lint .', '  [Bash] grep -rn casebook lib']);
+  // A topic number typed in answer to a discovery is not a turn; a mark's reply is still work.
+  fs.writeFileSync(f, [line('<command-name>/casebook:discovery</command-name>'), said('1. topic'), line('1'), said('Created cb-x'),
+    line('<command-name>/casebook:mark</command-name>'), said('marked, carrying on with the fix')].join('\n'));
+  assert.strictEqual(condense(f).userTurns, 0);
+  assert.deepStrictEqual(condense(f).text.split('\n'), ['CLAUDE: marked, carrying on with the fix']);
   assert.match(c2.text, /fixing retries/);
   assert.deepStrictEqual(c2.files, ['/repo/retry.js']);
 });

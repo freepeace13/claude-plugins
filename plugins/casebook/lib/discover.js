@@ -81,8 +81,8 @@ function collectSessions(config, { project, since, exclude, force }) {
         files: t.files, readFiles: t.readFiles, prUrls: t.prUrls, aiTitle: t.aiTitle, opening: t.opening,
         text: t.text,
         logs: logs.map((l) => ({ id: l.meta.id, score: l.meta.score, title: l.meta.title, tags: l.meta.tags || [] })),
-        // A mark no scan has seen yet: pending and unseen, or on one of its logs since that log's last scan.
-        marked: store.getMarks(sessionId).some((k) => !k.seen) || logs.some((l) => (l.meta.marks || []).some(newerThan(l.meta))),
+        // Pending marks wait for a scan of this session to place them. A mark of a log by ID is in the log already.
+        pending: store.getMarks(sessionId),
       });
     }
   }
@@ -211,8 +211,9 @@ function shortlist(groups, config, { note, tags }) {
   const out = [];
   for (const g of groups) {
     // A session the user marked is always a candidate, however short: its mark waits for a scan of it.
-    const marked = g.members.some((m) => m.marked);
-    if (!marked && g.members.length === 1 && g.members[0].userTurns < config.scan.minTurns) continue;
+    // A session with a pending mark is a candidate however short; one no scan has seen yet also ranks higher.
+    const marked = g.members.some((m) => m.pending.some((k) => !k.seen));
+    if (!g.members.some((m) => m.pending.length) && g.members.length === 1 && g.members[0].userTurns < config.scan.minTurns) continue;
     const text = groupText(g);
     const tagHits = tags.filter((t) => hasWord(text, norm(t)));
     if (tags.length && !tagHits.length) continue;
@@ -288,19 +289,12 @@ function memberRecord(m) {
 function hasNews(log, members, topic) {
   const m = log.meta;
   const turns = m.session_turns || (m.session_id ? { [m.session_id]: m.user_turns || 0 } : {});
-  const newer = newerThan(m);
   const pending = members.map((x) => store.getMarks(x.sessionId));
   // The model placed the sessions' pending marks on this topic: the pick gives them to the log.
   if (topic && topic.marks && pending.some((p) => p.length)) return true;
-  // A pending mark a scan saw and left unplaced stays pending, but is news only once.
-  return members.some((x, i) => pending[i].some((k) => !k.seen && newer(k)) || (x.userTurns || 0) > (turns[x.sessionId] || 0))
-    || (m.marks || []).some(newer);
-}
-
-/** Made since the log's last scan. Older logs: 0.2 has scouted_at, 0.1 only created_at. */
-function newerThan(meta) {
-  const since = meta.scanned_at || meta.scouted_at || meta.created_at || '';
-  return (k) => String(k.at || '') > since;
+  // Older logs: 0.2 has scouted_at, 0.1 only created_at. A pending mark a scan saw and left unplaced is news once.
+  const since = m.scanned_at || m.scouted_at || m.created_at || '';
+  return members.some((x, i) => pending[i].some((k) => !k.seen && String(k.at || '') > since) || (x.userTurns || 0) > (turns[x.sessionId] || 0));
 }
 
 /** One model call over a chain. Returns its topics, each cut down to the sessions it belongs to. */
@@ -350,7 +344,8 @@ async function scanChain(g, config, opts) {
   }
   // Pending marks this scan saw and tied to no topic stay pending, but are no longer news for these sessions' logs.
   // Bookkeeping only: a busy lock must not throw away a scan that worked.
-  if (!out.some((f) => f.topic.marks)) {
+  // Only an open scan: one narrowed by a note or tags looks for something else, and may rightly place nothing.
+  if (!opts.narrowed && !out.some((f) => f.topic.marks)) {
     try { store.withWriteLock(() => { for (const sid of sids) store.markSeen(sid, startedScan); }, { waitMs: 5000 }); } catch (err) { logError('could not record the marks a scan saw', err); }
   }
   return out;
@@ -436,9 +431,11 @@ async function discover(config, o) {
   const summary = { sessions: sessions.length, chains: groups.filter((g) => g.members.length > 1).length, eligible: ranked.length };
   if (o.dryRun || !picked.length) return { ...summary, shortlist: picked, topics: [] };
 
+  // A note that names nothing to look for ("anything that scores > 3") filters by score only, not by fit.
+  const narrowed = Boolean(keywords(o.note).length || tags.length);
   const scanned = await Promise.all(picked.map(async (g) => {
     try {
-      return { ok: true, found: await scanChain(g, config, { note: o.note, tags, force: o.force }) };
+      return { ok: true, found: await scanChain(g, config, { note: o.note, tags, force: o.force, narrowed }) };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -446,7 +443,6 @@ async function discover(config, o) {
   const failed = scanned.filter((s) => !s.ok).map((s) => s.error);
   const found = scanned.filter((s) => s.ok).flatMap((s) => s.found);
   // A note that names nothing to look for ("anything that scores > 3") filters by score only, not by fit.
-  const narrowed = Boolean(keywords(o.note).length || tags.length);
   const candidates = found
     .filter((f) => f.topic.score >= (o.minScore || 1) && (!narrowed || f.topic.fit >= 1))
     .sort((a, b) => b.topic.score - a.topic.score || b.topic.fit - a.topic.fit || b.members.length - a.members.length
@@ -528,7 +524,17 @@ function pick(config, id, n) {
     // A new topic that retells what an earlier pick of this discovery already logged is that log.
     if (!t.updates.length) {
       const twin = pickedNow.find((l) => l.meta.project === t.info.project && T.sameTopic(l, t.topic));
-      if (twin) return { status: 'exists', logId: twin.meta.id, title: twin.meta.title };
+      if (twin) {
+        // The marks the model tied to this topic go to the log that tells it.
+        if (t.topic.marks) {
+          for (const sid of sids) {
+            const m = store.getMarks(sid);
+            for (const k of m) store.applyMark(twin, k.note, sid);
+            store.consumeMarks(sid, m);
+          }
+        }
+        return { status: 'exists', logId: twin.meta.id, title: twin.meta.title };
+      }
     }
     const deleted = d.force ? [] : T.tombstones(sids);
     const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
