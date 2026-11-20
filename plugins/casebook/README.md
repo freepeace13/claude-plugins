@@ -41,7 +41,7 @@ casebook config      # prints the path, ~/.casebook/config.json
 | `/casebook:delete <id…>` | Delete specific logs. |
 | `/casebook:delete --below-score 3 --older-than 30d --unmarked` | Delete a batch. It runs as a dry run first and asks before deleting. |
 
-The same commands work from any shell through the `casebook` CLI. Inside Claude Code the plugin's `bin/` is on PATH. Elsewhere, run `node <plugin dir>/bin/casebook`, or add an alias. Run `casebook help` for the full list, including `profiles`, `backfill` and `doctor`.
+The same commands work from any shell through the `casebook` CLI. Inside Claude Code the plugin's `bin/` is on PATH. For your terminal, the plugin symlinks `~/.local/bin/casebook` to itself at every Claude Code startup, so the link follows updates; make sure `~/.local/bin` is on your PATH. An existing link to an older casebook (or a broken one) is replaced; a regular file, a link to anything else, or a link to an equal or newer casebook is left alone. Run `casebook link` to do it now. Set `CASEBOOK_BIN_DIR` to link into another folder, or to `off` to stop linking. Uninstalling the plugin does not remove the link. Run `casebook help` for the full list, including `profiles`, `backfill` and `doctor`.
 
 ```text
 $ casebook list --marked

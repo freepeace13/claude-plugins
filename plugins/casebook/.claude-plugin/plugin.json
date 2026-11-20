@@ -1,7 +1,7 @@
 {
   "name": "casebook",
   "displayName": "Casebook",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Automatically logs potential case studies from every Claude Code session, lets you mark and list them, and writes polished case study Markdown files by ID.",
   "author": {
     "name": "Kin Basco",

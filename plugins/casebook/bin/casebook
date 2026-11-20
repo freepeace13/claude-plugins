@@ -12,6 +12,7 @@ const { scoutSession, sweep } = require('../lib/scout');
 const F = require('../lib/filter');
 const D = require('../lib/discover');
 const T = require('../lib/topics');
+const L = require('../lib/link');
 
 const BOOL = new Set(['all', 'marked', 'unmarked', 'written', 'unwritten', 'json', 'path', 'yes', 'force', 'dry-run', 'help', 'handoff',
   'auto', 'live', 'pending', 'background', 'quiet', 'generated']);
@@ -131,6 +132,7 @@ const commands = {
       if (pos[0] === 'session-end' && sid) {
         detach(['scout', '--session', sid, ...(input.transcript_path ? ['--transcript', input.transcript_path] : []), ...(input.cwd ? ['--cwd', input.cwd] : []), '--auto', '--quiet']);
       } else if (pos[0] === 'session-start') {
+        try { L.linkBin(); } catch (err) { U.logError('linking the casebook CLI failed', err); }
         detach(['maintenance', ...(sid ? ['--exclude', sid] : [])]);
       }
     } catch (err) {
@@ -416,6 +418,14 @@ const commands = {
     out(fs.readFileSync(U.paths.config(), 'utf8'));
   },
 
+  link({ opt }) {
+    const r = L.linkBin();
+    if (opt.json) return out(JSON.stringify(r));
+    if (r.status === 'skipped') out(`Not linked: ${r.reason}.`);
+    else out(`${r.status === 'current' ? 'Already linked' : r.status === 'updated' ? 'Updated' : 'Linked'}: ${r.path} -> ${r.target}`);
+    if (r.path && !L.onPath(path.dirname(r.path))) out(`${path.dirname(r.path)} is not on your PATH. Add it to run \`casebook\` from any terminal.`);
+  },
+
   doctor() {
     const config = U.loadConfig();
     // Probe the way the real scout runs: CLAUDE_CONFIG_DIR is set only when it matters (see paths.claudeConfigDirExplicit).
@@ -454,6 +464,7 @@ const commands = {
                                                    find topics across linked sessions, ranked (top 3)
   discover pick <discovery-id> <n>                 log topic n of a discovery as one log
   profiles [--json]                                list every profile's store
+  link [--json]                                    symlink ~/.local/bin/casebook to this plugin (done at every startup)
   backfill [--since 30d] [--limit 20] [--yes]      scout past sessions
   written <id…> --file <path>                      record that logs were written up
   out-path --project P --title T [--dir D] [--handoff]   where a case study file (or handoff folder) should go
