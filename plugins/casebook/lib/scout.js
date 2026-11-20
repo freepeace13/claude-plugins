@@ -84,7 +84,11 @@ async function runClaudeAsync(prompt, config) {
     let done = false;
     const finish = (r) => { if (!done) { done = true; clearTimeout(timer); resolve({ stdout, stderr, ...r }); } };
     const child = spawn(cmd, args, { cwd: os.tmpdir(), env: childEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => { child.kill('SIGTERM'); finish({ status: null, error: new Error(`scout timed out after ${config.scout.timeoutSec || 240}s`) }); },
+    // SIGTERM first; a child that ignores it is killed and its pipes closed, so the caller can exit.
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } for (const p of [child.stdin, child.stdout, child.stderr]) try { p.destroy(); } catch { /* closed */ } }, 5000).unref();
+      finish({ status: null, error: new Error(`scout timed out after ${config.scout.timeoutSec || 240}s`) }); },
       (config.scout.timeoutSec || 240) * 1000);
     // Decode as a stream: a character split across two chunks must not turn into U+FFFD.
     child.stdout.setEncoding('utf8');
@@ -215,7 +219,9 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const unmarked = new Set(ledger.unmarked || []);
   // A bare /casebook:mark shows in the transcript with no note: the skill wrote one, so once `casebook mark`
   // recorded it, the transcript copy is not a separate mark. It is only a fallback if that command failed.
-  const commandMarks = t.commandMarks.filter((n) => n || !ledger.sessionMarked);
+  // Each bare mark `casebook mark --generated` recorded accounts for one empty transcript mark, in order.
+  let bareDone = ledger.bareMarks || 0;
+  const commandMarks = t.commandMarks.filter((n) => n || bareDone-- <= 0);
   const scanned = Boolean(ledger.scoutedAt || ledger.logId || mine.length);
   if (!manual && scanned) {
     // An auto scout finishes partial logs if the transcript grew at all; otherwise the regrow threshold applies.

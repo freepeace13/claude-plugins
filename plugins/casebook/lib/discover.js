@@ -115,7 +115,9 @@ function linkReason(a, b, latestBefore) {
   // Only a public project's reasons name the repository and branch: they go into the prompt.
   const pub = a.policy === 'public' && b.policy === 'public';
   if (pr) return { strength: 3, why: pub ? `same pull request ${pr.replace(/^https?:\/\/(www\.)?github\.com\//, '')}` : 'same pull request' };
-  if (a.branch && a.branch === b.branch && !TRUNKS.has(a.branch.toLowerCase())) return { strength: 3, why: pub ? `same branch ${a.branch}` : 'same feature branch' };
+  // A branch name is only shared within one repository: two repos that slug alike are not one piece of work.
+  const sameRepo = a.repo ? a.repo === b.repo : Boolean(a.root) && a.root === b.root;
+  if (sameRepo && a.branch && a.branch === b.branch && !TRUNKS.has(a.branch.toLowerCase())) return { strength: 3, why: pub ? `same branch ${a.branch}` : 'same feature branch' };
   const opening = b.opening.toLowerCase();
   const handoff = a.files.find((f) => {
     const name = base(f);
@@ -247,7 +249,8 @@ function renderPrompt(members, { note, tags, reasons, marks, existing, maxTopics
   const policy = chainPolicy(members);
   const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'prompts', 'discovery.md'), 'utf8');
   const notes = marks.map((m) => m.note).filter(Boolean);
-  const files = [...new Set(members.flatMap((m) => m.files))].map((f) => (first.root ? path.relative(first.root, f) || f : f)).slice(0, 60);
+  const rel = (m, f) => { const root = m.root || first.root; return root ? path.relative(root, f) || f : f; };
+  const files = [...new Set(members.flatMap((m) => m.files.map((f) => rel(m, f))))].slice(0, 60);
   const list = (xs) => (xs.length ? xs.map((x) => `- ${x}`).join('\n') : '- none');
   const vars = {
     NOTE: note || 'none',
@@ -270,7 +273,7 @@ function renderPrompt(members, { note, tags, reasons, marks, existing, maxTopics
 function memberRecord(m) {
   return {
     sessionId: m.sessionId, startedAt: m.startedAt, endedAt: m.endedAt, userTurns: m.userTurns, size: m.size,
-    mtimeMs: m.mtimeMs, branch: m.branch, files: m.files,
+    mtimeMs: m.mtimeMs, branch: m.branch, files: m.files, root: m.root,
   };
 }
 
@@ -454,7 +457,10 @@ function pick(config, id, n) {
       for (const [sid, m] of bySession) store.consumeMarks(sid, m);
       // The sessions are scanned now: the catch-up and the regrow gate count from here.
       // As of the discovery, so whatever was added since still counts as new.
+      // A session scanned again after the discovery keeps that newer record.
       for (const m of t.members) {
+        const prev = store.getLedger(m.sessionId) || {};
+        if (prev.scoutedAt && prev.scoutedAt > d.created_at) continue;
         store.setLedger(m.sessionId, { project: t.info.project, userTurns: m.userTurns, size: m.size, scoutedAt: new Date().toISOString() });
       }
       return res;

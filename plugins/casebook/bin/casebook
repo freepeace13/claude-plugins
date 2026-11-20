@@ -14,7 +14,7 @@ const D = require('../lib/discover');
 const T = require('../lib/topics');
 
 const BOOL = new Set(['all', 'marked', 'unmarked', 'written', 'unwritten', 'json', 'path', 'yes', 'force', 'dry-run', 'help', 'handoff',
-  'auto', 'live', 'pending', 'background', 'quiet']);
+  'auto', 'live', 'pending', 'background', 'quiet', 'generated']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -300,15 +300,19 @@ const commands = {
     }
     if (!opt.session) fail('mark needs a log ID, or --session <id> to mark the current session');
     const note = pos.join(' ');
+    // --generated: the skill wrote the note for a bare /casebook:mark, which the transcript shows with no note.
+    // Counted so the scan knows that empty transcript mark was placed (it is only a fallback for a failed mark).
+    const recordBare = () => {
+      if (opt.generated) store.setLedger(opt.session, { bareMarks: ((store.getLedger(opt.session) || {}).bareMarks || 0) + 1 });
+    };
     // A session with exactly one log: mark that log. With several, the next scan gives the mark to the topic it points to.
     const one = store.withWriteLock(() => {
-      // Recorded so the scan knows a bare /casebook:mark in the transcript (its note written by the skill) was placed.
-      store.setLedger(opt.session, { sessionMarked: true });
+      recordBare();
       const logs = T.logsForSessions([opt.session]);
       return logs.length === 1 ? store.applyMark(logs[0], note) : null;
     });
     if (one) return out(`📌 Marked ${one.meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
-    const marks = store.withWriteLock(() => { store.setLedger(opt.session, { sessionMarked: true }); return store.addPendingMark(opt.session, note); });
+    const marks = store.withWriteLock(() => { recordBare(); return store.addPendingMark(opt.session, note); });
     out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). It goes to the topic it points to when the session is scanned.`);
   },
 

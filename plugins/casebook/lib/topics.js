@@ -243,11 +243,12 @@ function applyTopic(topic, ctx) {
     // say so. A log another topic of this scan already wrote is a different angle, not a twin.
     const reserved = ctx.reserved || new Set();
     const mine = logsForSessions(sids).filter((l) => !claimed.has(l.meta.id) && !reserved.has(l.meta.id));
-    const twin = mine.find((l) => normTitle(l.meta.title) === normTitle(topic.title))
+    const twin = mine.find((l) => normTitle(l.meta.title) === normTitle(topic.title) && sameAngle(l.meta.angle, topic.angle))
       || mine.find((l) => sameTitle(l.meta.title, topic.title) && sameAngle(l.meta.angle, topic.angle));
     if (twin) targets = [twin];
   }
-  const relFiles = (m) => (ctx.info.root ? m.files.map((f) => path.relative(ctx.info.root, f) || f) : m.files);
+  // Each session's files relative to its own checkout: sessions of one log may run in different worktrees.
+  const relFiles = (m) => { const root = m.root || ctx.info.root; return root ? m.files.map((f) => path.relative(root, f) || f) : m.files; };
   const ordered = [...ctx.members].sort((a, b) => t0(a.startedAt) - t0(b.startedAt));
   const turns = {};
   for (const l of targets) Object.assign(turns, l.meta.session_turns || (l.meta.session_id ? { [l.meta.session_id]: l.meta.user_turns || 0 } : {}));

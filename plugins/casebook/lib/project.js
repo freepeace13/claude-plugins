@@ -46,7 +46,8 @@ function resolveProject(cwd, config) {
       if ([dir, project].some((v) => globMatch(rule.match, v)) && POLICIES.includes(rule.policy)) { policy = rule.policy; break; }
     }
     // Nothing says which repo it was, so a repo rule cannot apply: anonymize unless a rule names this folder.
-    return { project, repo: '', root: null, cwd: dir, policy: policy || 'anonymize' };
+    // A skip default still skips; otherwise the stricter of the default and anonymize.
+    return { project, repo: '', root: null, cwd: dir, policy: policy || (config.defaultPolicy === 'skip' ? 'skip' : 'anonymize') };
   }
   const root = git(dir, ['rev-parse', '--show-toplevel']) || '';
   const repo = root ? normalizeRemote(git(root, ['remote', 'get-url', 'origin'])) : '';

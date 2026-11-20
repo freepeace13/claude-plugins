@@ -1526,8 +1526,10 @@ test('a session whose folder is gone keeps its own project; a chain with one ano
   // Same slug, different place: the copy is not a git repo with the public remote, so it is anonymized.
   const twin = path.join(s.root, 'elsewhere', 'acme-api');
   fs.mkdirSync(twin, { recursive: true });
-  s.transcript('pub', 3, onBranch('pub', 'feat/z'));
-  const tp2 = s.transcript('priv', 3, onBranch('priv', 'feat/z'));
+  // Linked by a shared pull request: a branch name alone does not link two different checkouts.
+  const pr = (sid) => ({ type: 'pr-link', sessionId: sid, prUrl: 'https://github.com/someone/acme-api/pull/7' });
+  s.transcript('pub', 3, [pr('pub')]);
+  const tp2 = s.transcript('priv', 3, [pr('priv')]);
   const moved = fs.readFileSync(tp2, 'utf8').split(s.repo).join(twin);
   fs.rmSync(tp2);
   const dir = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', twin.replace(/[^\w]/g, '-'));
@@ -1544,7 +1546,7 @@ test('a bare mark the skill wrote a note for does not come back after unmark', (
   const s = sandbox();
   const bare = { type: 'user', sessionId: 'bk', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args></command-args>' } };
   const id = JSON.parse(s.run(['scout', '--session', 'bk', '--transcript', s.transcript('bk', 3), '--auto', '--json']).out).logId;
-  s.run(['mark', '--session', 'bk', '--', 'Fixed redis retry storm']);
+  s.run(['mark', '--session', 'bk', '--generated', '--', 'Fixed redis retry storm']);
   assert.match(s.run(['show', id]).out, /"note":"Fixed redis retry storm"/);
   s.run(['unmark', id]);
   const calls = s.calls().length;
@@ -1640,4 +1642,41 @@ test('discovery updates a same-title log of its own sessions; a gone folder outs
   const doc = s.run(['show', l]).out;
   assert.match(doc, /project: "client-api"/);
   assert.match(doc, /policy: "anonymize"/);
+});
+
+// ---------------------------------------------------------------- topics review, round 13
+
+test('a branch name links sessions of one repository only; an exact title of another angle is a new log', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const now = Date.now();
+  const sess = (id, o) => ({
+    sessionId: id, project: 'api', policy: 'anonymize', branch: 'feature/auth', prUrls: [], files: [], readFiles: [], opening: '',
+    startedAt: new Date(now - (id === 'a' ? 48 : 1) * 3600000).toISOString(), endedAt: new Date(now - (id === 'a' ? 47 : 0) * 3600000).toISOString(), ...o,
+  });
+  assert.strictEqual(linkSessions([sess('a', { repo: 'github.com/me/api' }), sess('b', { repo: 'github.com/client/api' })]).length, 2);
+  assert.strictEqual(linkSessions([sess('a', { repo: 'github.com/me/api' }), sess('b', { repo: 'github.com/me/api' })]).length, 1);
+
+  const s = sandbox();
+  const tp = s.transcript('ex13', 3);
+  const arch = JSON.parse(s.run(['scout', '--session', 'ex13', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Moving queue retries to Redis streams', angle: 'architecture' })) }).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'ex13', '--json'], { env: reply(topic({ title: 'Moving queue retries to Redis streams', angle: 'debugging' })) }).out);
+  assert.strictEqual(r.status, 'created');
+  assert.match(s.run(['show', arch]).out, /angle: "architecture"/);
+});
+
+test('a gone folder is skipped under a skip default; each bare mark recorded accounts for one transcript mark', () => {
+  const s = sandbox();
+  const cfg = path.join(s.env.CASEBOOK_HOME, 'config.json');
+  fs.writeFileSync(cfg, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfg, 'utf8')), defaultPolicy: 'skip' }));
+  const tc = s.transcript('gs13', 3);
+  fs.writeFileSync(tc, fs.readFileSync(tc, 'utf8').split(s.repo).join(path.join(s.root, 'tmp-client')));
+  assert.match(s.run(['scout', '--session', 'gs13', '--transcript', tc]).out, /policy is skip/);
+
+  const bare = { type: 'user', sessionId: 'bm13', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args></command-args>' } };
+  const id = JSON.parse(s.run(['scout', '--session', 'bm13', '--transcript', s.transcript('bm13', 3), '--auto', '--json']).out).logId;
+  s.run(['mark', '--session', 'bm13', '--generated', '--', 'first bare mark']);
+  // Two bare marks in the transcript, but casebook mark recorded only one: the other is the fallback.
+  s.run(['scout', '--session', 'bm13', '--transcript', s.transcript('bm13', 4, [bare, bare]), '--auto']);
+  const marks = JSON.parse(/marks: (\[.*\])/.exec(s.run(['show', id]).out)[1]);
+  assert.deepStrictEqual(marks.map((m) => m.note).sort(), ['', 'first bare mark']);
 });
