@@ -210,7 +210,6 @@ function shortlist(groups, config, { note, tags }) {
   const words = keywords(note);
   const out = [];
   for (const g of groups) {
-    // A session the user marked is always a candidate, however short: its mark waits for a scan of it.
     // A session with a pending mark is a candidate however short; one no scan has seen yet also ranks higher.
     const marked = g.members.some((m) => m.pending.some((k) => !k.seen));
     if (!g.members.some((m) => m.pending.length) && g.members.length === 1 && g.members[0].userTurns < config.scan.minTurns) continue;
@@ -487,6 +486,9 @@ async function discover(config, o) {
 
 // ---------- pick ----------
 
+/** The pending marks of a session the discovery's scan could see: one made since stays for the next discovery. */
+const scannedMarks = (sid, d) => store.getMarks(sid).filter((k) => !d.scan_started_at || String(k.at || '') <= d.scan_started_at);
+
 /** Log topic `n` of discovery `id`: a new log, or an update of the log(s) it is the same as. */
 function pick(config, id, n) {
   const file = path.join(discoveriesDir(), `${id}.json`);
@@ -528,7 +530,7 @@ function pick(config, id, n) {
         // The marks the model tied to this topic go to the log that tells it.
         if (t.topic.marks) {
           for (const sid of sids) {
-            const m = store.getMarks(sid);
+            const m = scannedMarks(sid, d);
             for (const k of m) store.applyMark(twin, k.note, sid);
             store.consumeMarks(sid, m);
           }
@@ -545,7 +547,7 @@ function pick(config, id, n) {
     if (t.info.root && t.info.policy === 'public' && now.policy !== 'public') {
       throw userError(`${t.info.project} is no longer public; run discovery again so the notes follow its policy`);
     }
-    const bySession = topic.marks ? sids.map((sid) => [sid, store.getMarks(sid)]) : [];
+    const bySession = topic.marks ? sids.map((sid) => [sid, scannedMarks(sid, d)]) : [];
     const res = T.applyTopic(topic, {
       members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), note: d.note, commits: t.commits, scannedAt: d.scan_started_at || d.created_at,
     });

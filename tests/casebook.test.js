@@ -1147,6 +1147,24 @@ test('an untouched config of another profile adds no rules, but its default poli
   assert.strictEqual(c.defaultPolicy, 'anonymize', 'the strictest default policy wins');
 });
 
+test('a store a 0.2 process recreates is merged again, but its config only once', () => {
+  const p = profileSandbox();
+  p.seedStore();
+  const d = path.join(p.cb, 'work');
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify({ projects: [{ match: 'github.com/me/*', policy: 'anonymize' }] }));
+  fs.writeFileSync(path.join(d, 'profile.json'), '{}');
+  assert.strictEqual(p.run(['list']).status, 0);
+  const file = path.join(p.cb, 'config.json');
+  const c = JSON.parse(fs.readFileSync(file, 'utf8'));
+  c.projects = c.projects.map((r) => (r.match === 'github.com/me/*' ? { ...r, policy: 'public' } : r));
+  fs.writeFileSync(file, JSON.stringify(c));
+  fs.writeFileSync(path.join(d, 'profile.json'), '{}');
+  seedLog({ env: { CASEBOOK_HOME: d } }, { id: 'cb-late01' });
+  assert.ok(JSON.parse(p.run(['list', '--json']).out).some((l) => l.id === 'cb-late01'), 'the new log is merged');
+  assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).projects.find((r) => r.match === 'github.com/me/*').policy, 'public', 'the user\'s edit stays');
+});
+
 test('merging configs never loosens a rule: one rule per pattern, the strictest, skip first', () => {
   const p = profileSandbox();
   const put = (name, cfg) => { const d = path.join(p.cb, name); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify(cfg)); fs.writeFileSync(path.join(d, 'profile.json'), '{}'); };
@@ -1175,10 +1193,11 @@ test('casebook\'s own commands are not turns of the session', () => {
   const tools = (...content) => JSON.stringify({ type: 'assistant', sessionId: 'c', timestamp: '2026-11-01T00:00:00Z', message: { role: 'assistant', content } });
   const use = (name, input) => ({ type: 'tool_use', name, input });
   const raw2 = [line('check the list, then fix the retry bug'), tools(use('Bash', { command: 'casebook list' }), use('Skill', { skill: 'casebook:show' }),
-    use('Write', { file_path: path.join(os.homedir(), '.casebook', 'handoffs', 'x.md') })), tools({ type: 'text', text: 'fixing retries' }, use('Edit', { file_path: '/repo/retry.js' }))].join('\n');
+    use('Write', { file_path: path.join(os.homedir(), '.casebook', 'handoffs', 'x.md') })), said('cb-aaaaaa: another session story'),
+    tools(use('Edit', { file_path: '/repo/retry.js' }), { type: 'text', text: 'fixing retries' })].join('\n');
   fs.writeFileSync(f, raw2);
   const c2 = condense(f);
-  assert.doesNotMatch(c2.text, /casebook list|casebook:show|handoffs/);
+  assert.doesNotMatch(c2.text, /casebook list|casebook:show|handoffs|another session story/);
   fs.writeFileSync(f, tools(use('Bash', { command: 'cd ~/proj && CASEBOOK_HOME=/x casebook list --all' }), use('Bash', { command: 'casebook-lint .' }), use('Bash', { command: 'grep -rn casebook lib' })));
   assert.deepStrictEqual(condense(f).text.split('\n'), ['  [Bash] casebook-lint .', '  [Bash] grep -rn casebook lib']);
   // A topic number typed in answer to a discovery is not a turn; a mark's reply is still work.

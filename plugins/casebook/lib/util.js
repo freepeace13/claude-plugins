@@ -65,21 +65,29 @@ const MOVED = ['logs', 'marks', path.join('state', 'sessions'), path.join('state
 
 /** Move every file under `from` into `to`. A file `to` already has is merged into it by `merge(src, dst)` when it
  *  can be (true when merged), else left behind. Returns the number of files left behind. */
-function mergeTree(from, to, merge) {
+function mergeTree(from, to, merge, failed = []) {
   let left = 0;
   let entries = [];
   try { entries = fs.readdirSync(from, { withFileTypes: true }); } catch { return 0; }
   for (const e of entries) {
     const src = path.join(from, e.name);
     const dst = path.join(to, e.name);
-    if (e.isDirectory()) { left += mergeTree(src, dst, merge); continue; }
+    if (e.isDirectory()) { left += mergeTree(src, dst, merge, failed); continue; }
     if (fs.existsSync(dst)) {
       let merged = false;
       try { merged = Boolean(merge && merge(src, dst)); } catch { /* unreadable: leave it */ }
       if (merged) { try { fs.rmSync(src, { force: true }); } catch { left++; } } else left++;
       continue;
     }
-    try { mkdirp(to); fs.renameSync(src, dst); } catch (err) { if (err.code !== 'ENOENT') left++; }
+    try {
+      mkdirp(to);
+      try { fs.renameSync(src, dst); } catch (err) {
+        // Another volume (a store symlinked to a synced folder): copy, then remove.
+        if (err.code !== 'EXDEV') throw err;
+        fs.copyFileSync(src, dst, fs.constants.COPYFILE_EXCL);
+        fs.rmSync(src, { force: true });
+      }
+    } catch (err) { if (err.code !== 'ENOENT') { left++; failed.push(`${src}: ${err.code || err.message}`); } }
   }
   try { fs.rmdirSync(from); } catch { /* not empty */ }
   return left;
@@ -160,10 +168,18 @@ function migrateLocked() {
   for (const name of oldStores()) {
     const dir = path.join(home(), name);
     let left = 0;
-    for (const sub of MOVED) left += mergeTree(path.join(dir, sub), path.join(home(), sub), MERGERS[sub]);
+    const failed = [];
+    for (const sub of MOVED) left += mergeTree(path.join(dir, sub), path.join(home(), sub), MERGERS[sub], failed);
+    // A file that could not be moved (not one already there): the store is tried again on the next run.
+    if (failed.length) { logError(`merging profile store "${name}" left ${failed.length} file(s) to retry: ${failed.slice(0, 3).join('; ')}`); continue; }
     const old = path.join(dir, 'config.json');
+    // The config as it was merged: a 0.2 process recreating this store must not merge the same config again.
+    const stamp = path.join(dir, 'config.merged.json');
+    const already = (() => { try { return fs.readFileSync(stamp, 'utf8') === fs.readFileSync(old, 'utf8'); } catch { return false; } })();
     let config = '';
-    if (!fs.existsSync(paths.config())) {
+    if (already) {
+      config = '; its config.json was merged before';
+    } else if (!fs.existsSync(paths.config())) {
       // Copied, not moved: a casebook 0.2 process still running (a session opened before the update) keeps its rules.
       try { fs.copyFileSync(old, paths.config(), fs.constants.COPYFILE_EXCL); config = '; its config.json is the shared one'; } catch { /* none, or another process won */ }
     } else if (fs.existsSync(old)) {
@@ -172,6 +188,7 @@ function migrateLocked() {
         config = `; its default policy and ${added} project rule(s) were merged into ${paths.config()}${scanDropped ? `; its scan settings were not used (see ${old})` : ''}`;
       } catch (err) { config = `; its config.json could not be merged (${err.message}), see ${dir}`; }
     }
+    try { if (fs.existsSync(old)) fs.copyFileSync(old, stamp); } catch { /* merged again next time: harmless once */ }
     try { fs.renameSync(path.join(dir, 'profile.json'), path.join(dir, 'profile.migrated.json')); } catch { continue; }
     logError(`merged profile store "${name}" into ${home()}${config}${left ? `; ${left} file(s) already present (logs or discoveries with the same ID) were left in ${dir}` : ''}`);
   }

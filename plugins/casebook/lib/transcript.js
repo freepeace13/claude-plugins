@@ -73,6 +73,7 @@ function condense(file, maxChars = 60000) {
   // The reply to a casebook slash command, up to the next turn of the user: its output (topic listings, other
   // logs shown) is about other work, so it is never read as part of this session.
   let inCasebook = false;
+  let relaying = false;
   let startedAt = null;
   let endedAt = null;
   let cwd = null;
@@ -110,8 +111,9 @@ function condense(file, maxChars = 60000) {
         }
         const t = stripNoise(b.text);
         if (!t || t.startsWith('Caveat:')) continue;
-        // A short reply inside a casebook command answers it (a topic number, a yes): not work, and still casebook's.
-        if (inCasebook && t.length <= 20) continue;
+        // A reply inside a casebook command that only answers it (a topic number, a yes): not work, still casebook's.
+        relaying = false;
+        if (inCasebook && /^\s*(\d{1,2}|y|yes|n|no|ok|none)\s*[.!]?\s*$/i.test(t)) continue;
         inCasebook = false;
         out.push(`USER: ${clip(t)}`);
         if (opening.length < 2) opening.push(clip(t, 1000));
@@ -122,7 +124,14 @@ function condense(file, maxChars = 60000) {
       for (const b of blocksOf(e.message.content)) {
         // A casebook skill the model invoked, a casebook CLI call, a file in the store: casebook's own calls are
         // not work, though the work around them is.
-        if (isCasebookTool(b)) continue;
+        if (isCasebookTool(b)) {
+          // A casebook skill that prints other work (a listing, a log): the text that relays it is not this
+          // session's, up to the next call that is work again, or the next turn of the user.
+          if (b.name === 'Skill' && !/^casebook:mark$/.test(String((b.input || {}).skill || (b.input || {}).name || ''))) relaying = true;
+          continue;
+        }
+        if (b.type === 'tool_use') relaying = false;
+        if (relaying) continue;
         if (b.type === 'text' && b.text && b.text.trim()) out.push(`CLAUDE: ${clip(stripNoise(b.text))}`);
         else if (b.type === 'tool_use') {
           out.push(`  ${describeTool(b)}`);
