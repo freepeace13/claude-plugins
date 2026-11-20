@@ -306,13 +306,14 @@ const commands = {
       if (opt.generated) store.setLedger(opt.session, { bareMarks: ((store.getLedger(opt.session) || {}).bareMarks || 0) + 1 });
     };
     // A session with exactly one log: mark that log. With several, the next scan gives the mark to the topic it points to.
-    const one = store.withWriteLock(() => {
+    // One lock, so the bare mark is counted exactly once whichever way it goes.
+    const { one, marks } = store.withWriteLock(() => {
       recordBare();
       const logs = T.logsForSessions([opt.session]);
-      return logs.length === 1 ? store.applyMark(logs[0], note) : null;
+      if (logs.length === 1) return { one: store.applyMark(logs[0], note) };
+      return { marks: store.addPendingMark(opt.session, note) };
     });
     if (one) return out(`📌 Marked ${one.meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
-    const marks = store.withWriteLock(() => { recordBare(); return store.addPendingMark(opt.session, note); });
     out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). It goes to the topic it points to when the session is scanned.`);
   },
 

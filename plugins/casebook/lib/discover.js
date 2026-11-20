@@ -240,7 +240,8 @@ function sessionsBlock(members, maxChars) {
 
 function chainCommits(members, root) {
   const seen = new Set();
-  for (const m of members) for (const c of commitsBetween(root, m.startedAt, m.endedAt)) seen.add(c);
+  // Each session's commits from its own checkout: linked sessions may run in different worktrees.
+  for (const m of members) for (const c of commitsBetween(m.root || root, m.startedAt, m.endedAt)) seen.add(c);
   return [...seen].slice(0, 40);
 }
 
@@ -428,8 +429,9 @@ function pick(config, id, n) {
     // Every check runs under the write lock, so no scan can change a target between the check and the write.
     const r = store.withWriteLock(() => {
       const gone = t.updates.filter((uid) => !T.resolveLog(uid));
-      if (gone.length && gone.length === t.updates.length) {
-        throw userError(`the log this topic updates is gone (${gone.join(', ')}); run discovery again`);
+      // Any of them: a log deleted since must not come back merged into another.
+      if (gone.length) {
+        throw userError(`${gone.length === 1 && t.updates.length === 1 ? 'the log this topic updates is' : 'logs this topic merges are'} gone (${gone.join(', ')}); run discovery again`);
       }
       // The notes were taken from the logs as they were then: a log changed since would lose its new notes.
       const changed = t.updates.filter((uid) => {

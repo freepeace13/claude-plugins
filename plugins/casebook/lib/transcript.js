@@ -88,7 +88,9 @@ function condense(file, maxChars = 60000) {
         const cmd = parseCommand(b.text);
         if (cmd) {
           // A mark of another log by its ID is not a mark of this session (the same test as `casebook mark`).
-          if (/casebook:mark$/.test(cmd.name) && !ID_RE.test(cmd.args.trim().split(/\s+/)[0])) commandMarks.push(cmd.args);
+          // Typed as the user typed it: drop surrounding quotes the shell would have removed, so it matches the stored note.
+          const markNote = cmd.args.trim().replace(/^(["'])([\s\S]*)\1$/, '$2').replace(/\s+/g, ' ').trim();
+          if (/casebook:mark$/.test(cmd.name) && !ID_RE.test(markNote.split(' ')[0])) commandMarks.push(markNote);
           out.push(`USER: ${cmd.name} ${clip(cmd.args, 400)}`.trim());
           userTurns++;
           continue;

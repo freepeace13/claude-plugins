@@ -47,8 +47,9 @@ function findLog(id) {
   return null;
 }
 
-function saveLog(log) {
-  log.meta.updated_at = new Date().toISOString();
+/** touch: false keeps updated_at, for bookkeeping that changes no notes (settling a partial log). */
+function saveLog(log, { touch = true } = {}) {
+  if (touch || !log.meta.updated_at) log.meta.updated_at = new Date().toISOString();
   writeFileAtomic(log.file, renderDoc(log.meta, log.body));
   return log;
 }
@@ -78,8 +79,7 @@ function deleteLogLocked(log) {
     const deletedTopics = [...(prev.deletedTopics || []), { id: m.id, title: m.title, angle: m.angle || '', at: new Date().toISOString() }];
     const stillLogged = left.some((l) => (Array.isArray(l.meta.sessions) && l.meta.sessions.length ? l.meta.sessions : [l.meta.session_id]).includes(sid));
     // Its marks go with it: a /casebook:mark for them in the transcript must not mark another log.
-    const unmarked = withUnmarked(prev, log);
-    setLedger(sid, { deletedTopics, unmarked, ...(stillLogged ? {} : { deleted: true, deletedAt: new Date().toISOString() }) });
+    setLedger(sid, { deletedTopics, ...forgetMarks(prev, m.marks || []), ...(stillLogged ? {} : { deleted: true, deletedAt: new Date().toISOString() }) });
   }
 }
 
@@ -149,12 +149,22 @@ function consumeMarks(sid, used) {
 
 /** Remove a log's marks, and remember their notes so a /casebook:mark found in a transcript is not re-added. */
 // Empty notes count too: a bare /casebook:mark is found in the transcript as ''.
-const withUnmarked = (ledger, log) =>
-  [...new Set([...(ledger.unmarked || []), ...(log.meta.marks || []).map((m) => m.note || '')])];
+/**
+ * The ledger patch that forgets these marks: their notes join `unmarked`, so a /casebook:mark for them found in
+ * the transcript is not re-added. A bare mark has no note to remember: it is counted in `bareMarks` instead,
+ * so it stands for one empty transcript mark, not every later one.
+ */
+function forgetMarks(ledger, marks) {
+  const notes = marks.map((m) => m.note || '');
+  return {
+    unmarked: [...new Set([...(ledger.unmarked || []).filter(Boolean), ...notes.filter(Boolean)])],
+    bareMarks: (ledger.bareMarks || 0) + notes.filter((n) => !n).length,
+  };
+}
 
 function clearLogMarks(log) {
   const sessions = Array.isArray(log.meta.sessions) && log.meta.sessions.length ? log.meta.sessions : [log.meta.session_id].filter(Boolean);
-  for (const sid of sessions) setLedger(sid, { unmarked: withUnmarked(getLedger(sid) || {}, log) });
+  for (const sid of sessions) setLedger(sid, forgetMarks(getLedger(sid) || {}, log.meta.marks || []));
   log.meta.marked = false;
   log.meta.marks = [];
   return saveLog(log);
@@ -168,5 +178,5 @@ function applyMark(log, note) {
 
 module.exports = {
   listProjects, allLogs, findLog, readLog, saveLog, createLogFile, deleteLog, withWriteLock,
-  getLedger, setLedger, getMarks, addPendingMark, clearMarks, consumeMarks, applyMark, clearLogMarks,
+  forgetMarks, getLedger, setLedger, getMarks, addPendingMark, clearMarks, consumeMarks, applyMark, clearLogMarks,
 };

@@ -37,7 +37,8 @@ function finishSession(sid) {
     if (!was.includes(sid)) continue;
     l.meta.partial_sessions = was.filter((x) => x !== sid);
     l.meta.partial = l.meta.partial_sessions.length > 0;
-    store.saveLog(l);
+    // Not a change of notes: a scan or pick that was shown this log may still write it.
+    store.saveLog(l, { touch: false });
   }
 }
 

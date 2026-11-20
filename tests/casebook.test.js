@@ -1680,3 +1680,46 @@ test('a gone folder is skipped under a skip default; each bare mark recorded acc
   const marks = JSON.parse(/marks: (\[.*\])/.exec(s.run(['show', id]).out)[1]);
   assert.deepStrictEqual(marks.map((m) => m.note).sort(), ['', 'first bare mark']);
 });
+
+// ---------------------------------------------------------------- topics review, round 14
+
+const ledgerOf = (s, sid) => {
+  const dir = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions');
+  return fs.readdirSync(dir).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))).find((l) => l.sessionId === sid);
+};
+
+test('a generated bare mark is counted once; a quoted mark matches its stored note', () => {
+  const s = sandbox();
+  s.run(['mark', '--session', 'nolog14', '--generated', '--', 'the cache fix']);
+  assert.strictEqual(ledgerOf(s, 'nolog14').bareMarks, 1);
+
+  const quoted = { type: 'user', sessionId: 'q14', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args>"the queue redesign"</command-args>' } };
+  const id = JSON.parse(s.run(['scout', '--session', 'q14', '--transcript', s.transcript('q14', 3), '--auto', '--json']).out).logId;
+  s.run(['mark', '--session', 'q14', '--', 'the queue redesign']);
+  const calls = s.calls().length;
+  assert.match(s.run(['scout', '--session', 'q14', '--transcript', s.transcript('q14', 4, [quoted]), '--auto']).out, /not enough new activity/);
+  assert.strictEqual(s.calls().length, calls);
+  const marks = JSON.parse(/marks: (\[.*\])/.exec(s.run(['show', id]).out)[1]);
+  assert.deepStrictEqual(marks.map((m) => m.note), ['the queue redesign']);
+});
+
+test('a pick refuses when any log it merges was deleted; a session with no folder is never the caller\'s project', () => {
+  const s = sandbox();
+  const a = s.transcript('m14a', 3, onBranch('m14a', 'feat/m'));
+  const b = s.transcript('m14b', 3, onBranch('m14b', 'feat/m'));
+  const la = JSON.parse(s.run(['scout', '--session', 'm14a', '--transcript', a, '--json'], { env: reply(topic({ title: 'Part one' })) }).out).logId;
+  const lb = JSON.parse(s.run(['scout', '--session', 'm14b', '--transcript', b, '--json'], { env: reply(topic({ title: 'Part two' })) }).out).logId;
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'The whole story', same_as: [la, lb], belongs: [1, 2] })) }).out)[1];
+  s.run(['delete', lb]);
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, new RegExp(`gone \\(${lb}\\)`));
+  assert.match(s.run(['show', la]).out, /^# Part one$/m);
+
+  const nc = s.transcript('nc14', 3);
+  fs.writeFileSync(nc, fs.readFileSync(nc, 'utf8').split(`"cwd":${JSON.stringify(s.repo)},`).join(''));
+  const l = JSON.parse(s.run(['scout', '--session', 'nc14', '--transcript', nc, '--json']).out).logId;
+  const doc = s.run(['show', l]).out;
+  assert.match(doc, /project: "unknown"/);
+  assert.match(doc, /policy: "anonymize"/);
+});

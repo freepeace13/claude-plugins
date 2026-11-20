@@ -202,7 +202,9 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   if (T.legacyDeleted(ledger) && !force) return { status: 'skipped', reason: "this session's log was deleted (use --force to scout it again)" };
 
   const t = condense(tp, config.scout.maxChars);
-  const info = resolveProject(cwd || t.cwd, config);
+  // No recorded directory: never the caller's project and policy.
+  const info = cwd || t.cwd ? resolveProject(cwd || t.cwd, config)
+    : { project: 'unknown', repo: '', root: null, cwd: null, policy: config.defaultPolicy === 'skip' ? 'skip' : 'anonymize' };
   if (info.policy === 'skip') {
     store.withWriteLock(() => store.setLedger(sessionId, { skipped: 'policy', size }));
     return { status: 'skipped', reason: 'project policy is skip' };
@@ -301,7 +303,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
         const prev = store.getLedger(sessionId) || {};
         store.setLedger(sessionId, {
           skipped, score: best, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
-          ...(onlyDeleted ? { unmarked: [...new Set([...(prev.unmarked || []), ...pending.map((m) => m.note || '')])] } : {}),
+          ...(onlyDeleted ? store.forgetMarks(prev, pending) : {}),
         });
       });
       const reason = onlyDeleted ? 'the only topics found were ones you deleted (use --force to log them again)' : found.length ? `score ${best}` : 'the scout found no topic';
