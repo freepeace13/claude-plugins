@@ -31,7 +31,7 @@ The **intake** is the source logs (and, under `public`, the repository they came
    Not enough for a handoff. Nothing was written.
    - E-3 only 1 concrete fact (cb-7k2m9q#Outcome: "retries dropped"). Add the before and after numbers or the error message.
    - E-2 no first-hand part. Add what you did or decided.
-   Add them with /casebook:mark <id> "<the facts>", or rescout with /casebook:scout <session-id> --force, then run /casebook:handoff again.
+   Add them with /casebook:mark <id> "<the facts>", or scan the session again with /casebook:scout <session-id>, then run /casebook:handoff again.
    ```
 
    Cite the log and section for each missing element. Mark notes are part of the log, so `/casebook:mark` is how the developer adds facts.
@@ -39,7 +39,7 @@ The **intake** is the source logs (and, under `public`, the repository they came
    `casebook out-path --handoff --project "<project, or 'anonymized' under anonymize>" --title "<title>"`
    and add `--dir <dir>` when `--out` was given. It prints a path that does not exist yet; create it by writing the files below into it.
 8. **Write the files.**
-   - `logs/<id>.md` for each log: the log as `casebook show <id>` prints it. Under `anonymize`, drop `repo`, `branch`, `session_id`, `commits` and `files` from the frontmatter, and anything in the body that names what must not be named.
+   - `logs/<id>.md` for each log: the log as `casebook show <id>` prints it, named by the `id` in its frontmatter (an ID merged into another log prints that log: use its ID, here and in `source_logs`, and write each log once). Under `anonymize`, set `project` to `anonymized`, and drop `repo`, `branch`, `profile`, `session_id`, `sessions`, `session_turns`, `partial_sessions`, `merged_from`, `commits`, `files`, `written_to`, `written_at` and `discovery_note` from the frontmatter, rewrite each `marks` note the same way as the body, and remove anything else, in the frontmatter or the body, that names what must not be named.
    - `handoff.md` in the format below.
 9. **Report** in 3 to 6 lines: the folder path, the topic, the verdict, the open Unknowns, and that the folder is ready for a writer. Do not run `casebook written`: a handoff is not a write-up.
 

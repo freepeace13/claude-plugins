@@ -4,9 +4,10 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { PLUGIN_ROOT, paths, sessionKey, readJson, writeJsonAtomic, logError } = require('./util');
 const store = require('./store');
+const T = require('./topics');
 const { condense, findTranscript } = require('./transcript');
 const { resolveProject, commitsBetween } = require('./project');
 
@@ -17,7 +18,7 @@ const POLICY_RULES = {
     'Anonymize: this may be client or employer work. Do NOT name the client, company, product, repository, domain, people, or internal URLs. Describe them generically ("a logistics SaaS", "a fintech client"). Keep the technical story, stack and numbers.',
 };
 
-function buildPrompt(t, info, marks, commits) {
+function buildPrompt(t, info, marks, commits, existing = 'None yet.', maxTopics = 3) {
   const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'prompts', 'scout.md'), 'utf8');
   const notes = marks.map((m) => m.note).filter(Boolean);
   const vars = {
@@ -25,11 +26,13 @@ function buildPrompt(t, info, marks, commits) {
     POLICY: info.policy,
     POLICY_RULES: POLICY_RULES[info.policy] || POLICY_RULES.anonymize,
     PROJECT: info.policy === 'public' ? `${info.project}${info.repo ? ` (${info.repo})` : ''}` : '[anonymized]',
-    BRANCH: t.branch || 'unknown',
+    BRANCH: info.policy === 'public' ? t.branch || 'unknown' : '[anonymized]',
     MARKS: notes.length ? notes.map((n) => `"${n}"`).join('; ') : marks.length ? '(marked, no note)' : 'none',
     COMMITS: commits.length ? commits.map((c) => `- ${c}`).join('\n') : '- none',
     FILES: t.files.length ? t.files.slice(0, 40).map((f) => `- ${info.root ? path.relative(info.root, f) || f : f}`).join('\n') : '- none',
     TRANSCRIPT: t.text,
+    EXISTING: existing,
+    MAX_TOPICS: String(maxTopics),
   };
   return tpl.replace(/\{\{(\w+)\}\}/g, (_, k) => (k in vars ? vars[k] : ''));
 }
@@ -40,10 +43,24 @@ function childEnv() {
   return env;
 }
 
-function runClaude(prompt, config) {
+function claudeInvocation(config) {
   const cmd = config.scout.command || 'claude';
   const hardened = ['--restricted', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence'];
   const base = ['-p', '--model', config.scout.model || 'haiku', '--tools', '', '--output-format', 'text'];
+  return { cmd, full: [...base, ...hardened], fallback: [...base, '--no-session-persistence'] };
+}
+
+// Older Claude Code versions may not know every hardening flag: retry with the essentials.
+const unknownFlag = (r) => r.status !== 0 && /unknown option|unrecognized/i.test(`${r.stderr}${r.stdout}`);
+
+function checkRun(r) {
+  if (r.error) throw r.error;
+  if (r.status !== 0) throw new Error(`scout exited ${r.status}: ${(r.stderr || r.stdout || '').slice(0, 500)}`);
+  return r.stdout;
+}
+
+function runClaude(prompt, config) {
+  const { cmd, full, fallback } = claudeInvocation(config);
   const opts = {
     input: prompt,
     encoding: 'utf8',
@@ -53,61 +70,44 @@ function runClaude(prompt, config) {
     // Run as the session's profile, even from a terminal with no inherited value.
     env: childEnv(),
   };
-  let r = spawnSync(cmd, [...base, ...hardened], opts);
-  // Older Claude Code versions may not know every hardening flag: retry with the essentials.
-  if (r.status !== 0 && /unknown option|unrecognized/i.test(`${r.stderr}${r.stdout}`)) {
-    r = spawnSync(cmd, [...base, '--no-session-persistence'], opts);
-  }
-  if (r.error) throw r.error;
-  if (r.status !== 0) throw new Error(`scout exited ${r.status}: ${(r.stderr || r.stdout || '').slice(0, 500)}`);
-  return r.stdout;
+  let r = spawnSync(cmd, full, opts);
+  if (unknownFlag(r)) r = spawnSync(cmd, fallback, opts);
+  return checkRun(r);
 }
 
-function parseNotes(text) {
-  const s = String(text);
-  const start = s.indexOf('{');
-  const end = s.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error(`scout returned no JSON: ${s.slice(0, 200)}`);
-  const n = JSON.parse(s.slice(start, end + 1));
-  const arr = (v) => (Array.isArray(v) ? v.map(String).filter(Boolean) : v ? [String(v)] : []);
-  return {
-    score: Math.max(1, Math.min(5, Math.round(Number(n.score) || 1))),
-    title: String(n.title || 'Untitled session').slice(0, 120),
-    summary: String(n.summary || ''),
-    problem: String(n.problem || ''),
-    constraints: arr(n.constraints),
-    approach: String(n.approach || ''),
-    alternatives: arr(n.alternatives),
-    outcome: String(n.outcome || ''),
-    evidence: arr(n.evidence),
-    tags: arr(n.tags).map((t) => t.toLowerCase()).slice(0, 8),
-    quote: String(n.quote || ''),
-    open_threads: arr(n.open_threads),
-  };
-}
-
-function renderBody(n) {
-  const list = (xs) => (xs.length ? xs.map((x) => `- ${x}`).join('\n') : '_none noted_');
-  const para = (s) => s || '_none noted_';
-  return [
-    `# ${n.title}`,
-    '',
-    n.summary,
-    '',
-    '## Problem', para(n.problem), '',
-    '## Constraints', list(n.constraints), '',
-    '## Approach', para(n.approach), '',
-    '## Alternatives considered', list(n.alternatives), '',
-    '## Outcome', para(n.outcome), '',
-    '## Evidence', list(n.evidence), '',
-    '## Key decision', n.quote ? `> ${n.quote}` : '_none noted_', '',
-    '## Open threads', list(n.open_threads), '',
-  ].join('\n');
+/** runClaude without blocking, so several scouts can run side by side. Resolves to stdout. */
+async function runClaudeAsync(prompt, config) {
+  const { cmd, full, fallback } = claudeInvocation(config);
+  const once = (args) => new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let done = false;
+    const finish = (r) => { if (!done) { done = true; clearTimeout(timer); resolve({ stdout, stderr, ...r }); } };
+    const child = spawn(cmd, args, { cwd: os.tmpdir(), env: childEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    // SIGTERM first; a child that ignores it is killed and its pipes closed, so the caller can exit.
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } for (const p of [child.stdin, child.stdout, child.stderr]) try { p.destroy(); } catch { /* closed */ } }, 5000).unref();
+      finish({ status: null, error: new Error(`scout timed out after ${config.scout.timeoutSec || 240}s`) }); },
+      (config.scout.timeoutSec || 240) * 1000);
+    // Decode as a stream: a character split across two chunks must not turn into U+FFFD.
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (error) => finish({ status: null, error }));
+    child.on('close', (status) => finish({ status }));
+    child.stdin.on('error', () => { /* the child may exit before reading everything */ });
+    child.stdin.end(prompt);
+  });
+  let r = await once(full);
+  if (unknownFlag(r)) r = await once(fallback);
+  return checkRun(r);
 }
 
 /**
- * Scout one session. Returns { status, logId?, reason?, partial? }.
- * status: created | updated | skipped | running
+ * Scout one session for topics. Returns { status, logs?, logId?, reason?, partial? }; logId, score and title are
+ * the highest-scored log's (after merging). status: created (at least one new log) | updated | skipped | running
  *
  * args: { sessionId, transcriptPath?, cwd?, mode: 'auto'|'manual', live?, force? }
  *  - auto (hooks, catch-up) applies every gate; waits for a scout already running on the session.
@@ -130,6 +130,8 @@ const pidAlive = (pid) => {
 };
 
 /** Dead holder, expired lock, or a lock file a crashed scout left empty/garbled (given 10s of grace). */
+const SCAN_ATTEMPTS = 3;  // a scan runs again when a log it would write changed meanwhile
+
 function lockIsStale(file, staleMs) {
   let holder = null;
   let ageMs = 0;
@@ -153,8 +155,9 @@ function lockIsStale(file, staleMs) {
 function acquireSessionLock(sessionId, { wait, timeoutMs }) {
   const file = path.join(paths.locks(), `${sessionKey(sessionId)}.lock`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  // A scout can take up to two model runs (the flag-fallback retry), so a live holder is not stale before that.
-  const staleMs = 2 * timeoutMs + 60000;
+  // A scout makes up to SCAN_ATTEMPTS scans of up to two model runs each (the flag-fallback retry), so a live
+  // holder is not stale before that.
+  const staleMs = SCAN_ATTEMPTS * 2 * timeoutMs + 60000;
   const deadline = Date.now() + staleMs;
   const mine = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
   for (;;) {
@@ -192,14 +195,18 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const st = fs.statSync(tp);
   const size = st.size;
   const ledger = store.getLedger(sessionId) || {};
-  if (ledger.deleted && !(manual && force)) {
-    return { status: 'skipped', reason: "this session's log was deleted (use --force to scout it again)" };
-  }
+  // Every log from this session was deleted: hooks and catch-ups leave it alone, unless the developer marked
+  // it since. A manual scout may look again.
+  if (ledger.deleted && !manual && !store.getMarks(sessionId).length) return { status: 'skipped', reason: "this session's logs were deleted" };
+  // Deleted before topics existed: nothing says which topic it was, so the whole session stays closed.
+  if (T.legacyDeleted(ledger) && !force) return { status: 'skipped', reason: "this session's log was deleted (use --force to scout it again)" };
 
   const t = condense(tp, config.scout.maxChars);
-  const info = resolveProject(cwd || t.cwd, config);
+  // No recorded directory: never the caller's project and policy.
+  const info = cwd || t.cwd ? resolveProject(cwd || t.cwd, config)
+    : { project: 'unknown', repo: '', root: null, cwd: null, policy: config.defaultPolicy === 'skip' ? 'skip' : 'anonymize' };
   if (info.policy === 'skip') {
-    store.setLedger(sessionId, { skipped: 'policy', size });
+    store.withWriteLock(() => store.setLedger(sessionId, { skipped: 'policy', size }));
     return { status: 'skipped', reason: 'project policy is skip' };
   }
 
@@ -209,89 +216,129 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const recent = Date.now() - st.mtimeMs < settleMs;
   const partial = live || ((manual || partialIfRecent) && recent);
 
-  const existing = !ledger.deleted && ledger.logId ? store.findLog(ledger.logId) : null;
-  if (!manual && existing) {
-    // An auto scout finishes a partial log if the transcript grew at all; otherwise the regrow threshold applies.
-    const wasPartial = existing.meta.partial === true || ledger.partial === true;
-    // New marks count as new content: the log has to be re-scouted to pick them up.
+  let mine = T.logsForSessions([sessionId]);
+  // Notes the developer unmarked: a /casebook:mark for them in the transcript is not a mark any more.
+  const unmarked = new Set(ledger.unmarked || []);
+  // A bare /casebook:mark shows in the transcript with no note: the skill wrote one, so once `casebook mark`
+  // recorded it, the transcript copy is not a separate mark. It is only a fallback if that command failed.
+  // Each bare mark `casebook mark --generated` recorded accounts for one empty transcript mark, in order.
+  let bareDone = ledger.bareMarks || 0;
+  const commandMarks = t.commandMarks.filter((n) => n || bareDone-- <= 0);
+  const scanned = Boolean(ledger.scoutedAt || ledger.logId || mine.length);
+  if (!manual && scanned) {
+    // An auto scout finishes partial logs if the transcript grew at all; otherwise the regrow threshold applies.
+    const wasPartial = mine.some((l) => T.partialSessionsOf(l).includes(sessionId)) || ledger.partial === true;
+    // New marks count as new content: the session has to be scanned again to pick them up.
     const grew = t.userTurns > (ledger.userTurns || 0) || size !== ledger.size || store.getMarks(sessionId).length > 0;
     if (wasPartial && !grew && !live && !(partialIfRecent && recent)) {
       // The session is over (hook) or settled and nothing was added since the partial scout:
-      // the notes are already complete, so finish the log without another model call.
-      existing.meta.partial = false;
-      store.saveLog(existing);
-      store.setLedger(sessionId, { partial: false, size });
-      return { status: 'updated', logId: existing.meta.id, score: existing.meta.score, title: existing.meta.title, partial: false };
+      // the notes are already complete, so finish the logs without another model call.
+      // Each log is read again under the lock: another session's scan may have updated it since.
+      // Only for this session: a log another running session feeds stays partial for that one.
+      // Ledger writes take the lock too: a delete or unmark writes the same ledger under it.
+      store.withWriteLock(() => { T.finishSession(sessionId); store.setLedger(sessionId, { partial: false, size }); });
+      mine = T.logsForSessions([sessionId]);
+      const best = [...mine].sort((a, b) => (b.meta.score || 0) - (a.meta.score || 0))[0];
+      if (!best) return { status: 'skipped', reason: 'nothing new since the last scan' };
+      return { status: 'updated', logId: best.meta.id, score: best.meta.score, title: best.meta.title, partial: false,
+        logs: mine.map((l) => ({ status: 'updated', logId: l.meta.id, score: l.meta.score, title: l.meta.title, angle: l.meta.angle || '' })) };
     }
-    if (!(wasPartial && grew) && t.userTurns - (ledger.userTurns || 0) < (config.sweep.regrowTurns || 8)) {
-      store.setLedger(sessionId, { size });
-      return { status: 'skipped', reason: 'already logged, not enough new activity' };
+    // A pending mark always earns a rescan: with several logs, the mark waits for the scan to place it.
+    const hasPending = store.getMarks(sessionId).length > 0 || commandMarks.some((n) => !unmarked.has(n) && !mine.some((l) => (l.meta.marks || []).some((m) => m.note === n)));
+    if (!(wasPartial && grew) && !hasPending && t.userTurns - (ledger.userTurns || 0) < (config.sweep.regrowTurns || 8)) {
+      store.withWriteLock(() => store.setLedger(sessionId, { size }));
+      return { status: 'skipped', reason: 'already scanned, not enough new activity' };
     }
   }
 
-  // Marks: ones already on the log, pending ones from /casebook:mark, and any /casebook:mark
-  // invocations found in the transcript (a fallback in case the mark command itself failed).
-  const prior = existing ? existing.meta.marks || [] : [];
+  // Marks: pending ones from /casebook:mark, and any /casebook:mark invocations found in the transcript
+  // (a fallback in case the mark command itself failed) that no log of this session has yet.
   const pending = store.getMarks(sessionId);
-  const seen = new Set([...prior, ...pending].map((m) => m.note));
-  for (const note of t.commandMarks) {
-    if (!seen.has(note)) { pending.push({ at: t.endedAt, note }); seen.add(note); }
+  const seen = new Set([...mine.flatMap((l) => l.meta.marks || []), ...pending].map((m) => m.note));
+  for (const note of commandMarks) {
+    if (!seen.has(note) && !unmarked.has(note)) { pending.push({ at: t.endedAt, note, session: sessionId }); seen.add(note); }
   }
-  const marks = [...prior, ...pending];
 
-  // The turn and score gates decide whether a session earns a log at all; a session that already has one is just updated.
-  const gated = !manual && !existing && !marks.length;
+  // The turn and score gates decide whether a session earns a log at all; a session already scanned is just rescanned.
+  const gated = !manual && !scanned && !pending.length;
   if (gated && t.userTurns < config.scout.minTurns) {
-    store.setLedger(sessionId, { skipped: 'short', userTurns: t.userTurns, size });
+    store.withWriteLock(() => store.setLedger(sessionId, { skipped: 'short', userTurns: t.userTurns, size }));
     return { status: 'skipped', reason: `only ${t.userTurns} turns` };
   }
 
   const commits = commitsBetween(info.root, t.startedAt, t.endedAt);
-  const notes = parseNotes(runClaude(buildPrompt(t, info, marks, commits), config));
+  const maxTopics = config.scout.maxTopics || 3;
+  const member = { sessionId, startedAt: t.startedAt, endedAt: t.endedAt, userTurns: t.userTurns, branch: t.branch, files: t.files };
+  // The model call runs without the lock, so another scan may update a log shown to it meanwhile. The
+  // notes are then written only if nothing it saw changed; otherwise the scan runs again on the new notes.
+  let logs = null;
+  for (let attempt = 1; !logs; attempt++) {
+    if (attempt > SCAN_ATTEMPTS) throw new Error('the logs of this session kept changing during the scan; try again');
+    // Stamped before the logs are read: a log created while they are read counts as new.
+    const takenAt = new Date().toISOString();
+    // Read again on every attempt: a retry may be caused by a delete, whose topic must stay deleted.
+    const deleted = force ? [] : T.tombstones([sessionId]);
+    const promptMarks = [...T.logsForSessions([sessionId]).flatMap((l) => l.meta.marks || []), ...pending];
+    const context = T.contextLogs(info.project, [sessionId], t.startedAt, t.endedAt);
+    const versions = T.versionsOf(context);
+    const prompt = buildPrompt(t, info, promptMarks, commits, T.renderExisting(context, [sessionId], deleted), maxTopics);
+    const found = T.parseTopics(runClaude(prompt, config), maxTopics);
 
-  if (gated && notes.score < config.scout.keepMinScore) {
-    store.setLedger(sessionId, { skipped: 'low-score', score: notes.score, userTurns: t.userTurns, size });
-    return { status: 'skipped', reason: `score ${notes.score}` };
+    // A topic the developer deleted never comes back (unless --force). A new topic must clear keepMinScore
+    // unless it carries a mark; a manual scout, and a marked session, keep at least their best topic.
+    const allowed = T.screenTopics(found, deleted, context);
+    let keep = allowed.filter((x) => x.same_as.length || x.score >= config.scout.keepMinScore || (x.marks && pending.length));
+    if ((manual || pending.length) && !keep.length && allowed.length) keep = [allowed[0]];
+    if (!keep.length) {
+      const best = found.reduce((n, x) => Math.max(n, x.score), 0);
+      // No topic at all is not the same as only deleted ones: marks are kept for the next scan.
+      const onlyDeleted = found.length > 0 && !allowed.length;
+      // Marks that only pointed at deleted topics are dropped, and their notes remembered, so a
+      // /casebook:mark left in the transcript does not force a rescan every time.
+      const skipped = onlyDeleted ? 'deleted-topics' : found.length ? 'low-score' : 'no-topic';
+      store.withWriteLock(() => {
+        if (onlyDeleted) store.consumeMarks(sessionId, pending);
+        // A final scan that adds nothing still finishes this session's partial logs: the model saw their notes
+        // and had nothing to add, so they would otherwise be rescanned every time the transcript grows.
+        if (!partial) T.finishSession(sessionId);
+        const prev = store.getLedger(sessionId) || {};
+        store.setLedger(sessionId, {
+          skipped, score: best, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
+          ...(onlyDeleted ? store.forgetMarks(prev, pending) : {}),
+        });
+      });
+      const reason = onlyDeleted ? 'the only topics found were ones you deleted (use --force to log them again)' : found.length ? `score ${best}` : 'the scout found no topic';
+      return { status: 'skipped', reason };
+    }
+
+    // Pending marks go to the topics they point to, or to the best one.
+    const markTargets = keep.some((x) => x.marks) ? keep.filter((x) => x.marks) : [keep[0]];
+    const claimed = new Set();
+    // A log a kept topic of the same angle names is that topic's: another topic's title match must not
+    // take it first. A claim across angles is weaker than a same-angle title match, so it reserves nothing.
+    const reserved = new Set(keep.flatMap((x) => x.same_as.filter((id) => { const l = T.resolveLog(id); return l && T.sameAngle(l.meta.angle, x.angle); })));
+    logs = store.withWriteLock(() => {
+      const watch = [...new Set([...context.filter((l) => T.sessionsOf(l).includes(sessionId)).map((l) => l.meta.id), ...keep.flatMap((x) => x.same_as)])];
+      // A log of this project another scan created meanwhile may be this same topic: look again with it
+      // shown. On the last attempt only the logs this scan writes count, so a busy project still gets its log.
+      if (T.changedSince(versions, [sessionId], watch, attempt < SCAN_ATTEMPTS ? { project: info.project, takenAt } : null)) return null;
+      // The final scan settles this session in every log it fed, also those no topic names this time.
+      if (!partial) T.finishSession(sessionId);
+      const written = keep.map((topic) => T.applyTopic(topic, {
+        members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits, claimed, reserved,
+      }));
+      store.consumeMarks(sessionId, pending);
+      // In the same lock as the logs: a delete right after must not be undone by this ledger write.
+      // applyTopic already lifted a 'deleted' flag, since the session has a log again.
+      store.setLedger(sessionId, {
+        project: info.project, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
+        logId: undefined, skipped: undefined,
+      });
+      return written;
+    });
   }
-
-  const meta = {
-    title: notes.title,
-    project: info.project,
-    repo: info.repo || null,
-    policy: info.policy,
-    profile: paths.profileName(),
-    score: notes.score,
-    marked: marks.length > 0,
-    marks,
-    tags: notes.tags,
-    session_id: sessionId,
-    branch: t.branch,
-    started_at: t.startedAt,
-    ended_at: t.endedAt,
-    user_turns: t.userTurns,
-    partial,
-    scouted_at: new Date().toISOString(),
-    scout_mode: mode,
-    commits,
-    files: info.root ? t.files.map((f) => path.relative(info.root, f) || f) : t.files,
-  };
-  const body = renderBody(notes);
-
-  let log;
-  if (existing) {
-    log = existing;
-    log.meta = { ...existing.meta, ...meta, written_to: existing.meta.written_to };
-    log.body = body;
-    store.saveLog(log);
-  } else {
-    log = store.createLogFile(info.project, { ...meta, written_to: [] }, body);
-  }
-  store.clearMarks(sessionId);
-  store.setLedger(sessionId, {
-    logId: log.meta.id, project: info.project, userTurns: t.userTurns, size, partial,
-    skipped: undefined, deleted: undefined, deletedAt: undefined,
-  });
-  return { status: existing ? 'updated' : 'created', logId: log.meta.id, score: notes.score, title: notes.title, partial };
+  const best = logs.reduce((a, b) => (b.score > a.score ? b : a));
+  return { status: logs.some((l) => l.status === 'created') ? 'created' : 'updated', logId: best.logId, score: best.score, title: best.title, partial, logs };
 }
 
 // ---------- sweep: catch sessions whose SessionEnd hook never ran ----------
@@ -346,7 +393,8 @@ function candidateTranscripts({ since, exclude, settleMinutes = 0 }) {
       if (since && st.mtimeMs < since.getTime()) continue;
       if (st.mtimeMs > settled) continue;
       const ledger = store.getLedger(sessionId);
-      if (ledger && (ledger.deleted || ledger.skipped === 'policy' || ledger.size === st.size)) continue;
+      // A session deleted before topics stays closed whatever its marks; scouting it would only skip again.
+      if (ledger && (T.legacyDeleted(ledger) || (ledger.deleted && !store.getMarks(sessionId).length) || ledger.skipped === 'policy' || ledger.size === st.size)) continue;
       out.push({ sessionId, transcriptPath: file, mtimeMs: st.mtimeMs });
     }
   }
@@ -367,7 +415,7 @@ function sweep(config, { since, exclude, limit, settleMinutes, dryRun, partialIf
       try {
         const t = condense(c.transcriptPath, config.scout.maxChars);
         userTurns = t.userTurns;
-        project = resolveProject(t.cwd, config).project;
+        project = t.cwd ? resolveProject(t.cwd, config).project : 'unknown';
       } catch { /* unreadable: list it anyway */ }
       return { ...c, status: 'candidate', project, userTurns };
     });
@@ -398,4 +446,4 @@ function sweep(config, { since, exclude, limit, settleMinutes, dryRun, partialIf
   return { results, locked: false };
 }
 
-module.exports = { scoutSession, sweep, parseNotes, renderBody, buildPrompt };
+module.exports = { scoutSession, sweep, buildPrompt, runClaude, runClaudeAsync, POLICY_RULES, acquireSessionLock };

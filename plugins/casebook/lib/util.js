@@ -186,6 +186,7 @@ const DEFAULT_CONFIG = {
     model: 'haiku',
     minTurns: 4,
     keepMinScore: 2,
+    maxTopics: 3,
     maxChars: 60000,
     timeoutSec: 240,
   },
@@ -305,6 +306,11 @@ function slugify(s, max = 60) {
     .replace(/-$/, '') || 'untitled';
 }
 
+/** A mark note as it is compared and stored: outer quotes dropped, whitespace collapsed. */
+function normNote(s) {
+  return String(s || '').trim().replace(/^(["'])([\s\S]*)\1$/, '$2').replace(/\s+/g, ' ').trim();
+}
+
 /** "30d", "12w", "6m", "1y" or an ISO date → Date threshold. */
 function parseAge(spec) {
   if (!spec) return null;
@@ -330,5 +336,5 @@ function globMatch(pattern, value) {
 
 module.exports = {
   PLUGIN_ROOT, paths, DEFAULT_CONFIG, loadConfig, mkdirp, readJson, writeJsonAtomic, writeFileAtomic,
-  logError, profile, useProfile, listProfiles, normalizeDir, profileNameFor, parseDoc, renderDoc, newId, ID_RE, sessionKey, slugify, parseAge, daysSince, globMatch, expandHome,
+  normNote, logError, profile, useProfile, listProfiles, normalizeDir, profileNameFor, parseDoc, renderDoc, newId, ID_RE, sessionKey, slugify, parseAge, daysSince, globMatch, expandHome,
 };

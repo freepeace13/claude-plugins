@@ -3,8 +3,17 @@
 ## Unreleased
 - porch 0.3.0: `/porch:voice [--from <file>]` asks 16 multiple-choice questions (each option previews a passage in that style) on rhythm, presence, delivery and audience, approves a sample paragraph and writes `$PORCH_HOME/voice.md`; reruns can redo one area, keeping the previous file as `voice.md.bak` (a replaced hand-written file as `voice.handwritten.md`, never overwritten)
 - porch: `$PORCH_HOME/voice.md` now extends the base voice instead of replacing it. `references/voice.md` splits into Fixed rules (always apply) and Defaults (your voice overrides them); briefs name the base as `voice` and your file as `voice_user`
-- casebook: `/casebook:handoff <id…>` checks logs against `handoff.md` and writes a handoff folder (`handoff.md` + `logs/`) for a writer; `casebook out-path --handoff` names the folder
-- casebook: `out-path` names files and folders with the local date instead of the UTC date
+
+## casebook 0.2.0 — 2026-11-20
+- Logs are topics, not sessions: one scan returns up to `scout.maxTopics` (3) topics, each with an `angle`; a log lists the `sessions` it draws on (with `session_turns`)
+- Every log is unique in its profile: each scan sees the logs near its sessions and either updates the one a topic matches (`same_as`) or creates a new one; duplicates merge, keeping a written-up log's ID (`merged_from`)
+- Sessions can be scanned again at any time for other angles; a deleted log's topic never comes back (`--force` lifts that), and a session left with no logs is no longer scanned automatically
+- `/casebook:mark` on a session with several logs waits for the next scan, which gives the mark to the topic it points to
+- `/casebook:discovery [note] [--score N] [--tags a,b]`: links sessions that carry one piece of work (same pull request, feature branch, handoff file, continued opening, shared files), scans each chain for topics, ranks the best 3 and logs the one you pick
+- `casebook discover [--dry-run]` and `casebook discover pick <discovery-id> <n>`; a pick refuses a log changed since the discovery ran
+- A merged log's old ID still works in `show`, `mark`, `unmark`, `written` and the skills (it points to the surviving log); `delete` takes exact IDs only
+- `/casebook:handoff <id…>` checks logs against `handoff.md` and writes a handoff folder (`handoff.md` + `logs/`) for a writer; `casebook out-path --handoff` names the folder
+- `out-path` names files and folders with the local date instead of the UTC date
 
 ## porch 0.2.0 — 2026-11-19
 - One store for all work: `$PORCH_HOME` (default `~/.porch`), so the plugin works from any folder; replaces per-project `.porch/<slug>/`

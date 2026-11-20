@@ -38,7 +38,8 @@ if (!process.argv.includes('--version')) {
 }
 if (process.env.STUB_DELAY) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,Number(process.env.STUB_DELAY));
 if (process.argv.includes('--version')) { console.log('stub 1.0'); process.exit(0); }
-console.log('Here you go:\\n' + JSON.stringify({score:Number(process.env.STUB_SCORE||4),title:'Fixed websocket reconnect storms',summary:'s',problem:'p',constraints:['c'],approach:'a',alternatives:['x'],outcome:'o',evidence:['e'],tags:['Laravel','reverb'],quote:'q',open_threads:[]}));
+if (process.env.STUB_TOPICS) { console.log(process.env.STUB_TOPICS); process.exit(0); }
+console.log('Here you go:\\n' + JSON.stringify({score:Number(process.env.STUB_SCORE||4),fit:Number(process.env.STUB_FIT||2),belongs:process.env.STUB_BELONGS?JSON.parse(process.env.STUB_BELONGS):[],title:'Fixed websocket reconnect storms',summary:'s',problem:'p',constraints:['c'],approach:'a',alternatives:['x'],outcome:'o',evidence:['e'],tags:['Laravel','reverb'],quote:'q',open_threads:[]}));
 `);
   fs.chmodSync(stub, 0o755);
   fs.mkdirSync(env.CASEBOOK_HOME, { recursive: true });
@@ -251,7 +252,7 @@ test('auto scout of a finished (non-partial) log still needs regrowTurns of new 
   assert.match(again.reason, /not enough new activity/);
 });
 
-test('manual scout: skip policy writes nothing; deleted sessions need --force', () => {
+test('manual scout: skip policy writes nothing; a deleted topic stays deleted unless --force', () => {
   const s = sandbox();
   fs.writeFileSync(path.join(s.repo, '.casebook.json'), JSON.stringify({ policy: 'skip' }));
   const sk = s.run(['scout', '--session', 'sk', '--transcript', s.transcript('sk', 3)]);
@@ -263,8 +264,11 @@ test('manual scout: skip policy writes nothing; deleted sessions need --force', 
 
   const first = JSON.parse(s.run(['scout', '--session', 'del', '--transcript', s.transcript('del', 3), '--json']).out);
   s.run(['delete', first.logId]);
+  // Hooks leave a session whose logs were all deleted alone; a manual scan may look again but not bring the topic back.
+  assert.match(s.run(['scout', '--session', 'del', '--auto']).out, /^Skipped: this session's logs were deleted$/);
   const blocked = s.run(['scout', '--session', 'del']);
-  assert.match(blocked.out, /^Skipped: this session's log was deleted \(use --force to scout it again\)$/);
+  assert.match(blocked.out, /^Skipped: the only topics found were ones you deleted \(use --force to log them again\)$/);
+  assert.match(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8'), /Deleted by the developer[\s\S]*"Fixed websocket reconnect storms"/);
   const forced = JSON.parse(s.run(['scout', '--session', 'del', '--force', '--json']).out);
   assert.strictEqual(forced.status, 'created');
   assert.notStrictEqual(forced.logId, first.logId);
@@ -368,6 +372,7 @@ function profileSandbox() {
   fs.writeFileSync(stub, `#!/usr/bin/env node
 const fs=require('fs');fs.readFileSync(0,'utf8');
 if (process.argv.includes('--version')) { console.log('stub 1.0'); process.exit(0); }
+if (process.env.STUB_TOPICS) { console.log(process.env.STUB_TOPICS); process.exit(0); }
 fs.appendFileSync(${JSON.stringify(path.join(root, 'seen-config-dir.log'))}, (process.env.CLAUDE_CONFIG_DIR||'(unset)') + '\\n');
 console.log(JSON.stringify({score:4,title:'T',summary:'s',problem:'p',constraints:[],approach:'a',alternatives:[],outcome:'o',evidence:[],tags:[],quote:'',open_threads:[]}));
 `);
@@ -827,4 +832,958 @@ test('a relative CASEBOOK_HOME resolves to one absolute store', () => {
   const s = sandbox();
   const r = s.run(['config'], { env: { CASEBOOK_HOME: 'rel-store' }, cwd: s.root });
   assert.strictEqual(r.out.split('\n')[0], path.join(fs.realpathSync(s.root), 'rel-store', 'config.json'));
+});
+
+// ---------- topics and discovery ----------
+
+// A session on a feature branch: the branch is set by a trailing entry, as Claude Code records it.
+const onBranch = (sid, branch) => [{ type: 'system', sessionId: sid, gitBranch: branch }];
+const topic = (o) => ({ score: 4, angle: 'debugging', title: 'T', summary: 's', problem: 'p', approach: 'a', outcome: 'o', tags: ['redis'], ...o });
+const reply = (...topics) => ({ STUB_TOPICS: JSON.stringify({ topics }) });
+const logsJson = (s) => JSON.parse(s.run(['list', '--json']).out);
+
+test('one session can give several topics; a rescan updates them instead of logging them twice', () => {
+  const s = sandbox();
+  const tp = s.transcript('multi', 3);
+  const two = reply(topic({ title: 'Debugging the reconnect storm' }), topic({ title: 'Choosing Redis Streams over pub/sub', angle: 'architecture', score: 3 }));
+  const r = s.run(['scout', '--session', 'multi', '--transcript', tp], { env: two });
+  assert.match(r.out, /^Created cb-\w{6} \(score 4, partial, debugging\): Debugging the reconnect storm\nCreated cb-\w{6} \(score 3, partial, architecture\): Choosing Redis Streams/);
+  const logs = logsJson(s);
+  assert.strictEqual(logs.length, 2);
+  assert.ok(logs.every((l) => l.sessions.join() === 'multi'));
+
+  // The rescan sees both logs and says so; nothing is duplicated, and a new angle becomes a third log.
+  const [dbg, arch] = ['Debugging the reconnect storm', 'Choosing Redis Streams over pub/sub'].map((t) => logs.find((l) => l.title === t).id);
+  const again = s.run(['scout', '--session', 'multi'], {
+    env: reply(topic({ title: 'Debugging the reconnect storm, with the root cause', same_as: [dbg], score: 5 }), topic({ title: 'Choosing Redis Streams over pub/sub', angle: 'architecture' }), topic({ title: 'Load-testing reconnects', angle: 'testing', score: 3 })),
+  });
+  assert.strictEqual(again.status, 0, again.stderr);
+  const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
+  assert.ok(prompt.includes(`### ${dbg} · debugging`) && prompt.includes(`### ${arch} · architecture`), 'the scan sees the existing logs');
+  assert.match(again.out, new RegExp(`Updated ${dbg} \\(score 5, partial, debugging\\): Debugging the reconnect storm, with the root cause`));
+  assert.match(again.out, new RegExp(`Updated ${arch} .*Choosing Redis Streams`), 'same title for the same session is never logged twice');
+  assert.match(again.out, /Created cb-\w{6} \(score 3, partial, testing\): Load-testing reconnects/);
+  assert.strictEqual(logsJson(s).length, 3);
+
+  // With several logs, a session mark waits for the next scan, which gives it to the topic it points to.
+  assert.match(s.run(['mark', '--session', 'multi', 'the', 'root', 'cause']).out, /Marked this session: the root cause/);
+  s.run(['scout', '--session', 'multi'], { env: reply(topic({ title: 'Debugging the reconnect storm, with the root cause', same_as: [dbg], marks: true }), topic({ title: 'Choosing Redis Streams over pub/sub', same_as: [arch] })) });
+  assert.match(s.run(['show', dbg]).out, /"note":"the root cause"/);
+  assert.doesNotMatch(s.run(['show', arch]).out, /the root cause/);
+
+  // Deleting one topic keeps the session scannable for others; the deleted one never comes back.
+  s.run(['delete', arch]);
+  const after = s.run(['scout', '--session', 'multi', '--json'], { env: reply(topic({ title: 'Choosing Redis Streams over pub/sub' }), topic({ title: 'Debugging the reconnect storm, with the root cause', same_as: [dbg] })) });
+  const res = JSON.parse(after.out);
+  assert.deepStrictEqual(res.logs.map((l) => l.logId), [dbg]);
+  assert.ok(!logsJson(s).some((l) => l.title.startsWith('Choosing Redis')));
+});
+
+test('a continued session can extend a log from an earlier session', () => {
+  const s = sandbox();
+  const first = JSON.parse(s.run(['scout', '--session', 'day1', '--transcript', s.transcript('day1', 3), '--json']).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'day2', '--transcript', s.transcript('day2', 3), '--json'], { env: reply(topic({ title: 'Reconnect storms, fixed over two days', same_as: [first] })) }).out);
+  assert.strictEqual(r.status, 'updated');
+  assert.strictEqual(r.logId, first);
+  const doc = s.run(['show', first]).out;
+  assert.match(doc, /sessions: \["day1","day2"\]/);
+  assert.match(doc, /user_turns: 6/);
+  assert.strictEqual(logsJson(s).length, 1);
+});
+
+test('discovery links a feature branch, sees its logs and merges the duplicates on pick', () => {
+  const s = sandbox();
+  const a = s.transcript('chain-a', 3, onBranch('chain-a', 'feat/ws'));
+  const b = s.transcript('chain-b', 3, onBranch('chain-b', 'feat/ws'));
+  s.transcript('lone-c', 3); // on main, unlogged: its own candidate
+  const la = JSON.parse(s.run(['scout', '--session', 'chain-a', '--transcript', a, '--json']).out).logId;
+  const lb = JSON.parse(s.run(['scout', '--session', 'chain-b', '--transcript', b, '--json']).out).logId;
+  assert.notStrictEqual(la, lb, 'one-session scouts log the halves separately');
+  s.run(['mark', la, 'redis streams part']);
+  s.run(['written', lb, '--file', path.join(s.root, 'cs.md')]);
+
+  const before = s.calls().length;
+  const shortlist = JSON.parse(s.run(['discover', '--dry-run', '--json']).out);
+  assert.strictEqual(s.calls().length, before, 'dry run makes no model calls');
+  const chain = shortlist.find((g) => g.sessions.length === 2);
+  assert.deepStrictEqual(chain.sessions.sort(), ['chain-a', 'chain-b']);
+  assert.match(chain.reasons.join(), /same branch feat\/ws/);
+  assert.deepStrictEqual(chain.logs.sort(), [la, lb].sort(), 'logged sessions are scanned again');
+  assert.ok(shortlist.some((g) => g.sessions.join() === 'lone-c'));
+
+  const env = reply(topic({ title: 'Websocket reconnects backed by Redis Streams', same_as: [la, lb], belongs: [1, 2], fit: 2, score: 5 }));
+  const r = s.run(['discover', '--note', 'websocket redis', '--min-score', '3'], { env });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(s.calls().length, before + 2, 'one model call per candidate');
+  assert.match(r.out, /\n1\. \[5…?\] Websocket reconnects backed by Redis Streams\n {3}acme-api · debugging · 2 sessions/);
+  assert.match(r.out, new RegExp(`merges: ${la}, ${lb} \\(duplicates of this topic\\)`));
+  const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
+  assert.match(prompt, /Note: websocket redis/);
+  assert.ok(prompt.includes(`### ${la} ·`), 'the chain scan sees existing logs');
+
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 0, p.stderr);
+  assert.match(p.out, new RegExp(`^Updated ${lb} \\(score 5.*2 sessions\\): Websocket reconnects`), 'the written-up log survives');
+  assert.match(p.out, new RegExp(`Merged into it: ${la}`));
+  const doc = s.run(['show', lb]).out;
+  assert.match(doc, /sessions: \["chain-b","chain-a"\]|sessions: \["chain-a","chain-b"\]/);
+  assert.match(doc, /"note":"redis streams part"/, 'marks carry over');
+  assert.match(doc, /written_to: \[".*cs\.md"\]/);
+  assert.match(doc, new RegExp(`merged_from: \\["${la}"\\]`));
+  assert.ok(!logsJson(s).some((l) => l.id === la));
+  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`Already logged as ${lb}`));
+});
+
+test('discovery: new angles, nothing-new topics, deleted topics, and the score, fit and tag filters', () => {
+  const s = sandbox();
+  const a = s.transcript('fa', 3, onBranch('fa', 'feat/y'));
+  s.transcript('fb', 3, onBranch('fb', 'feat/y'));
+  const la = JSON.parse(s.run(['scout', '--session', 'fa', '--transcript', a, '--json']).out).logId;
+
+  assert.match(s.run(['discover', '--min-score', '5']).out, /No topic matched\. Scored 1 candidate\(s\) .*best scored 4/);
+  assert.match(s.run(['discover', '--note', 'kafka'], { env: { STUB_FIT: '0' } }).out, /No topic matched/);
+  assert.match(s.run(['discover', '--tags', 'kafka,graphql']).out, /Nothing to discover/);
+  assert.strictEqual(s.run(['discover', '--min-score', '9']).status, 1);
+
+  // Already logged with exactly these sessions: not a discovery.
+  assert.match(s.run(['discover'], { env: reply(topic({ title: 'x', same_as: [la], belongs: [1] })) }).out, /No topic matched/);
+
+  // A new angle on the chain becomes its own log; the old one stays.
+  const r = s.run(['discover', '--tags', 'user turn'], { env: reply(topic({ title: 'Testing reconnects across deploys', angle: 'testing', belongs: [2], fit: 2 })) });
+  assert.match(r.out, /testing · 1 session ·[\s\S]*new log/);
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
+  const logs = logsJson(s);
+  assert.deepStrictEqual(logs.map((l) => l.id).sort(), [la, id].sort());
+  assert.deepStrictEqual(logs.find((l) => l.id === id).sessions, ['fb']);
+
+  // A deleted topic is not offered again, unless --force.
+  s.run(['delete', id]);
+  const env = reply(topic({ title: 'Testing reconnects across deploys', angle: 'testing', belongs: [2] }));
+  assert.match(s.run(['discover'], { env }).out, /No topic matched/);
+  assert.match(s.run(['discover', '--force'], { env }).out, /Testing reconnects across deploys/);
+});
+
+// ---------------------------------------------------------------- topics review follow-ups
+
+test('a session mark on a session with several logs is placed by the next auto scan, even with little new activity', () => {
+  const s = sandbox();
+  const tp = s.transcript('pm', 3);
+  const two = reply(topic({ title: 'Debugging the reconnect storm' }), topic({ title: 'Choosing Redis Streams', angle: 'architecture' }));
+  s.run(['scout', '--session', 'pm', '--transcript', tp, '--auto'], { env: two });
+  const dbg = logsJson(s).find((l) => l.title === 'Debugging the reconnect storm').id;
+  s.run(['mark', '--session', 'pm', 'the', 'root', 'cause']);
+  const tp2 = s.transcript('pm', 4); // one more turn: far below regrowTurns
+  const r = JSON.parse(s.run(['scout', '--session', 'pm', '--transcript', tp2, '--auto', '--json'], {
+    env: reply(topic({ title: 'Debugging the reconnect storm', same_as: [dbg], marks: true }), topic({ title: 'Choosing Redis Streams', angle: 'architecture' })),
+  }).out);
+  assert.strictEqual(r.status, 'updated');
+  assert.match(s.run(['show', dbg]).out, /"note":"the root cause"/);
+});
+
+test('a one-session rescan never lowers the score of a log that spans more sessions, and keeps it partial', () => {
+  const s = sandbox();
+  const id = JSON.parse(s.run(['scout', '--session', 'w1', '--transcript', s.transcript('w1', 3), '--json'], { env: { STUB_SCORE: '5' } }).out).logId;
+  s.run(['scout', '--session', 'w2', '--transcript', s.transcript('w2', 3)], { env: reply(topic({ title: 'Reconnects over two days', same_as: [id], score: 5 })) });
+  const long = 'x'.repeat(5000);
+  const file = s.run(['show', id, '--path']).out;
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('## Problem', `## Problem\n${long}END-OF-LONG`));
+  const r = JSON.parse(s.run(['scout', '--session', 'w2', '--json'], { env: reply(topic({ title: 'Reconnects over two days', same_as: [id], score: 3 })) }).out);
+  assert.strictEqual(r.score, 5);
+  assert.match(s.run(['show', id]).out, /score: 5/);
+  assert.match(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8'), /END-OF-LONG/, 'the model sees the whole log it may rewrite');
+});
+
+test('an unknown same_as id does not let a low-score topic past the gate', () => {
+  const s = sandbox();
+  const r = s.run(['scout', '--session', 'ghost', '--transcript', s.transcript('ghost', 3), '--auto'], { env: reply(topic({ title: 'Renamed a variable', score: 1, same_as: ['cb-zzzzzz'] })) });
+  assert.strictEqual(r.out, 'Skipped: score 1', 'the made-up id is ignored, so the score gate applies');
+  assert.strictEqual(logsJson(s).length, 0);
+});
+
+test('a deleted topic stays deleted when reworded; a session that gets a log again is scanned automatically again', () => {
+  const s = sandbox();
+  const tp = s.transcript('tomb', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'tomb', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixing websocket reconnect storms' })) }).out).logId;
+  s.run(['delete', id]);
+  assert.match(s.run(['scout', '--session', 'tomb'], { env: reply(topic({ title: 'Fixing WebSocket reconnect storm on deploy' })) }).out, /ones you deleted/);
+  assert.match(s.run(['scout', '--session', 'tomb', '--auto']).out, /logs were deleted/);
+
+  // Discovery logs a new angle for it: the session is no longer treated as deleted.
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Load-testing the gateway', angle: 'testing' })) }).out)[1];
+  s.run(['discover', 'pick', did, '1']);
+  assert.doesNotMatch(s.run(['scout', '--session', 'tomb', '--auto']).out, /logs were deleted/);
+});
+
+test('tags with regex characters are matched literally and never crash discovery', () => {
+  const s = sandbox();
+  s.transcript('rx', 3);
+  const r = s.run(['discover', '--dry-run', '--tags', 'c(,[slug]']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.out, /0 eligible/);
+});
+
+test('a marked session always gets a log, even when its only topic scores low', () => {
+  const s = sandbox();
+  s.run(['mark', '--session', 'lowm', 'queue', 'idea']);
+  const r = JSON.parse(s.run(['scout', '--session', 'lowm', '--transcript', s.transcript('lowm', 3), '--auto', '--json'], { env: reply(topic({ title: 'Tiny tweak', score: 1 })) }).out);
+  assert.strictEqual(r.status, 'created');
+  assert.match(s.run(['show', r.logId]).out, /"note":"queue idea"/);
+});
+
+test('a log deleted before topics existed keeps its session closed unless --force', () => {
+  const s = sandbox();
+  const tp = s.transcript('old', 3);
+  const ledger = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions', 'old.json');
+  fs.mkdirSync(path.dirname(ledger), { recursive: true });
+  fs.writeFileSync(ledger, JSON.stringify({ sessionId: 'old', deleted: true, logId: 'cb-aaaaaa' }));
+  assert.match(s.run(['scout', '--session', 'old', '--transcript', tp]).out, /log was deleted \(use --force/);
+  assert.ok(!JSON.parse(s.run(['discover', '--dry-run', '--json']).out).some((g) => g.sessions.includes('old')));
+  assert.strictEqual(JSON.parse(s.run(['scout', '--session', 'old', '--force', '--json']).out).status, 'created');
+});
+
+test('two topics of one scan never write into the same log; reworded rescans update, merged ids resolve', () => {
+  const s = sandbox();
+  const tp = s.transcript('claim', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'claim', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixed websocket reconnect storms' })) }).out).logId;
+
+  // Both name the same log: the better one updates it, the other becomes its own log.
+  const r = JSON.parse(s.run(['scout', '--session', 'claim', '--json'], {
+    env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [id], score: 5 }), topic({ title: 'Picking Redis Streams for fan-out', angle: 'architecture', same_as: [id], score: 3 })),
+  }).out);
+  assert.deepStrictEqual(r.logs.map((l) => l.status), ['updated', 'created']);
+  assert.strictEqual(r.logs[0].logId, id);
+  assert.strictEqual(r.score, 5);
+  assert.strictEqual(logsJson(s).length, 2);
+
+  // A reworded title without same_as is still the same story.
+  const again = JSON.parse(s.run(['scout', '--session', 'claim', '--json'], { env: reply(topic({ title: 'Fixing websocket reconnect storms on deploy' })) }).out);
+  assert.strictEqual(again.logId, id);
+  assert.strictEqual(logsJson(s).length, 2);
+});
+
+test('discover pick checks again: a deleted target or topic is refused, not logged anew', () => {
+  const s = sandbox();
+  const a = s.transcript('pa', 3, onBranch('pa', 'feat/p'));
+  s.transcript('pb', 3, onBranch('pb', 'feat/p'));
+  const la = JSON.parse(s.run(['scout', '--session', 'pa', '--transcript', a, '--json']).out).logId;
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Something else entirely', same_as: [la], belongs: [1, 2] })) }).out)[1];
+  s.run(['delete', la]);
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, new RegExp(`the log this topic updates is gone \\(${la}\\)`));
+  assert.strictEqual(logsJson(s).length, 0);
+
+  const did2 = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Load-testing the gateway', belongs: [2] })) }).out)[1];
+  const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did2, '1']).out)[1];
+  s.run(['delete', id]);
+  const fresh = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover', '--force'], { env: reply(topic({ title: 'Load-testing the gateway', belongs: [2] })) }).out)[1];
+  assert.match(s.run(['discover', 'pick', fresh, '1']).out, /Created/, '--force carries over to the pick');
+});
+
+test('a topic updating a live log is not dropped because a deleted log had a similar title', () => {
+  const s = sandbox();
+  const tp = s.transcript('live', 3);
+  const r = JSON.parse(s.run(['scout', '--session', 'live', '--transcript', tp, '--json'], {
+    env: reply(topic({ title: 'Debugging Redis stream consumer lag' }), topic({ title: 'Debugging Redis stream consumer restarts', angle: 'reliability' })),
+  }).out);
+  const [lag, restarts] = r.logs.map((l) => l.logId);
+  s.run(['delete', restarts]);
+  const up = JSON.parse(s.run(['scout', '--session', 'live', '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer lag', same_as: [lag], score: 5 })) }).out);
+  assert.strictEqual(up.logId, lag);
+  assert.match(s.run(['show', lag]).out, /score: 5/);
+});
+
+// ---------------------------------------------------------------- topics review, round 3
+
+test('re-picking a topic whose log was merged away reports it, instead of logging it again', () => {
+  const s = sandbox();
+  s.transcript('ma', 3, onBranch('ma', 'feat/m'));
+  s.transcript('mb', 3, onBranch('mb', 'feat/m'));
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Gateway rewrite', belongs: [1, 2] })) }).out)[1];
+  const x = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
+  const y = JSON.parse(s.run(['scout', '--session', 'other', '--transcript', s.transcript('other', 3), '--json'], { env: reply(topic({ title: 'Unrelated', angle: 'data' })) }).out).logId;
+  s.run(['scout', '--session', 'other', '--json'], { env: reply(topic({ title: 'Gateway rewrite, all of it', same_as: [y, x] })) });
+  assert.ok(!logsJson(s).some((l) => l.id === x), 'x was merged away');
+  const again = s.run(['discover', 'pick', did, '1']);
+  assert.match(again.out, /^Already logged as cb-/);
+  assert.strictEqual(logsJson(s).length, 1);
+});
+
+test('a pick works out partial from the sessions as they are now', () => {
+  const s = sandbox();
+  s.transcript('pp', 3);
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Settled work' })) }).out)[1];
+  const file = path.join(s.env.CASEBOOK_HOME, 'state', 'discoveries', `${did}.json`);
+  const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.strictEqual(d.topics[0].partial, true, 'recent when discovered');
+  const old = new Date(Date.now() - 3600000);
+  for (const dir of fs.readdirSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects'))) fs.utimesSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', dir, 'pp.jsonl'), old, old);
+  const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
+  assert.match(s.run(['show', id]).out, /partial: false/);
+});
+
+test('an empty reply keeps pending marks and says no topic was found', () => {
+  const s = sandbox();
+  s.run(['mark', '--session', 'empty', 'keep', 'me']);
+  const r = s.run(['scout', '--session', 'empty', '--transcript', s.transcript('empty', 3)], { env: { STUB_TOPICS: '{"topics":[]}' } });
+  assert.strictEqual(r.out, 'Skipped: the scout found no topic');
+  assert.ok(fs.existsSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'empty.json')), 'the mark is kept');
+});
+
+test('an unmarked note found in the transcript is not re-added and does not force a rescan', () => {
+  const s = sandbox();
+  const cmd = { type: 'user', sessionId: 'um', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args>queue idea</command-args>' } };
+  const tp = s.transcript('um', 3, [cmd]);
+  const id = JSON.parse(s.run(['scout', '--session', 'um', '--transcript', tp, '--auto', '--json']).out).logId;
+  assert.match(s.run(['show', id]).out, /"note":"queue idea"/);
+  s.run(['unmark', id]);
+  const calls = s.calls().length;
+  const tp2 = s.transcript('um', 4, [cmd]);
+  assert.match(s.run(['scout', '--session', 'um', '--transcript', tp2, '--auto']).out, /not enough new activity/);
+  assert.strictEqual(s.calls().length, calls);
+  s.run(['scout', '--session', 'um', '--transcript', tp2]);
+  assert.doesNotMatch(s.run(['show', id]).out, /queue idea/);
+});
+
+test('a log claimed by a title match is not overwritten by a later topic naming it', () => {
+  const s = sandbox();
+  const tp = s.transcript('tw', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'tw', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixing reconnect storms' })) }).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'tw', '--json'], {
+    env: reply(topic({ title: 'Fixed reconnect storms', score: 4 }), topic({ title: 'Why we picked Redis Streams', angle: 'architecture', same_as: [id], score: 3 })),
+  }).out);
+  assert.deepStrictEqual(r.logs.map((l) => l.status), ['updated', 'created']);
+  assert.match(s.run(['show', id]).out, /^# Fixed reconnect storms/m);
+});
+
+test('the write lock: a stale lock is reclaimed once; mark, unmark and written take it', () => {
+  const s = sandbox();
+  const id = JSON.parse(s.run(['scout', '--session', 'wl', '--transcript', s.transcript('wl', 3), '--json']).out).logId;
+  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'write.lock');
+  fs.writeFileSync(lock, 'crashed');
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(lock, old, old);
+  assert.match(s.run(['mark', id, 'after', 'a', 'crash']).out, /Marked/);
+  assert.ok(!fs.existsSync(lock) && !fs.existsSync(`${lock}.reclaim`), 'reclaimed and released');
+  assert.match(s.run(['written', id, '--file', path.join(s.root, 'a.md')]).out, /Recorded 1/);
+  assert.match(s.run(['unmark', id]).out, /Unmarked/);
+  assert.strictEqual(s.run(['discover', '--candidates', '0']).stderr.trim(), 'casebook: --candidates must be a positive whole number, got "0"');
+});
+
+// ---------------------------------------------------------------- topics review, round 4
+
+test('unmarking a bare mark, or deleting a marked log, does not bring the mark back', () => {
+  const s = sandbox();
+  const bare = { type: 'user', sessionId: 'bm', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args></command-args>' } };
+  const tp = s.transcript('bm', 3, [bare]);
+  const id = JSON.parse(s.run(['scout', '--session', 'bm', '--transcript', tp, '--auto', '--json']).out).logId;
+  assert.match(s.run(['show', id]).out, /marked: true/);
+  s.run(['unmark', id]);
+  const calls = s.calls().length;
+  assert.match(s.run(['scout', '--session', 'bm', '--transcript', s.transcript('bm', 4, [bare]), '--auto']).out, /not enough new activity/);
+  assert.strictEqual(s.calls().length, calls, 'no rescan for the unmarked bare mark');
+
+  const perf = { type: 'user', sessionId: 'dm', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args>perf win</command-args>' } };
+  const tp2 = s.transcript('dm', 3, [perf]);
+  const r = JSON.parse(s.run(['scout', '--session', 'dm', '--transcript', tp2, '--auto', '--json'], {
+    env: reply(topic({ title: 'Halved p99 latency', angle: 'performance', marks: true }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })),
+  }).out);
+  const [marked, other] = r.logs.map((l) => l.logId);
+  s.run(['delete', marked]);
+  const calls2 = s.calls().length;
+  assert.match(s.run(['scout', '--session', 'dm', '--transcript', s.transcript('dm', 4, [perf]), '--auto']).out, /not enough new activity/);
+  assert.strictEqual(s.calls().length, calls2);
+  assert.match(s.run(['show', other]).out, /marked: false/);
+});
+
+test('a merged ID still opens its log; delete refuses a merged ID', () => {
+  const s = sandbox();
+  const x = JSON.parse(s.run(['scout', '--session', 'mx', '--transcript', s.transcript('mx', 3), '--json'], { env: reply(topic({ title: 'Gateway rewrite' })) }).out).logId;
+  const y = JSON.parse(s.run(['scout', '--session', 'my', '--transcript', s.transcript('my', 3), '--json'], { env: reply(topic({ title: 'Unrelated', angle: 'data' })) }).out).logId;
+  s.run(['scout', '--session', 'my', '--json'], { env: reply(topic({ title: 'Gateway rewrite, all of it', same_as: [y, x] })) });
+  const survivor = logsJson(s)[0].id;
+  const merged = survivor === x ? y : x;
+  const show = s.run(['show', merged, '--path']);
+  assert.strictEqual(show.status, 0, show.stderr);
+  assert.match(show.stderr, new RegExp(`${merged} was merged into ${survivor}`));
+  assert.ok(show.out.endsWith(`${survivor}.md`));
+  assert.strictEqual(s.run(['mark', merged, 'note']).status, 0);
+  const del = s.run(['delete', merged]);
+  assert.strictEqual(del.status, 1);
+  assert.match(del.stderr, /was merged into/);
+  assert.strictEqual(logsJson(s).length, 1);
+});
+
+test('discovery lists a log as updated by one topic only, and a pick refuses a log changed since', () => {
+  const s = sandbox();
+  const l = JSON.parse(s.run(['scout', '--session', 'base', '--transcript', s.transcript('base', 3), '--json'], { env: reply(topic({ title: 'Reconnect storms' })) }).out).logId;
+  for (const [sid, br] of [['ca', 'feat/a'], ['cb', 'feat/a'], ['da', 'feat/b'], ['db', 'feat/b']]) s.transcript(sid, 3, onBranch(sid, br));
+  const r = s.run(['discover', '--exclude', 'base'], { env: reply(topic({ title: 'Reconnect storms, end to end', same_as: [l], belongs: [1, 2] })) });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual([...r.out.matchAll(new RegExp(`updates: ${l}`, 'g'))].length, 1, r.out);
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  s.run(['mark', l, 'later note']);
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, new RegExp(`${l} changed since the discovery ran`));
+  assert.match(s.run(['show', l]).out, /^# Reconnect storms$/m);
+});
+
+test('a long chain shows the model every log of its sessions', () => {
+  const s = sandbox();
+  const ids = [];
+  for (const sid of ['l1', 'l2', 'l3', 'l4']) {
+    const tp = s.transcript(sid, 3, onBranch(sid, 'feat/long'));
+    const r = JSON.parse(s.run(['scout', '--session', sid, '--transcript', tp, '--json'], {
+      env: reply(topic({ title: `${sid} lag` }), topic({ title: `${sid} schema`, angle: 'data' }), topic({ title: `${sid} tests`, angle: 'testing' })),
+    }).out);
+    ids.push(...r.logs.map((x) => x.logId));
+  }
+  assert.strictEqual(ids.length, 12);
+  s.run(['discover'], { env: reply(topic({ title: 'All of it', same_as: ids, belongs: [1, 2, 3, 4] })) });
+  const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
+  for (const id of ids) assert.ok(prompt.includes(`### ${id} ·`), `${id} is in the prompt`);
+});
+
+test('linking: "continuous" is not a continuation; reasons name no repo or branch unless public', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const now = Date.now();
+  const sess = (id, o) => ({
+    sessionId: id, project: 'p', policy: 'anonymize', branch: 'main', prUrls: [], files: ['/r/package.json'], readFiles: [],
+    opening: '', startedAt: new Date(now - (id === 'a' ? 5 : 1) * 3600000).toISOString(),
+    endedAt: new Date(now - (id === 'a' ? 4 : 0) * 3600000).toISOString(), ...o,
+  });
+  assert.strictEqual(linkSessions([sess('a'), sess('b', { opening: 'set up continuous integration' })]).length, 2);
+  assert.strictEqual(linkSessions([sess('a'), sess('b', { opening: "let's continue where we left off" })]).length, 1);
+  const pr = ['https://github.com/acme-corp/billing/pull/12'];
+  const [g] = linkSessions([sess('a', { prUrls: pr, branch: 'acme-x' }), sess('b', { prUrls: pr, branch: 'acme-x' })]);
+  assert.ok(g.reasons.length && !g.reasons.join().match(/acme/), g.reasons.join());
+  const [pg] = linkSessions([sess('a', { prUrls: pr, policy: 'public' }), sess('b', { prUrls: pr, policy: 'public' })]);
+  assert.match(pg.reasons.join(), /acme-corp\/billing\/pull\/12/);
+});
+
+// ---------------------------------------------------------------- topics review, round 5
+
+const slow = (s, args, env) => new Promise((res) => {
+  let out = '';
+  let err = '';
+  const p = spawn(process.execPath, [BIN, ...args], { cwd: s.repo, env: { ...s.env, ...env } });
+  p.stdout.on('data', (d) => { out += d; });
+  p.stderr.on('data', (d) => { err += d; });
+  p.on('close', (code) => res({ code, out: out.trim(), stderr: err }));
+});
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('a mark made while a scout runs is kept; a log changed meanwhile makes the scan run again', async () => {
+  const s = sandbox();
+  const tp = s.transcript('rc', 3);
+  const two = reply(topic({ title: 'Halved p99 latency', angle: 'performance' }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' }));
+  const [a] = JSON.parse(s.run(['scout', '--session', 'rc', '--transcript', tp, '--json'], { env: two }).out).logs.map((l) => l.logId);
+  const before = s.calls().length;
+  const run = slow(s, ['scout', '--session', 'rc', '--transcript', tp, '--json'], { ...two, STUB_DELAY: '1500' });
+  await pause(700);
+  assert.strictEqual(s.run(['mark', '--session', 'rc', 'the', 'backoff', 'decision']).status, 0);
+  assert.strictEqual(s.run(['mark', a, 'direct note']).status, 0);
+  const r = await run;
+  assert.strictEqual(r.code, 0, r.stderr);
+  assert.strictEqual(s.calls().length, before + 2, 'the log changed during the first call, so the scan ran again');
+  assert.match(s.run(['show', a]).out, /"note":"direct note"/, 'the change made meanwhile survives');
+  const marks = JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'rc.json'), 'utf8'));
+  assert.deepStrictEqual(marks.map((m) => m.note), ['the backoff decision'], 'the mark added meanwhile waits for the next scan');
+});
+
+test('marks that only point at deleted topics stop forcing rescans; a mark of another log is not this session\'s', () => {
+  const s = sandbox();
+  const cmd = (sid, args) => ({ type: 'user', sessionId: sid, cwd: s.repo, message: { role: 'user', content: `<command-name>/casebook:mark</command-name><command-args>${args}</command-args>` } });
+  const A = topic({ title: 'Halved p99 latency', angle: 'performance' });
+  const r = JSON.parse(s.run(['scout', '--session', 'dd', '--transcript', s.transcript('dd', 3), '--json'], { env: reply(A, topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })) }).out);
+  s.run(['delete', r.logs[0].logId]);
+  // The manual scout left the other log partial; the first auto scan that adds nothing finishes it.
+  const calls = s.calls().length;
+  const first = s.run(['scout', '--session', 'dd', '--transcript', s.transcript('dd', 4, [cmd('dd', 'retry storm')]), '--auto'], { env: reply(A) });
+  assert.match(first.out, /ones you deleted/);
+  assert.strictEqual(s.calls().length, calls + 1);
+  assert.match(s.run(['show', r.logs[1].logId]).out, /partial: false/);
+  const again = s.run(['scout', '--session', 'dd', '--transcript', s.transcript('dd', 5, [cmd('dd', 'retry storm')]), '--auto'], { env: reply(A) });
+  assert.match(again.out + again.stderr, /not enough new activity/, JSON.stringify(again));
+  assert.strictEqual(s.calls().length, calls + 1, 'no rescan for a mark already found to point at a deleted topic');
+
+  const tp2 = s.transcript('om', 3, [cmd('om', 'cb-abc123 great example')]);
+  const l = JSON.parse(s.run(['scout', '--session', 'om', '--transcript', tp2, '--auto', '--json']).out).logId;
+  assert.match(s.run(['show', l]).out, /marked: false/);
+});
+
+test('same_as can only name a log shown to the model; one session in two folders does not crash discovery', () => {
+  const s = sandbox();
+  const other = path.join(s.root, 'client-x');
+  fs.mkdirSync(other);
+  const tpx = s.transcript('cx', 3);
+  const moved = fs.readFileSync(tpx, 'utf8').split(s.repo).join(other);
+  const dir = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', other.replace(/[^\w]/g, '-'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'cx.jsonl'), moved);
+  fs.rmSync(tpx);
+  const x = JSON.parse(s.run(['scout', '--session', 'cx', '--transcript', path.join(dir, 'cx.jsonl'), '--json'], { env: reply(topic({ title: 'Client billing' })) }).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'mine', '--transcript', s.transcript('mine', 3), '--json'], { env: reply(topic({ title: 'Gateway', same_as: [x] })) }).out);
+  assert.strictEqual(r.status, 'created');
+  assert.match(s.run(['show', x]).out, /^# Client billing$/m, 'the unseen log is untouched');
+
+  const dup = path.join(dir, 'twin.jsonl');
+  fs.writeFileSync(dup, moved.split('"cx"').join('"twin"'));
+  fs.copyFileSync(dup, path.join(path.dirname(s.transcript('twin', 3)), 'twin.jsonl'));
+  const d = s.run(['discover', '--dry-run', '--all']);
+  assert.strictEqual(d.status, 0, d.stderr);
+});
+
+test('a later session naming package.json is not a handoff', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const now = Date.now();
+  const sess = (id, o) => ({
+    sessionId: id, project: 'p', policy: 'public', branch: 'main', prUrls: [], files: [], readFiles: [], opening: '',
+    startedAt: new Date(now - (id === 'a' ? 200 : 1) * 3600000).toISOString(),
+    endedAt: new Date(now - (id === 'a' ? 199 : 0) * 3600000).toISOString(), ...o,
+  });
+  assert.strictEqual(linkSessions([sess('a', { files: ['/r/package.json'] }), sess('b', { opening: 'why does package.json pin node 18?' })]).length, 2);
+  assert.strictEqual(linkSessions([sess('a', { files: ['/r/docs/handoff.md'] }), sess('b', { opening: 'read handoff.md and carry on' })]).length, 1);
+});
+
+// ---------------------------------------------------------------- topics review, round 6
+
+test('one session\'s auto scout does not finish a log another running session feeds', () => {
+  const s = sandbox();
+  const a = s.transcript('pa6', 3, onBranch('pa6', 'feat/six'));
+  s.transcript('pb6', 3, onBranch('pb6', 'feat/six'));
+  const la = JSON.parse(s.run(['scout', '--session', 'pa6', '--transcript', a, '--json']).out).logId;
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Both halves', same_as: [la], belongs: [1, 2] })) }).out)[1];
+  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`^Updated ${la}`));
+  s.run(['scout', '--session', 'pa6', '--transcript', a, '--auto']);
+  assert.match(s.run(['show', la]).out, /partial: true/, 'pb6 may still be running');
+});
+
+test('picking a topic never overwrites a title match the discovery did not list', () => {
+  const s = sandbox();
+  s.transcript('ta6', 3, onBranch('ta6', 'feat/tw'));
+  s.transcript('tb6', 3, onBranch('tb6', 'feat/tw'));
+  const r = s.run(['discover'], { env: reply(topic({ title: 'Redis stream backpressure fix', belongs: [1, 2] }), topic({ title: 'Redis stream backpressure fix load testing', angle: 'testing', belongs: [1, 2], score: 3 })) });
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  const one = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
+  const two = s.run(['discover', 'pick', did, '2']);
+  assert.match(two.out, /^Created cb-/, two.out);
+  assert.match(s.run(['show', one]).out, /^# Redis stream backpressure fix$/m);
+});
+
+test('a pending mark reopens a session whose logs were deleted; note words lose trailing dots', () => {
+  const s = sandbox();
+  const tp = s.transcript('dl6', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'dl6', '--transcript', tp, '--auto', '--json']).out).logId;
+  s.run(['delete', id]);
+  const calls = s.calls().length;
+  s.run(['scout', '--session', 'dl6', '--transcript', tp, '--auto']);
+  assert.strictEqual(s.calls().length, calls, 'closed after the delete');
+  s.run(['mark', '--session', 'dl6', 'the real story is the cache fix']);
+  s.run(['scout', '--session', 'dl6', '--transcript', tp, '--auto'], { env: reply(topic({ title: 'Cache fix', angle: 'performance' })) });
+  assert.strictEqual(s.calls().length, calls + 1, 'the mark is placed by the next auto scan');
+  assert.ok(logsJson(s).some((l) => l.marked));
+
+  const { keywords } = require('../plugins/casebook/lib/discover');
+  assert.deepStrictEqual(keywords('webhook retries. Also redis.'), ['webhook', 'retries', 'redis']);
+});
+
+// ---------------------------------------------------------------- topics review, round 7
+
+test('the catch-up sweep passes over sessions whose logs were deleted, without crashing', () => {
+  const s = sandbox();
+  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
+  fs.mkdirSync(path.dirname(meta), { recursive: true });
+  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
+  const id = JSON.parse(s.run(['scout', '--session', 'sw7', '--transcript', s.transcript('sw7', 3), '--auto', '--json']).out).logId;
+  s.run(['delete', id]);
+  s.transcript('sw7', 4);
+  s.transcript('other7', 3);
+  const dry = s.run(['scout', '--pending', '--dry-run', '--json']);
+  assert.strictEqual(dry.status, 0, dry.stderr);
+  assert.deepStrictEqual(JSON.parse(dry.out).map((d) => d.sessionId), ['other7']);
+  s.run(['mark', '--session', 'sw7', 'cache fix']);
+  assert.deepStrictEqual(JSON.parse(s.run(['scout', '--pending', '--dry-run', '--json']).out).map((d) => d.sessionId).sort(), ['other7', 'sw7']);
+});
+
+test('a log is partial per session: the final scan of the session that made it partial finishes it', () => {
+  const s = sandbox();
+  const l = JSON.parse(s.run(['scout', '--session', 'f1', '--transcript', s.transcript('f1', 3), '--auto', '--json']).out).logId;
+  const tp2 = s.transcript('f2', 3);
+  const r = JSON.parse(s.run(['scout', '--session', 'f2', '--transcript', tp2, '--json'], { env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [l] })) }).out);
+  assert.strictEqual(r.logId, l);
+  assert.match(s.run(['show', l]).out, /partial: true/);
+  s.run(['scout', '--session', 'f2', '--transcript', tp2, '--auto']);
+  assert.match(s.run(['show', l]).out, /partial: false/, 'f1 was finished already, f2 is now');
+});
+
+test('a pick refuses when its sessions were logged again since; a reply with no topics logs nothing', () => {
+  const s = sandbox();
+  s.transcript('g1', 3, onBranch('g1', 'feat/g'));
+  const tp = s.transcript('g2', 3, onBranch('g2', 'feat/g'));
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Gateway retries', belongs: [1, 2] })) }).out)[1];
+  const later = JSON.parse(s.run(['scout', '--session', 'g2', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Gateway retry budget' })) }).out).logId;
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, new RegExp(`logged again since the discovery ran \\(${later}\\)`));
+
+  for (const bad of ['{"topics":null}', '{}', '{"error":"overloaded"}']) {
+    const r = s.run(['scout', '--session', 'nt', '--transcript', s.transcript('nt', 3)], { env: { STUB_TOPICS: bad } });
+    assert.strictEqual(r.out, 'Skipped: the scout found no topic', bad);
+  }
+  assert.strictEqual(logsJson(s).length, 1);
+});
+
+// ---------------------------------------------------------------- topics review, round 8
+
+test('a new angle with a similar title is a new log, and a deleted angle does not block it', () => {
+  const s = sandbox();
+  const tp = s.transcript('an8', 3);
+  const lag = JSON.parse(s.run(['scout', '--session', 'an8', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer lag' })) }).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'an8', '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer restarts', angle: 'reliability' })) }).out);
+  assert.strictEqual(r.status, 'created');
+  assert.notStrictEqual(r.logId, lag);
+  assert.match(s.run(['show', lag]).out, /^# Debugging Redis stream consumer lag$/m);
+  s.run(['delete', r.logId]);
+  const again = JSON.parse(s.run(['scout', '--session', 'an8', '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer restart', angle: 'architecture' })) }).out);
+  assert.strictEqual(again.status, 'created', 'another angle than the deleted one');
+});
+
+test('a nearby log changing during the model call does not rerun the scan', async () => {
+  const s = sandbox();
+  const near = JSON.parse(s.run(['scout', '--session', 'nb8', '--transcript', s.transcript('nb8', 3), '--auto', '--json'], { env: reply(topic({ title: 'Nearby work', angle: 'data' })) }).out).logId;
+  const tp = s.transcript('mn8', 3);
+  const before = s.calls().length;
+  const run = slow(s, ['scout', '--session', 'mn8', '--transcript', tp, '--json'], { ...reply(topic({ title: 'Own work' })), STUB_DELAY: '1200' });
+  await pause(600);
+  s.run(['mark', near, 'meanwhile']);
+  const r = await run;
+  assert.strictEqual(r.code, 0, r.stderr);
+  assert.strictEqual(s.calls().length, before + 1);
+  assert.match(s.run(['show', near]).out, /"note":"meanwhile"/);
+});
+
+test('scout output labels each log by its own partial state; pick mistakes are not logged as errors', () => {
+  const s = sandbox();
+  const l = JSON.parse(s.run(['scout', '--session', 'q1', '--transcript', s.transcript('q1', 3), '--json']).out).logId;
+  const tp2 = s.transcript('q2', 3);
+  s.run(['scout', '--session', 'q2', '--transcript', tp2, '--auto']);
+  const out = s.run(['scout', '--session', 'q2', '--transcript', s.transcript('q2', 12)], { env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [l] })) }).out;
+  assert.match(out, new RegExp(`Updated ${l} \\(score \\d, partial\\)`), 'q1 is still partial');
+  const p = s.run(['discover', 'pick', 'd-000000', '1']);
+  assert.strictEqual(p.status, 1);
+  const errLog = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
+  assert.ok(!fs.existsSync(errLog) || !/no discovery/.test(fs.readFileSync(errLog, 'utf8')));
+});
+
+// ---------------------------------------------------------------- topics review, round 9
+
+test('a losing topic that retells the same story is dropped; a same-angle claim beats a title match', () => {
+  const s = sandbox();
+  const tp = s.transcript('dp9', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'dp9', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fix Redis retry storms' })) }).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'dp9', '--json'], {
+    env: reply(topic({ title: 'Fix Redis retry storms', same_as: [id], score: 5 }), topic({ title: 'Fixing the Redis retry storms', same_as: [id], score: 3 })),
+  }).out);
+  assert.deepStrictEqual(r.logs.map((l) => l.status), ['updated']);
+  assert.strictEqual(logsJson(s).length, 1);
+
+  const r2 = JSON.parse(s.run(['scout', '--session', 'dp9', '--json'], {
+    env: reply(topic({ title: 'Fixed Redis retry storm', score: 5 }), topic({ title: 'Redis retry storms after deploys', same_as: [id], score: 4 })),
+  }).out);
+  const upd = r2.logs.find((l) => l.status === 'updated');
+  assert.strictEqual(upd.logId, id);
+  assert.strictEqual(upd.title, 'Redis retry storms after deploys', 'the topic that named the log updates it');
+});
+
+test('a "continue" opening links to the session that ended last, not the one that started last', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const day = new Date('2026-11-10T00:00:00Z').getTime();
+  const at = (h, m = 0) => new Date(day + (h * 60 + m) * 60000).toISOString();
+  const sess = (id, s, e, o) => ({ sessionId: id, project: 'p', policy: 'public', branch: 'main', prUrls: [], files: [], readFiles: [], opening: '', startedAt: s, endedAt: e, ...o });
+  const groups = linkSessions([
+    sess('A', at(9), at(17), { files: ['/r/app/queue.js'] }),
+    sess('C', at(10), at(10, 30), { files: ['/r/other.js'] }),
+    sess('B', at(17, 5), at(18), { files: ['/r/app/queue.js'], opening: "let's continue where we left off" }),
+  ]);
+  const ab = groups.find((g) => g.members.some((m) => m.sessionId === 'B'));
+  assert.deepStrictEqual(ab.members.map((m) => m.sessionId).sort(), ['A', 'B']);
+});
+
+// ---------------------------------------------------------------- topics review, round 10
+
+test('a session whose folder is gone keeps its own project; a chain with one anonymized session is anonymized', () => {
+  const s = sandbox();
+  const gone = path.join(s.root, 'acme-wt-removed');
+  const tp = s.transcript('gw', 3);
+  fs.writeFileSync(tp, fs.readFileSync(tp, 'utf8').split(s.repo).join(gone));
+  const dry = JSON.parse(s.run(['discover', '--dry-run', '--json', '--project', 'acme-api']).out);
+  assert.ok(!dry.some((g) => g.sessions.includes('gw')), 'not counted as acme-api');
+
+  // Same slug, different place: the copy is not a git repo with the public remote, so it is anonymized.
+  const twin = path.join(s.root, 'elsewhere', 'acme-api');
+  fs.mkdirSync(twin, { recursive: true });
+  // Linked by a shared pull request: a branch name alone does not link two different checkouts.
+  const pr = (sid) => ({ type: 'pr-link', sessionId: sid, prUrl: 'https://github.com/someone/acme-api/pull/7' });
+  s.transcript('pub', 3, [pr('pub')]);
+  const tp2 = s.transcript('priv', 3, [pr('priv')]);
+  const moved = fs.readFileSync(tp2, 'utf8').split(s.repo).join(twin);
+  fs.rmSync(tp2);
+  const dir = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', twin.replace(/[^\w]/g, '-'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'priv.jsonl'), moved);
+  s.run(['discover', '--project', 'acme-api'], { env: reply(topic({ title: 'Login flow', belongs: [1, 2] })) });
+  const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
+  assert.match(prompt, /2 sessions|Session 2 of 2/);
+  assert.match(prompt, /Privacy policy for this project: anonymize/);
+  assert.match(prompt, /Project: \[anonymized\]/);
+});
+
+test('a bare mark the skill wrote a note for does not come back after unmark', () => {
+  const s = sandbox();
+  const bare = { type: 'user', sessionId: 'bk', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args></command-args>' } };
+  const id = JSON.parse(s.run(['scout', '--session', 'bk', '--transcript', s.transcript('bk', 3), '--auto', '--json']).out).logId;
+  s.run(['mark', '--session', 'bk', '--generated', '--', 'Fixed redis retry storm']);
+  assert.match(s.run(['show', id]).out, /"note":"Fixed redis retry storm"/);
+  s.run(['unmark', id]);
+  const calls = s.calls().length;
+  assert.match(s.run(['scout', '--session', 'bk', '--transcript', s.transcript('bk', 4, [bare]), '--auto']).out, /not enough new activity/);
+  assert.strictEqual(s.calls().length, calls);
+  assert.match(s.run(['show', id]).out, /marked: false/);
+});
+
+test('a scan runs again when another scan of the project created a log meanwhile', async () => {
+  const s = sandbox();
+  const t1 = s.transcript('cc1', 3);
+  const t2 = s.transcript('cc2', 3);
+  const env = { ...reply(topic({ title: 'Fix Redis retry storm' })) };
+  const [a, b] = await Promise.all([
+    slow(s, ['scout', '--session', 'cc1', '--transcript', t1, '--json'], { ...env, STUB_DELAY: '400' }),
+    slow(s, ['scout', '--session', 'cc2', '--transcript', t2, '--json'], { ...env, STUB_DELAY: '1400' }),
+  ]);
+  assert.strictEqual(a.code, 0, a.stderr);
+  assert.strictEqual(b.code, 0, b.stderr);
+  assert.strictEqual(s.calls().length, 3, 'the slower scan looked again with the new log shown');
+});
+
+test('editing requirements.txt or a README in any format is not a handoff', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const now = Date.now();
+  const sess = (id, o) => ({
+    sessionId: id, project: 'p', policy: 'public', branch: 'main', prUrls: [], files: [], readFiles: [], opening: '',
+    startedAt: new Date(now - (id === 'a' ? 240 : 1) * 3600000).toISOString(),
+    endedAt: new Date(now - (id === 'a' ? 239 : 0) * 3600000).toISOString(), ...o,
+  });
+  for (const f of ['/r/requirements.txt', '/r/README.rst', '/r/LICENSE.txt', '/r/CMakeLists.txt']) {
+    assert.strictEqual(linkSessions([sess('a', { files: [f] }), sess('b', { readFiles: [f] })]).length, 2, f);
+  }
+  assert.strictEqual(linkSessions([sess('a', { files: ['/r/notes/handoff.txt'] }), sess('b', { readFiles: ['/r/notes/handoff.txt'] })]).length, 1);
+});
+
+// ---------------------------------------------------------------- topics review, round 11
+
+test('a removed worktree inside its repo stays in the repo\'s project; sessions without a folder are left out', () => {
+  const s = sandbox();
+  const wt = path.join(s.repo, '.claude', 'worktrees', 'feat-x');
+  const tp = s.transcript('wt11', 3);
+  fs.writeFileSync(tp, fs.readFileSync(tp, 'utf8').split(s.repo).join(wt));
+  const r = JSON.parse(s.run(['scout', '--session', 'wt11', '--transcript', tp, '--json']).out);
+  assert.match(s.run(['show', r.logId]).out, /project: "acme-api"/);
+  assert.match(s.run(['show', r.logId]).out, /policy: "public"/);
+
+  const nc = s.transcript('nocwd', 3);
+  fs.writeFileSync(nc, fs.readFileSync(nc, 'utf8').split(`"cwd":${JSON.stringify(s.repo)},`).join(''));
+  const dry = JSON.parse(s.run(['discover', '--dry-run', '--json']).out);
+  assert.ok(!dry.some((g) => g.sessions.includes('nocwd')));
+});
+
+test('a note with only a score threshold does not filter by fit; a pick counts its sessions as scanned', () => {
+  const s = sandbox();
+  s.transcript('th1', 3);
+  const r = s.run(['discover', '--note', 'find anything that scores > 3', '--min-score', '4'], { env: { STUB_FIT: '0' } });
+  assert.match(r.out, /^Discovery d-/, r.out);
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  // Settled by now, so the pick finishes it and records its size.
+  const old = new Date(Date.now() - 3600000);
+  for (const d of fs.readdirSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects'))) {
+    const f = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', d, 'th1.jsonl');
+    if (fs.existsSync(f)) fs.utimesSync(f, old, old);
+  }
+  s.run(['discover', 'pick', did, '1']);
+  const dir = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions');
+  const ledger = fs.readdirSync(dir).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))).find((l) => l.sessionId === 'th1');
+  assert.strictEqual(ledger.userTurns, 3);
+  assert.ok(ledger.size > 0);
+});
+
+// ---------------------------------------------------------------- topics review, round 12
+
+test('the final scan settles every log the session fed, also those no topic names', () => {
+  const s = sandbox();
+  const tp = s.transcript('fz', 3);
+  const r = JSON.parse(s.run(['scout', '--session', 'fz', '--transcript', tp, '--live', '--json'], {
+    env: reply(topic({ title: 'Halved p99 latency', angle: 'performance' }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })),
+  }).out);
+  const [a, b] = r.logs.map((l) => l.logId);
+  s.run(['scout', '--session', 'fz', '--transcript', s.transcript('fz', 12), '--auto'], { env: reply(topic({ title: 'Halved p99 latency', angle: 'performance', same_as: [a] })) });
+  assert.match(s.run(['show', a]).out, /partial: false/);
+  assert.match(s.run(['show', b]).out, /partial: false/);
+});
+
+test('discovery updates a same-title log of its own sessions; a gone folder outside a worktree borrows no repo', () => {
+  const s = sandbox();
+  const tp = s.transcript('tt1', 3, onBranch('tt1', 'feat/t'));
+  s.transcript('tt2', 3, onBranch('tt2', 'feat/t'));
+  const id = JSON.parse(s.run(['scout', '--session', 'tt1', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fix Redis retry storm' })) }).out).logId;
+  const r = s.run(['discover'], { env: reply(topic({ title: 'Fixing Redis retry storms', belongs: [1, 2] })) });
+  assert.match(r.out, new RegExp(`updates: ${id}`), r.out);
+
+  const clone = path.join(s.repo, 'tmp', 'client-api');
+  const tc = s.transcript('cl12', 3);
+  fs.writeFileSync(tc, fs.readFileSync(tc, 'utf8').split(s.repo).join(clone));
+  const l = JSON.parse(s.run(['scout', '--session', 'cl12', '--transcript', tc, '--json']).out).logId;
+  const doc = s.run(['show', l]).out;
+  assert.match(doc, /project: "client-api"/);
+  assert.match(doc, /policy: "anonymize"/);
+});
+
+// ---------------------------------------------------------------- topics review, round 13
+
+test('a branch name links sessions of one repository only; an exact title of another angle is a new log', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const now = Date.now();
+  const sess = (id, o) => ({
+    sessionId: id, project: 'api', policy: 'anonymize', branch: 'feature/auth', prUrls: [], files: [], readFiles: [], opening: '',
+    startedAt: new Date(now - (id === 'a' ? 48 : 1) * 3600000).toISOString(), endedAt: new Date(now - (id === 'a' ? 47 : 0) * 3600000).toISOString(), ...o,
+  });
+  assert.strictEqual(linkSessions([sess('a', { repo: 'github.com/me/api' }), sess('b', { repo: 'github.com/client/api' })]).length, 2);
+  assert.strictEqual(linkSessions([sess('a', { repo: 'github.com/me/api' }), sess('b', { repo: 'github.com/me/api' })]).length, 1);
+
+  const s = sandbox();
+  const tp = s.transcript('ex13', 3);
+  const arch = JSON.parse(s.run(['scout', '--session', 'ex13', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Moving queue retries to Redis streams', angle: 'architecture' })) }).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'ex13', '--json'], { env: reply(topic({ title: 'Moving queue retries to Redis streams', angle: 'debugging' })) }).out);
+  assert.strictEqual(r.status, 'created');
+  assert.match(s.run(['show', arch]).out, /angle: "architecture"/);
+});
+
+test('a gone folder is skipped under a skip default; each bare mark recorded accounts for one transcript mark', () => {
+  const s = sandbox();
+  const cfg = path.join(s.env.CASEBOOK_HOME, 'config.json');
+  fs.writeFileSync(cfg, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfg, 'utf8')), defaultPolicy: 'skip' }));
+  const tc = s.transcript('gs13', 3);
+  fs.writeFileSync(tc, fs.readFileSync(tc, 'utf8').split(s.repo).join(path.join(s.root, 'tmp-client')));
+  assert.match(s.run(['scout', '--session', 'gs13', '--transcript', tc]).out, /policy is skip/);
+
+  const bare = { type: 'user', sessionId: 'bm13', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args></command-args>' } };
+  const id = JSON.parse(s.run(['scout', '--session', 'bm13', '--transcript', s.transcript('bm13', 3), '--auto', '--json']).out).logId;
+  s.run(['mark', '--session', 'bm13', '--generated', '--', 'first bare mark']);
+  // Two bare marks in the transcript, but casebook mark recorded only one: the other is the fallback.
+  s.run(['scout', '--session', 'bm13', '--transcript', s.transcript('bm13', 4, [bare, bare]), '--auto']);
+  const marks = JSON.parse(/marks: (\[.*\])/.exec(s.run(['show', id]).out)[1]);
+  assert.deepStrictEqual(marks.map((m) => m.note).sort(), ['', 'first bare mark']);
+});
+
+// ---------------------------------------------------------------- topics review, round 14
+
+const ledgerOf = (s, sid) => {
+  const dir = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions');
+  return fs.readdirSync(dir).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))).find((l) => l.sessionId === sid);
+};
+
+test('a generated bare mark is counted once; a quoted mark matches its stored note', () => {
+  const s = sandbox();
+  s.run(['mark', '--session', 'nolog14', '--generated', '--', 'the cache fix']);
+  assert.strictEqual(ledgerOf(s, 'nolog14').bareMarks, 1);
+
+  const quoted = { type: 'user', sessionId: 'q14', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args>"the queue redesign"</command-args>' } };
+  const id = JSON.parse(s.run(['scout', '--session', 'q14', '--transcript', s.transcript('q14', 3), '--auto', '--json']).out).logId;
+  s.run(['mark', '--session', 'q14', '--', 'the queue redesign']);
+  const calls = s.calls().length;
+  assert.match(s.run(['scout', '--session', 'q14', '--transcript', s.transcript('q14', 4, [quoted]), '--auto']).out, /not enough new activity/);
+  assert.strictEqual(s.calls().length, calls);
+  const marks = JSON.parse(/marks: (\[.*\])/.exec(s.run(['show', id]).out)[1]);
+  assert.deepStrictEqual(marks.map((m) => m.note), ['the queue redesign']);
+});
+
+test('a pick refuses when any log it merges was deleted; a session with no folder is never the caller\'s project', () => {
+  const s = sandbox();
+  const a = s.transcript('m14a', 3, onBranch('m14a', 'feat/m'));
+  const b = s.transcript('m14b', 3, onBranch('m14b', 'feat/m'));
+  const la = JSON.parse(s.run(['scout', '--session', 'm14a', '--transcript', a, '--json'], { env: reply(topic({ title: 'Part one' })) }).out).logId;
+  const lb = JSON.parse(s.run(['scout', '--session', 'm14b', '--transcript', b, '--json'], { env: reply(topic({ title: 'Part two' })) }).out).logId;
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'The whole story', same_as: [la, lb], belongs: [1, 2] })) }).out)[1];
+  s.run(['delete', lb]);
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, new RegExp(`gone \\(${lb}\\)`));
+  assert.match(s.run(['show', la]).out, /^# Part one$/m);
+
+  const nc = s.transcript('nc14', 3);
+  fs.writeFileSync(nc, fs.readFileSync(nc, 'utf8').split(`"cwd":${JSON.stringify(s.repo)},`).join(''));
+  const l = JSON.parse(s.run(['scout', '--session', 'nc14', '--transcript', nc, '--json']).out).logId;
+  const doc = s.run(['show', l]).out;
+  assert.match(doc, /project: "unknown"/);
+  assert.match(doc, /policy: "anonymize"/);
+});
+
+// ---------------------------------------------------------------- topics review, round 15
+
+test('a log deleted while its session is being scanned stays deleted', async () => {
+  const s = sandbox();
+  const tp = s.transcript('dl15', 3);
+  const x = JSON.parse(s.run(['scout', '--session', 'dl15', '--transcript', tp, '--json']).out).logId;
+  const run = slow(s, ['scout', '--session', 'dl15', '--transcript', tp, '--json'], { STUB_DELAY: '1200' });
+  await pause(600);
+  s.run(['delete', x]);
+  const r = await run;
+  assert.strictEqual(r.code, 0, r.stderr);
+  assert.match(r.out, /"status":"skipped"/);
+  assert.strictEqual(logsJson(s).length, 0);
+});
+
+test('a rescan from a folder that is gone keeps the log\'s project; a bad --since is not logged as a failure', () => {
+  const s = sandbox();
+  const tp = s.transcript('gk15', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'gk15', '--transcript', tp, '--json']).out).logId;
+  fs.writeFileSync(tp, fs.readFileSync(tp, 'utf8').split(s.repo).join(path.join(s.root, 'acme-api-feature')));
+  s.run(['scout', '--session', 'gk15', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [id] })) });
+  const doc = s.run(['show', id]).out;
+  assert.match(doc, /project: "acme-api"/);
+  assert.match(doc, /repo: "github.com\/someone\/acme-api"/);
+  assert.match(doc, /policy: "anonymize"/, 'only ever stricter');
+
+  const bad = s.run(['discover', '--since', '3 months']);
+  assert.strictEqual(bad.status, 1);
+  const log = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
+  assert.ok(!fs.existsSync(log) || !/command discover failed/.test(fs.readFileSync(log, 'utf8')));
+});
+
+// ---------------------------------------------------------------- topics review, round 16
+
+test('a pick settles only the logs it writes, and checks the project policy again', () => {
+  const s = sandbox();
+  const tp = s.transcript('pk16', 3, onBranch('pk16', 'feat/k'));
+  s.transcript('pk16b', 3, onBranch('pk16b', 'feat/k'));
+  const r = JSON.parse(s.run(['scout', '--session', 'pk16', '--transcript', tp, '--live', '--json'], {
+    env: reply(topic({ title: 'Halved p99 latency', angle: 'performance' }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })),
+  }).out);
+  const [l1, l2] = r.logs.map((l) => l.logId);
+  const old = new Date(Date.now() - 3600000);
+  for (const d of fs.readdirSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects'))) {
+    for (const n of ['pk16.jsonl', 'pk16b.jsonl']) { const f = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', d, n); if (fs.existsSync(f)) fs.utimesSync(f, old, old); }
+  }
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Halved p99 latency across both', angle: 'performance', same_as: [l1], belongs: [1, 2] })) }).out)[1];
+  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`^Updated ${l1}`));
+  assert.match(s.run(['show', l1]).out, /partial: false/);
+  assert.match(s.run(['show', l2]).out, /partial: true/, 'not touched by the pick: its own final scan settles it');
+
+  const did2 = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Schema change', angle: 'data', belongs: [1, 2] })) }).out)[1];
+  fs.writeFileSync(path.join(s.repo, '.casebook.json'), JSON.stringify({ policy: 'anonymize' }));
+  const p = s.run(['discover', 'pick', did2, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, /no longer public/);
 });

@@ -10,9 +10,11 @@ const store = require('../lib/store');
 const { resolveProject } = require('../lib/project');
 const { scoutSession, sweep } = require('../lib/scout');
 const F = require('../lib/filter');
+const D = require('../lib/discover');
+const T = require('../lib/topics');
 
 const BOOL = new Set(['all', 'marked', 'unmarked', 'written', 'unwritten', 'json', 'path', 'yes', 'force', 'dry-run', 'help', 'handoff',
-  'auto', 'live', 'pending', 'background', 'quiet']);
+  'auto', 'live', 'pending', 'background', 'quiet', 'generated']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -33,6 +35,12 @@ function parseArgs(argv) {
 
 const out = (s = '') => process.stdout.write(s + '\n');
 const fail = (msg) => { process.stderr.write(`casebook: ${msg}\n`); process.exit(1); };
+// A log merged into another one by a scan lives on under the surviving ID.
+function findLog(id) {
+  const l = id && U.ID_RE.test(id) ? T.resolveLog(id) : null;
+  if (l && l.meta.id !== id) process.stderr.write(`casebook: ${id} was merged into ${l.meta.id}\n`);
+  return l;
+}
 
 function readStdinJson() {
   try {
@@ -65,21 +73,21 @@ function row(log) {
   const m = log.meta;
   const date = String(m.started_at || m.created_at || '').slice(0, 10);
   const score = `${m.score ?? '-'}${m.partial ? '…' : ''}`;
-  return `${pad(m.id, 10)} ${pad(date, 11)} ${pad(score, 5)} ${pad(m.marked ? '📌' : '', 3)} ${pad(F.isWritten(log) ? '✓' : '', 3)} ${m.title || ''}`;
+  return `${pad(m.id, 10)} ${pad(date, 11)} ${pad(score, 5)} ${pad(m.marked ? '📌' : '', 3)} ${pad(F.isWritten(log) ? '✓' : '', 3)} ${m.title || ''}${m.angle ? `  · ${m.angle}` : ''}`;
 }
 
 const HEADER = `${pad('ID', 10)} ${pad('DATE', 11)} ${pad('SCORE', 5)} ${pad('MRK', 3)} ${pad('WRT', 3)} TITLE`;
 
-function parseLimit(v, fallback) {
+function parseLimit(v, fallback, flag = '--limit') {
   if (v === undefined) return fallback;
   const n = Number(v);
-  if (!Number.isInteger(n) || n < 1) fail(`--limit must be a positive whole number, got "${v}"`);
+  if (!Number.isInteger(n) || n < 1) fail(`${flag} must be a positive whole number, got "${v}"`);
   return n;
 }
 
 function describe(r) {
-  const c = r.status === 'created' ? 'Created' : 'Updated';
-  if (r.status === 'created' || r.status === 'updated') return `${c} ${r.logId} (score ${r.score}${r.partial ? ', partial' : ''}): ${r.title}`;
+  const one = (l) => `${l.status === 'created' ? 'Created' : 'Updated'} ${l.logId} (score ${l.score}${(l.partial ?? r.partial) ? ', partial' : ''}${r.logs && r.logs.length > 1 && l.angle ? `, ${l.angle}` : ''}): ${l.title}${l.merged && l.merged.length ? ` (merged ${l.merged.join(', ')})` : ''}`;
+  if (r.status === 'created' || r.status === 'updated') return (r.logs && r.logs.length ? r.logs : [{ ...r }]).map(one).join('\n');
   if (r.status === 'running') return r.reason;
   if (r.status === 'error') return `Failed: ${r.reason}`;
   return `Skipped: ${r.reason}`;
@@ -105,9 +113,9 @@ function scoutPending(config, opt) {
   }
   const { results, locked } = sweep(config, o);
   if (locked) return out('A catch-up is already running. Check /casebook:list in a minute.');
-  if (opt.json) return out(JSON.stringify(results.map(({ sessionId, status, logId, reason, score, title, partial }) => ({ sessionId, status, logId, reason, score, title, partial }))));
+  if (opt.json) return out(JSON.stringify(results.map(({ sessionId, status, logId, reason, score, title, partial, logs }) => ({ sessionId, status, logId, reason, score, title, partial, logs }))));
   if (!results.length) return out('No sessions to catch up on.');
-  for (const r of results) out(`${id8(r)}  ${describe(r)}`);
+  for (const r of results) for (const line of describe(r).split('\n')) out(`${id8(r)}  ${line}`);
 }
 
 // ------------------------------------------------------------------ commands
@@ -155,6 +163,64 @@ const commands = {
       return;
     }
     out(opt.json ? JSON.stringify(r) : describe(r));
+  },
+
+  async discover({ pos, opt }) {
+    const config = U.loadConfig();
+    if (pos[0] === 'pick') {
+      if (!/^d-[a-z0-9]{6}$/.test(pos[1] || '') || !pos[2]) fail('usage: discover pick <discovery-id> <topic number>');
+      const r = D.pick(config, pos[1], pos[2]);
+      if (opt.json) return out(JSON.stringify(r));
+      if (r.status === 'exists') return out(`Already logged as ${r.logId}: ${r.title}`);
+      const n = r.sessions.length;
+      out(`${r.status === 'created' ? 'Created' : 'Updated'} ${r.logId} (score ${r.score}${r.partial ? ', partial' : ''}, ${n} session${n > 1 ? 's' : ''}): ${r.title}`);
+      if (r.merged.length) out(`Merged into it: ${r.merged.join(', ')} (duplicates of this topic; marks and written files carried over)`);
+      return;
+    }
+    const minScore = opt.minScore === undefined ? null : Number(opt.minScore);
+    if (minScore !== null && !(Number.isInteger(minScore) && minScore >= 1 && minScore <= 5)) fail(`--min-score must be a whole number from 1 to 5, got "${opt.minScore}"`);
+    const candidates = Math.min(8, parseLimit(opt.candidates, 5, '--candidates'));
+    const project = currentProject(opt, config);
+    const r = await D.discover(config, {
+      note: opt.note || pos.join(' ') || '',
+      tags: String(opt.tags || '').split(',').filter((t) => t.trim()),
+      minScore, since: opt.since, project, candidates, force: Boolean(opt.force), dryRun: Boolean(opt.dryRun),
+      exclude: opt.exclude ? [opt.exclude] : [],
+    });
+    const scope = project ? `"${project}"` : 'all projects';
+    if (opt.dryRun) {
+      if (opt.json) return out(JSON.stringify(r.shortlist.map((g) => ({ sessions: g.members.map((m) => m.sessionId), reasons: g.reasons, logs: [...new Set(g.members.flatMap((m) => m.logs.map((l) => l.id)))], prelim: Number(g.prelim.toFixed(2)) })), null, 2));
+      out(`${r.sessions} session(s) in ${scope}, ${r.chains} linked chain(s), ${r.eligible} eligible. Would score ${r.shortlist.length} (one model call each):`);
+      r.shortlist.forEach((g, i) => {
+        out(`${i + 1}. ${g.members.map((m) => `${m.sessionId.slice(0, 8)} ${String(m.startedAt || '').slice(0, 10)}`).join(' → ')}`);
+        if (g.reasons.length) out(`   linked: ${g.reasons.join('; ')}`);
+        const logs = [...new Set(g.members.flatMap((m) => m.logs.map((l) => `${l.id} (${l.score})`)))];
+        if (logs.length) out(`   logs: ${logs.join(', ')}`);
+      });
+      return;
+    }
+    if (opt.json) return out(JSON.stringify(r, null, 2));
+    if (!r.topics.length) {
+      if (!r.eligible) return out(`Nothing to discover in ${scope}: ${r.sessions} session(s), none${opt.tags ? ' that mention those tags' : ' long enough'}.`);
+      out(`No topic matched. Scored ${r.scored} candidate(s) in ${scope}; the best scored ${r.best || '-'}.`);
+      if (r.failed.length) out(`${r.failed.length} scout(s) failed: ${r.failed[0]}`);
+      return;
+    }
+    out(`Discovery ${r.id} · ${r.topics.length} topic(s) from ${r.scored} candidate(s) · ${r.sessions} session(s) in ${scope}`);
+    for (const t of r.topics) {
+      const ms = t.members;
+      const last = ms.map((m) => m.endedAt || '').sort().pop();
+      const span = `${String(ms[0].startedAt || '').slice(0, 10)} → ${String(last || '').slice(0, 10)}`;
+      out('');
+      out(`${t.rank}. [${t.score}${t.partial ? '…' : ''}] ${t.topic.title}`);
+      out(`   ${t.info.project} · ${t.topic.angle || 'general'} · ${ms.length} session${ms.length > 1 ? 's' : ''} · ${span}${t.fit ? ` · fit ${t.fit}/3` : ''}`);
+      if (t.topic.summary) out(`   ${t.topic.summary}`);
+      if (t.topic.tags.length) out(`   tags: ${t.topic.tags.join(', ')}`);
+      if (t.reasons.length) out(`   linked: ${t.reasons.join('; ')}`);
+      out(`   sessions: ${ms.map((m) => `${m.sessionId.slice(0, 8)} (${String(m.startedAt || '').slice(0, 10)}, ${m.userTurns} turns)`).join(', ')}`);
+      out(t.updates.length > 1 ? `   merges: ${t.updates.join(', ')} (duplicates of this topic)` : t.updates.length ? `   updates: ${t.updates[0]}` : '   new log');
+    }
+    if (r.failed.length) { out(''); out(`${r.failed.length} scout(s) failed: ${r.failed[0]}`); }
   },
 
   maintenance({ opt }) {
@@ -216,7 +282,7 @@ const commands = {
   },
 
   show({ pos, opt }) {
-    const log = store.findLog(pos[0] || '');
+    const log = findLog(pos[0] || '');
     if (!log) fail(`no log with id "${pos[0] || ''}"`);
     out(opt.path ? log.file : fs.readFileSync(log.file, 'utf8'));
   },
@@ -224,42 +290,58 @@ const commands = {
   mark({ pos, opt }) {
     U.loadConfig();
     if (pos[0] && U.ID_RE.test(pos[0])) {
-      const log = store.findLog(pos[0]);
+      // Logs are shared between sessions: read and save under the write lock so a scan cannot undo the change.
+      const log = store.withWriteLock(() => {
+        const l = findLog(pos[0]);
+        return l && store.applyMark(l, U.normNote(pos.slice(1).join(' ')));
+      });
       if (!log) fail(`no log with id "${pos[0]}"`);
-      store.applyMark(log, pos.slice(1).join(' '));
       return out(`📌 Marked ${log.meta.id}: ${log.meta.title}`);
     }
     if (!opt.session) fail('mark needs a log ID, or --session <id> to mark the current session');
-    const note = pos.join(' ');
-    const ledger = store.getLedger(opt.session);
-    const log = ledger && ledger.logId ? store.findLog(ledger.logId) : null;
-    if (log) {
-      store.applyMark(log, note);
-      return out(`📌 Marked ${log.meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
-    }
-    const marks = store.addPendingMark(opt.session, note);
-    out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). It will be logged when the session ends.`);
+    const note = U.normNote(pos.join(' '));
+    // --generated: the skill wrote the note for a bare /casebook:mark, which the transcript shows with no note.
+    // Counted so the scan knows that empty transcript mark was placed (it is only a fallback for a failed mark).
+    const recordBare = () => {
+      if (opt.generated) store.setLedger(opt.session, { bareMarks: ((store.getLedger(opt.session) || {}).bareMarks || 0) + 1 });
+    };
+    // A session with exactly one log: mark that log. With several, the next scan gives the mark to the topic it points to.
+    // One lock, so the bare mark is counted exactly once whichever way it goes.
+    // Counted only once the mark is written: if writing it fails, the transcript copy stays the fallback.
+    const { one, marks } = store.withWriteLock(() => {
+      const logs = T.logsForSessions([opt.session]);
+      const r = logs.length === 1 ? { one: store.applyMark(logs[0], note, opt.session) } : { marks: store.addPendingMark(opt.session, note) };
+      recordBare();
+      return r;
+    });
+    if (one) return out(`📌 Marked ${one.meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
+    // A session closed since 0.1 (its log deleted before topics) is never scanned again on its own.
+    const closed = T.legacyDeleted(store.getLedger(opt.session));
+    out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). ${closed
+      ? `Its log was deleted in an older casebook, so it is not scanned on its own: run /casebook:scout ${opt.session} --force to place the mark.`
+      : 'It goes to the topic it points to when the session is scanned.'}`);
   },
 
   unmark({ pos }) {
-    const log = store.findLog(pos[0] || '');
+    U.loadConfig();
+    const log = store.withWriteLock(() => { const l = findLog(pos[0] || ''); return l && store.clearLogMarks(l); });
     if (!log) fail(`no log with id "${pos[0] || ''}"`);
-    log.meta.marked = false;
-    log.meta.marks = [];
-    store.saveLog(log);
     out(`Unmarked ${log.meta.id}`);
   },
 
   written({ pos, opt }) {
     if (!opt.file) fail('written needs --file <path>');
     for (const id of pos) {
-      const log = store.findLog(id);
+      const log = store.withWriteLock(() => {
+        const l = findLog(id);
+        if (!l) return null;
+        const list = new Set(l.meta.written_to || []);
+        list.add(path.resolve(U.expandHome(opt.file)));
+        l.meta.written_to = [...list];
+        l.meta.written_at = new Date().toISOString();
+        return store.saveLog(l);
+      });
       if (!log) fail(`no log with id "${id}"`);
-      const list = new Set(log.meta.written_to || []);
-      list.add(path.resolve(U.expandHome(opt.file)));
-      log.meta.written_to = [...list];
-      log.meta.written_at = new Date().toISOString();
-      store.saveLog(log);
     }
     out(`Recorded ${pos.length} log(s) as written to ${opt.file}`);
   },
@@ -286,7 +368,11 @@ const commands = {
     U.loadConfig();
     let logs;
     if (pos.length) {
-      logs = pos.map((id) => store.findLog(id) || fail(`no log with id "${id}"`));
+      // Exact IDs only: deleting a merged ID must not delete the log it was merged into.
+      logs = pos.map((id) => store.findLog(id) || fail((() => {
+        const into = U.ID_RE.test(id) && T.resolveLog(id);
+        return into ? `${id} was merged into ${into.meta.id}; delete ${into.meta.id} if you mean that log` : `no log with id "${id}"`;
+      })()));
     } else {
       try { logs = F.filterLogs(opt); } catch (err) { fail(err.message); }
     }
@@ -298,8 +384,14 @@ const commands = {
       for (const l of logs) out(row(l));
       return;
     }
-    for (const l of logs) store.deleteLog(l);
-    out(`Deleted ${logs.length} log(s): ${logs.map((l) => l.meta.id).join(', ')}`);
+    // A log merged into another one (or deleted) since it was listed is reported, not counted.
+    const done = logs.filter((l) => store.deleteLog(l)).map((l) => l.meta.id);
+    const missed = logs.map((l) => l.meta.id).filter((id) => !done.includes(id));
+    if (done.length) out(`Deleted ${done.length} log(s): ${done.join(', ')}`);
+    for (const id of missed) {
+      const into = T.resolveLog(id);
+      out(into ? `Not deleted: ${id} was merged into ${into.meta.id} since it was listed` : `Not deleted: ${id} is already gone`);
+    }
   },
 
   backfill({ opt }) {
@@ -313,7 +405,7 @@ const commands = {
     }
     const { locked } = sweep(config, {
       since, limit, settleMinutes: 0, partialIfRecent: true,
-      onResult: (c, r) => out(`${c.sessionId.slice(0, 8)}  ${r.status}${r.logId ? ' ' + r.logId : ''}${r.reason ? ' (' + r.reason + ')' : ''}${r.title ? ' — ' + r.title : ''}`),
+      onResult: (c, r) => out(`${c.sessionId.slice(0, 8)}  ${r.status}${r.logs && r.logs.length ? ' ' + r.logs.map((l) => l.logId).join(', ') : r.logId ? ' ' + r.logId : ''}${r.reason ? ' (' + r.reason + ')' : ''}${r.title ? ' — ' + r.title : ''}`),
     });
     if (locked) out('A catch-up is already running. Check /casebook:list in a minute.');
   },
@@ -358,6 +450,9 @@ const commands = {
   delete [--project P] [--below-score N] [--older-than 30d] [--unmarked] [--written|--unwritten] [--yes]
   scout [<session-id>] [--live] [--background] [--force]   scout one session now (default: manual)
   scout --pending [--dry-run] [--limit N] [--exclude <session-id>]   catch up on missed sessions now
+  discover [--note "…"] [--min-score N] [--tags a,b] [--project P | --all] [--since 90d] [--candidates 5] [--dry-run]
+                                                   find topics across linked sessions, ranked (top 3)
+  discover pick <discovery-id> <n>                 log topic n of a discovery as one log
   profiles [--json]                                list every profile's store
   backfill [--since 30d] [--limit 20] [--yes]      scout past sessions
   written <id…> --file <path>                      record that logs were written up
@@ -374,10 +469,14 @@ if ('profile' in opt && fn && !opt.help && name !== 'help') {
 }
 if (!fn || opt.help) commands.help();
 else {
-  try {
-    fn({ pos, opt });
-  } catch (err) {
-    U.logError(`command ${name} failed`, err);
+  const onError = (err) => {
+    if (!err.user) U.logError(`command ${name} failed`, err);
     fail(err.message);
+  };
+  try {
+    const r = fn({ pos, opt });
+    if (r && typeof r.then === 'function') r.catch(onError);
+  } catch (err) {
+    onError(err);
   }
 }

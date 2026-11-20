@@ -1,4 +1,4 @@
-The intake must carry one topic: one specific subject, told first-hand, with enough facts to write it. Every intake is checked against the common elements, and then against the elements for its type.
+The intake must carry one topic: one specific subject, told first-hand, with enough facts to write it. Every intake is checked against the core elements, and then against the elements for its type.
 
 Every element is either found in the intake (cite the path and the line or section), inferred where the table allows it, answered by the author, or missing.
 
@@ -7,7 +7,7 @@ Every element is either found in the intake (cite the path and the line or secti
 - **reject:** the intake is `thin`. Asking cannot fill it.
 - **ask:** it goes into the one message of questions.
 - **infer:** derive it from the intake and record it as inferred; ask only if it cannot be derived.
-- **unknown:** it goes to the brief's Unknowns and never blocks.
+- **unknown:** it goes to the handoff's Unknowns and never blocks.
 
 ## Core elements
 
