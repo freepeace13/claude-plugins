@@ -36,6 +36,10 @@ function resolveProject(cwd, config) {
   // or an old client session would take on the project and policy of wherever casebook runs.
   const dir = cwd || process.cwd();
   if (!fs.existsSync(dir)) {
+    // A removed worktree inside its repo (…/repo/.claude/worktrees/x) still belongs to that repo.
+    let up = path.dirname(dir);
+    while (up !== path.dirname(up) && !fs.existsSync(up)) up = path.dirname(up);
+    if (fs.existsSync(up) && git(up, ['rev-parse', '--show-toplevel'])) return resolveProject(up, config);
     const project = slugify(path.basename(dir), 50);
     let policy = null;
     for (const rule of config.projects || []) {

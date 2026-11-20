@@ -24,7 +24,8 @@ const COMMON_DOCS = /^((readme|changelog|changes|history|claude|agents|license|l
 const STOP = new Set(('a an and any are as at be by can could find for from get has have how i in into is it its look looking me my '
   + 'need of on one or out over scores score some that the their them then there these this to topic topics was were what when '
   + 'where which with worked work works together about across between show give only just like want than more less above below '
-  + 'session sessions should would also').split(' '));
+  + 'session sessions should would also anything something everything all good great best interesting worth '
+  + 'least greater higher lower case study studies write writing').split(' '));
 
 const HOUR = 3600000;
 const DAY = 24 * HOUR;
@@ -64,7 +65,8 @@ function collectSessions(config, { project, since, exclude, force }) {
       if (early && (early.policy === 'skip' || (project && early.project !== project))) continue;
       let t;
       try { t = condense(file, config.scout.maxChars); } catch { continue; }
-      if (!t.userTurns) continue;
+      // No recorded directory: nothing says which project or policy it has, so it is left out.
+      if (!t.userTurns || !t.cwd) continue;
       const key = t.cwd || '';
       if (!byCwd.has(key)) byCwd.set(key, resolveProject(t.cwd, config));
       const info = byCwd.get(key);
@@ -352,7 +354,8 @@ async function discover(config, o) {
   }));
   const failed = scanned.filter((s) => !s.ok).map((s) => s.error);
   const found = scanned.filter((s) => s.ok).flatMap((s) => s.found);
-  const narrowed = Boolean(o.note || tags.length);
+  // A note that names nothing to look for ("anything that scores > 3") filters by score only, not by fit.
+  const narrowed = Boolean(keywords(o.note).length || tags.length);
   const topics = found
     .filter((f) => f.topic.score >= (o.minScore || 1) && (!narrowed || f.topic.fit >= 1))
     .sort((a, b) => b.topic.score - a.topic.score || b.topic.fit - a.topic.fit || b.members.length - a.members.length
@@ -441,6 +444,11 @@ function pick(config, id, n) {
         members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), partial, partialSessions, mode: 'discovery', note: d.note, commits: t.commits, noTwins: true,
       });
       for (const [sid, m] of bySession) store.consumeMarks(sid, m);
+      // The sessions are scanned now: the catch-up and the regrow gate count from here.
+      // As of the discovery, so whatever was added since still counts as new.
+      for (const m of t.members) {
+        store.setLedger(m.sessionId, { project: t.info.project, userTurns: m.userTurns, size: m.size, scoutedAt: new Date().toISOString() });
+      }
       return res;
     });
     // Read it again under the lock: another pick of this discovery may have recorded its own log meanwhile.

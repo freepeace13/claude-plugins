@@ -281,7 +281,7 @@ function applyTopic(topic, ctx) {
     partial: false,
     scouted_at: new Date().toISOString(),
     scout_mode: ctx.mode,
-    commits: uniq([...prior.flatMap((l) => l.meta.commits || []), ...(ctx.commits || [])]).slice(0, 60),
+    commits: uniq([...prior.flatMap((l) => l.meta.commits || []), ...(ctx.commits || [])]).slice(-60),  // the newest stay
     files: uniq([...prior.flatMap((l) => l.meta.files || []), ...ordered.flatMap(relFiles)]),
   };
   meta.marked = meta.marks.length > 0;

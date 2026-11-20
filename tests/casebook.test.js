@@ -1580,3 +1580,33 @@ test('editing requirements.txt or a README in any format is not a handoff', () =
   }
   assert.strictEqual(linkSessions([sess('a', { files: ['/r/notes/handoff.txt'] }), sess('b', { readFiles: ['/r/notes/handoff.txt'] })]).length, 1);
 });
+
+// ---------------------------------------------------------------- topics review, round 11
+
+test('a removed worktree inside its repo stays in the repo\'s project; sessions without a folder are left out', () => {
+  const s = sandbox();
+  const wt = path.join(s.repo, '.claude', 'worktrees', 'feat-x');
+  const tp = s.transcript('wt11', 3);
+  fs.writeFileSync(tp, fs.readFileSync(tp, 'utf8').split(s.repo).join(wt));
+  const r = JSON.parse(s.run(['scout', '--session', 'wt11', '--transcript', tp, '--json']).out);
+  assert.match(s.run(['show', r.logId]).out, /project: "acme-api"/);
+  assert.match(s.run(['show', r.logId]).out, /policy: "public"/);
+
+  const nc = s.transcript('nocwd', 3);
+  fs.writeFileSync(nc, fs.readFileSync(nc, 'utf8').split(`"cwd":${JSON.stringify(s.repo)},`).join(''));
+  const dry = JSON.parse(s.run(['discover', '--dry-run', '--json']).out);
+  assert.ok(!dry.some((g) => g.sessions.includes('nocwd')));
+});
+
+test('a note with only a score threshold does not filter by fit; a pick counts its sessions as scanned', () => {
+  const s = sandbox();
+  s.transcript('th1', 3);
+  const r = s.run(['discover', '--note', 'find anything that scores > 3', '--min-score', '4'], { env: { STUB_FIT: '0' } });
+  assert.match(r.out, /^Discovery d-/, r.out);
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  s.run(['discover', 'pick', did, '1']);
+  const dir = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions');
+  const ledger = fs.readdirSync(dir).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))).find((l) => l.sessionId === 'th1');
+  assert.strictEqual(ledger.userTurns, 3);
+  assert.ok(ledger.size > 0);
+});

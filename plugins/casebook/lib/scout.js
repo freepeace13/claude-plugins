@@ -265,9 +265,10 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   let logs = null;
   for (let attempt = 1; !logs; attempt++) {
     if (attempt > 3) throw new Error('the logs of this session kept changing during the scan; try again');
+    // Stamped before the logs are read: a log created while they are read counts as new.
+    const takenAt = new Date().toISOString();
     const context = T.contextLogs(info.project, [sessionId], t.startedAt, t.endedAt);
     const versions = T.versionsOf(context);
-    const takenAt = new Date().toISOString();
     const prompt = buildPrompt(t, info, promptMarks, commits, T.renderExisting(context, [sessionId], deleted), maxTopics);
     const found = T.parseTopics(runClaude(prompt, config), maxTopics);
 
