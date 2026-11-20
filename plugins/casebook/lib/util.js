@@ -70,6 +70,7 @@ function mergeTree(from, to, merge, failed = []) {
   let entries = [];
   try { entries = fs.readdirSync(from, { withFileTypes: true }); } catch { return 0; }
   for (const e of entries) {
+    touchLock();
     const src = path.join(from, e.name);
     const dst = path.join(to, e.name);
     if (e.isDirectory()) { left += mergeTree(src, dst, merge, failed); continue; }
@@ -170,8 +171,6 @@ function migrateLocked() {
     let left = 0;
     const failed = [];
     for (const sub of MOVED) left += mergeTree(path.join(dir, sub), path.join(home(), sub), MERGERS[sub], failed);
-    // A file that could not be moved (not one already there): the store is tried again on the next run.
-    if (failed.length) { logError(`merging profile store "${name}" left ${failed.length} file(s) to retry: ${failed.slice(0, 3).join('; ')}`); continue; }
     const old = path.join(dir, 'config.json');
     // The config as it was merged: a 0.2 process recreating this store must not merge the same config again.
     const stamp = path.join(dir, 'config.merged.json');
@@ -189,6 +188,8 @@ function migrateLocked() {
       } catch (err) { config = `; its config.json could not be merged (${err.message}), see ${dir}`; }
     }
     try { if (fs.existsSync(old)) fs.copyFileSync(old, stamp); } catch { /* merged again next time: harmless once */ }
+    // A file that could not be moved (not one already there): the store is tried again on the next run.
+    if (failed.length) { logError(`merging profile store "${name}" left ${failed.length} file(s) to retry: ${failed.slice(0, 3).join('; ')}`); continue; }
     try { fs.renameSync(path.join(dir, 'profile.json'), path.join(dir, 'profile.migrated.json')); } catch { continue; }
     logError(`merged profile store "${name}" into ${home()}${config}${left ? `; ${left} file(s) already present (logs or discoveries with the same ID) were left in ${dir}` : ''}`);
   }
@@ -248,11 +249,10 @@ function deepMerge(base, over) {
 /** Load config, creating the default file on first use. */
 function loadConfig() {
   // A merge that fails is logged, never in the way of the command.
-  let failed = false;
-  try { migrateProfiles(); } catch (err) { failed = true; logError('merging old profile stores failed', err); }
+  try { migrateProfiles(); } catch (err) { logError('merging old profile stores failed', err); }
   const file = paths.config();
   // Not merged yet: use the config the merge would move here, and write no default that would take its place.
-  const pending = failed && !fs.existsSync(file) && oldStores().map((n) => path.join(home(), n, 'config.json')).find((f) => fs.existsSync(f));
+  const pending = !fs.existsSync(file) && oldStores().map((n) => path.join(home(), n, 'config.json')).find((f) => fs.existsSync(f));
   if (!pending && !fs.existsSync(file)) writeJsonAtomic(file, DEFAULT_CONFIG);
   const raw = readJson(pending || file, {});
   // Before 0.3 the model settings were under "scout".
@@ -264,6 +264,11 @@ function loadConfig() {
  * Run fn while holding the store's write lock. Logs are shared between sessions, so two writers (a pick, a mark,
  * a delete) must not update or create logs at the same moment. Held only for the writes, never during a model call.
  */
+/** Keep the write lock fresh during a long job (a merge of old stores), so no waiter reclaims it as stale. */
+function touchLock() {
+  try { const now = new Date(); fs.utimesSync(path.join(paths.home(), 'state', 'write.lock'), now, now); } catch { /* not held */ }
+}
+
 function withWriteLock(fn, { waitMs = 60000 } = {}) {
   const file = path.join(paths.home(), 'state', 'write.lock');
   mkdirp(path.dirname(file));

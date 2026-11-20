@@ -116,7 +116,7 @@ function seedLog(s, o = {}) {
     policy: 'public', profile: 'default', score: 4, marked: false, marks: [], tags: ['redis'],
     session_id: sessions[0], sessions, session_turns: Object.fromEntries(sessions.map((x) => [x, 3])), branch: 'main',
     started_at: new Date(Date.now() - 90 * 60000).toISOString(), ended_at: now, user_turns: 3 * sessions.length,
-    created_at: now, updated_at: now, ...rest,
+    created_at: now, updated_at: now, scanned_at: now, ...rest,
   };
   const dir = path.join(s.env.CASEBOOK_HOME, 'logs', meta.project);
   fs.mkdirSync(dir, { recursive: true });
@@ -499,7 +499,7 @@ test('older logs and marks a scan already saw are not news', () => {
   const s = sandbox();
   s.transcript('v1', 3);
   // A 0.1 log: no session_turns, no scanned_at.
-  const old = seedLog(s, { sessions: undefined, session_id: 'v1', user_turns: 3, session_turns: undefined });
+  const old = seedLog(s, { sessions: undefined, session_id: 'v1', user_turns: 3, session_turns: undefined, scanned_at: undefined });
   const same = reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [old], belongs: [1] }));
   assert.match(s.run(['discover'], { env: same }).out, /No topic matched/);
   // A pending mark left unplaced by the last scan stays pending, but is no longer news.
@@ -507,8 +507,9 @@ test('older logs and marks a scan already saw are not news', () => {
   fs.mkdirSync(path.dirname(marks), { recursive: true });
   fs.writeFileSync(marks, JSON.stringify([{ at: new Date(Date.now() - 86400000).toISOString(), note: 'seen', session: 'v1' }]));
   assert.match(s.run(['discover'], { env: same }).out, /No topic matched/);
-  s.transcript('v1', 4);
-  assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${old}`), 'a turn more than it recorded is news');
+  // Its turn count may include casebook's own commands: a session that changed since the log is news.
+  s.transcript('v1', 3, [{ type: 'system', sessionId: 'v1', timestamp: new Date(Date.now() + 1000).toISOString() }]);
+  assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${old}`), 'changed since the log: news');
 });
 
 test('a --force pick reopens a session closed by an older casebook', () => {
@@ -1205,6 +1206,13 @@ test('casebook\'s own commands are not turns of the session', () => {
     line('<command-name>/casebook:mark</command-name>'), said('marked, carrying on with the fix')].join('\n'));
   assert.strictEqual(condense(f).userTurns, 0);
   assert.deepStrictEqual(condense(f).text.split('\n'), ['CLAUDE: marked, carrying on with the fix']);
+  // Answers typed into a handoff are casebook's; the next request that leads to work is the session's again.
+  fs.writeFileSync(f, [line('<command-name>/casebook:handoff</command-name><command-args>cb-x</command-args>'), said('What were the numbers?'),
+    line('retries dropped from 40/min to 2/min'), tools(use('Bash', { command: 'casebook out-path --project p' })), said('Handoff written'),
+    line('now fix the lint errors'), tools(use('Edit', { file_path: '/repo/a.js' }), { type: 'text', text: 'lint fixed' })].join('\n'));
+  const h = condense(f);
+  assert.strictEqual(h.userTurns, 1);
+  assert.deepStrictEqual(h.text.split('\n'), ['USER: now fix the lint errors', '  [Edit] /repo/a.js', 'CLAUDE: lint fixed']);
   assert.match(c2.text, /fixing retries/);
   assert.deepStrictEqual(c2.files, ['/repo/retry.js']);
 });

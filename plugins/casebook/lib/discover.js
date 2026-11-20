@@ -283,8 +283,8 @@ function memberRecord(m) {
   };
 }
 
-/** Turns or marks a log has not been scanned with yet: a pending mark of its sessions, a mark of the log made since
- *  its last scan, or a session that grew since. */
+/** What a log has not been scanned with yet: pending marks of its sessions (placed on this topic, or not seen by
+ *  any scan yet), or turns its sessions gained since. A mark of the log by ID is in the log already: not news. */
 function hasNews(log, members, topic) {
   const m = log.meta;
   const turns = m.session_turns || (m.session_id ? { [m.session_id]: m.user_turns || 0 } : {});
@@ -293,7 +293,9 @@ function hasNews(log, members, topic) {
   if (topic && topic.marks && pending.some((p) => p.length)) return true;
   // Older logs: 0.2 has scouted_at, 0.1 only created_at. A pending mark a scan saw and left unplaced is news once.
   const since = m.scanned_at || m.scouted_at || m.created_at || '';
-  return members.some((x, i) => pending[i].some((k) => !k.seen && String(k.at || '') > since) || (x.userTurns || 0) > (turns[x.sessionId] || 0));
+  // A log from before 0.3 counted casebook's own commands as turns: compare when its sessions last changed instead.
+  const grew = (x) => (m.scanned_at ? (x.userTurns || 0) > (turns[x.sessionId] || 0) : String(x.endedAt || '') > (m.scouted_at || m.updated_at || since));
+  return members.some((x, i) => pending[i].some((k) => !k.seen && String(k.at || '') > since) || grew(x));
 }
 
 /** One model call over a chain. Returns its topics, each cut down to the sessions it belongs to. */

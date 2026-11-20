@@ -70,10 +70,13 @@ function condense(file, maxChars = 60000) {
   const opening = [];
   let aiTitle = null;
   let userTurns = 0;
-  // The reply to a casebook slash command, up to the next turn of the user: its output (topic listings, other
-  // logs shown) is about other work, so it is never read as part of this session.
+  // Casebook's own flow: from a casebook slash command, or a casebook skill the model ran, up to the next call
+  // that is work again. Its output (topic listings, other logs, a handoff) is about other work, and what the user
+  // types in it answers casebook: never read as this session's. A typed turn is held until the next entry shows
+  // whether it was an answer (casebook carries on) or work (a call that is not casebook's).
   let inCasebook = false;
-  let relaying = false;
+  let held = null;
+  const turn = (t) => { out.push(`USER: ${clip(t)}`); if (opening.length < 2) opening.push(clip(t, 1000)); userTurns++; };
   let startedAt = null;
   let endedAt = null;
   let cwd = null;
@@ -100,8 +103,9 @@ function condense(file, maxChars = 60000) {
         if (b.type !== 'text' || !b.text) continue;
         const cmd = parseCommand(b.text);
         if (cmd) {
+          held = null;
           // Casebook's own commands are not work: a discovery must not count itself as news for the session.
-          // Those that print other work (listings, logs, a handoff) keep their reply out too; a mark prints none.
+          // A mark prints no other work, so what follows it is the session's again.
           const ours = /^\/?casebook:/.test(cmd.name);
           inCasebook = ours && !/^\/?casebook:mark$/.test(cmd.name);
           if (ours) continue;
@@ -111,27 +115,30 @@ function condense(file, maxChars = 60000) {
         }
         const t = stripNoise(b.text);
         if (!t || t.startsWith('Caveat:')) continue;
-        // A reply inside a casebook command that only answers it (a topic number, a yes): not work, still casebook's.
-        relaying = false;
-        if (inCasebook && /^\s*(\d{1,2}|y|yes|n|no|ok|none)\s*[.!]?\s*$/i.test(t)) continue;
-        inCasebook = false;
-        out.push(`USER: ${clip(t)}`);
-        if (opening.length < 2) opening.push(clip(t, 1000));
-        userTurns++;
+        // Only the last one can be the user's next request: the ones before it were answered inside casebook's flow.
+        if (inCasebook) { held = t; continue; }
+        turn(t);
       }
     } else if (e.type === 'assistant') {
-      if (inCasebook) continue;
-      for (const b of blocksOf(e.message.content)) {
+      const blocks = blocksOf(e.message.content);
+      if (inCasebook) {
+        // Work again: the held turn was the user's next request, not an answer.
+        if (!blocks.some((b) => b.type === 'tool_use' && !isCasebookTool(b))) continue;
+        inCasebook = false;
+        if (held) turn(held);
+        held = null;
+      }
+      for (const b of blocks) {
         // A casebook skill the model invoked, a casebook CLI call, a file in the store: casebook's own calls are
-        // not work, though the work around them is.
+        // not work, though the work around them is. A skill that prints other work starts casebook's flow.
         if (isCasebookTool(b)) {
-          // A casebook skill that prints other work (a listing, a log): the text that relays it is not this
-          // session's, up to the next call that is work again, or the next turn of the user.
-          if (b.name === 'Skill' && !/^casebook:mark$/.test(String((b.input || {}).skill || (b.input || {}).name || ''))) relaying = true;
+          if (b.name === 'Skill' && !/^casebook:mark$/.test(String((b.input || {}).skill || (b.input || {}).name || ''))) inCasebook = true;
           continue;
         }
-        if (b.type === 'tool_use') relaying = false;
-        if (relaying) continue;
+        if (inCasebook) {
+          if (b.type !== 'tool_use') continue;
+          inCasebook = false;
+        }
         if (b.type === 'text' && b.text && b.text.trim()) out.push(`CLAUDE: ${clip(stripNoise(b.text))}`);
         else if (b.type === 'tool_use') {
           out.push(`  ${describeTool(b)}`);
