@@ -157,12 +157,15 @@ const versionsOf = (logs) => new Map(logs.map((l) => [l.meta.id, l.meta.updated_
  * was not shown. Its notes would then overwrite what another scan just wrote. Nearby logs it only read may
  * change freely. Call under the lock.
  */
-function changedSince(versions, sids, watch) {
+function changedSince(versions, sids, watch, fresh) {
   for (const id of watch) {
     const l = store.findLog(id);
     if (!l || (l.meta.updated_at || l.meta.created_at || '') !== versions.get(id)) return true;
   }
-  return logsForSessions(sids).some((l) => !versions.has(l.meta.id));
+  const all = store.allLogs();
+  if (logsForSessions(sids, all).some((l) => !versions.has(l.meta.id))) return true;
+  // With `fresh` ({ project, takenAt }): a log of the project created after the scan looked.
+  return Boolean(fresh) && all.some((l) => l.meta.project === fresh.project && !versions.has(l.meta.id) && (l.meta.created_at || '') > fresh.takenAt);
 }
 
 /** A ledger from before topics: the session's one log was deleted, and no topic was remembered. */

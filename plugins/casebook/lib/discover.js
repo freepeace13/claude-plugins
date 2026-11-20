@@ -19,7 +19,8 @@ const TRUNKS = new Set(['main', 'master', 'develop', 'dev', 'trunk', 'head', 'st
 // Phrases, not word stems: "continuous integration" or "resume.pdf" is not a continued session.
 const CONTINUE_RE = /\b(continue (?:where|from|with (?:the|our|my)|on (?:the|our|my)|working)|let'?s continue|pick(?:ing)? up (?:where|from)|resume (?:where|from|the|our|my|work)|left off|previous session|last session|earlier session|other session|hand-?off|carry on|where we were)\b/i;
 const DOC_RE = /\.(md|mdx|txt|rst)$/i;
-const COMMON_DOCS = /^(readme|changelog|claude|agents|license|contributing)\.md$/i;
+// Documents every project has, and manifests that happen to be text: editing one is not a handoff.
+const COMMON_DOCS = /^((readme|changelog|changes|history|claude|agents|license|licence|copying|contributing|authors|notice|security|code_of_conduct|skill)(\.[a-z]+)?|requirements[\w.-]*\.txt|constraints[\w.-]*\.txt|cmakelists\.txt|robots\.txt|llms\.txt|humans\.txt)$/i;
 const STOP = new Set(('a an and any are as at be by can could find for from get has have how i in into is it its look looking me my '
   + 'need of on one or out over scores score some that the their them then there these this to topic topics was were what when '
   + 'where which with worked work works together about across between show give only just like want than more less above below '
@@ -110,7 +111,7 @@ function linkReason(a, b, latestBefore) {
   if (gap > LINK_DAYS * DAY || gap < -DAY) return null;
   const pr = a.prUrls.find((u) => b.prUrls.includes(u));
   // Only a public project's reasons name the repository and branch: they go into the prompt.
-  const pub = a.policy === 'public';
+  const pub = a.policy === 'public' && b.policy === 'public';
   if (pr) return { strength: 3, why: pub ? `same pull request ${pr.replace(/^https?:\/\/(www\.)?github\.com\//, '')}` : 'same pull request' };
   if (a.branch && a.branch === b.branch && !TRUNKS.has(a.branch.toLowerCase())) return { strength: 3, why: pub ? `same branch ${a.branch}` : 'same feature branch' };
   const opening = b.opening.toLowerCase();
@@ -119,7 +120,7 @@ function linkReason(a, b, latestBefore) {
     if (COMMON_DOCS.test(name)) return false;
     // Only a document someone wrote to hand over counts (handoff.md, notes.txt), never code or a manifest:
     // a later session naming package.json is not continuing the work.
-    if (!DOC_RE.test(name) || /^skill\.md$/i.test(name)) return false;
+    if (!DOC_RE.test(name)) return false;
     const mentioned = name.length >= 6 && hasWord(opening, name.toLowerCase());
     return mentioned || b.readFiles.includes(f);
   });
@@ -220,11 +221,15 @@ function shortlist(groups, config, { note, tags }) {
 
 // ---------- score ----------
 
+/** A chain is as private as its most private session: one anonymized session anonymizes the whole prompt. */
+const chainPolicy = (members) => (members.every((m) => m.policy === 'public') ? 'public' : 'anonymize');
+
 function sessionsBlock(members, maxChars) {
   const each = Math.max(4000, Math.floor(maxChars / members.length));
+  const policy = chainPolicy(members);
   return members.map((m, i) => {
     const t = condense(m.transcriptPath, each);
-    const branch = m.policy === 'public' ? ` · branch ${t.branch || 'unknown'}` : '';
+    const branch = policy === 'public' ? ` · branch ${t.branch || 'unknown'}` : '';
     return `### Session ${i + 1} of ${members.length} · ${String(m.startedAt || '').slice(0, 16).replace('T', ' ')}${branch} · ${t.userTurns} turns\n${t.text}`;
   }).join('\n\n');
 }
@@ -237,6 +242,7 @@ function chainCommits(members, root) {
 
 function renderPrompt(members, { note, tags, reasons, marks, existing, maxTopics, commits }, maxChars) {
   const first = members[0];
+  const policy = chainPolicy(members);
   const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'prompts', 'discovery.md'), 'utf8');
   const notes = marks.map((m) => m.note).filter(Boolean);
   const files = [...new Set(members.flatMap((m) => m.files))].map((f) => (first.root ? path.relative(first.root, f) || f : f)).slice(0, 60);
@@ -246,9 +252,9 @@ function renderPrompt(members, { note, tags, reasons, marks, existing, maxTopics
     TAGS: tags.length ? tags.join(', ') : 'none',
     MAX_TOPICS: String(maxTopics),
     MARKED_HINT: marks.length ? `(${marks.length} mark${marks.length > 1 ? 's' : ''})` : 'NOT (no marks)',
-    POLICY: first.policy,
-    POLICY_RULES: POLICY_RULES[first.policy] || POLICY_RULES.anonymize,
-    PROJECT: first.policy === 'public' ? `${first.project}${first.repo ? ` (${first.repo})` : ''}` : '[anonymized]',
+    POLICY: policy,
+    POLICY_RULES: POLICY_RULES[policy] || POLICY_RULES.anonymize,
+    PROJECT: policy === 'public' ? `${first.project}${first.repo ? ` (${first.repo})` : ''}` : '[anonymized]',
     MARKS: notes.length ? notes.map((n) => `"${n}"`).join('; ') : marks.length ? '(marked, no note)' : 'none',
     LINKS: reasons.length ? list(reasons) : '- a single session',
     COMMITS: list(commits),
@@ -364,7 +370,7 @@ async function discover(config, o) {
         rank: i + 1, score: f.topic.score, fit: f.topic.fit, topic: f.topic, reasons: f.reasons, updates: f.updates, targets: f.targets,
         known: f.known,
         commits: f.commits,
-        info: { project: first.project, repo: first.repo, policy: first.policy, root: first.root },
+        info: { project: first.project, repo: first.repo, policy: chainPolicy(f.members), root: first.root },
         members: f.members.map(memberRecord),
         partial: f.members.some((m) => m.mtimeMs > settled),
       };

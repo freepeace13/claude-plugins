@@ -32,7 +32,17 @@ function normalizeRemote(url) {
 const POLICIES = ['public', 'anonymize', 'skip'];
 
 function resolveProject(cwd, config) {
-  const dir = cwd && fs.existsSync(cwd) ? cwd : process.cwd();
+  // A recorded directory that is gone (a removed worktree) is still that directory: never the caller's,
+  // or an old client session would take on the project and policy of wherever casebook runs.
+  const dir = cwd || process.cwd();
+  if (!fs.existsSync(dir)) {
+    const project = slugify(path.basename(dir), 50);
+    let policy = null;
+    for (const rule of config.projects || []) {
+      if ([dir, project].some((v) => globMatch(rule.match, v)) && POLICIES.includes(rule.policy)) { policy = rule.policy; break; }
+    }
+    return { project, repo: '', root: null, cwd: dir, policy: policy || config.defaultPolicy || 'anonymize' };
+  }
   const root = git(dir, ['rev-parse', '--show-toplevel']) || '';
   const repo = root ? normalizeRemote(git(root, ['remote', 'get-url', 'origin'])) : '';
   const override = root ? readJson(path.join(root, '.casebook.json'), {}) : {};

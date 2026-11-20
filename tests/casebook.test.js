@@ -1512,3 +1512,71 @@ test('a "continue" opening links to the session that ended last, not the one tha
   const ab = groups.find((g) => g.members.some((m) => m.sessionId === 'B'));
   assert.deepStrictEqual(ab.members.map((m) => m.sessionId).sort(), ['A', 'B']);
 });
+
+// ---------------------------------------------------------------- topics review, round 10
+
+test('a session whose folder is gone keeps its own project; a chain with one anonymized session is anonymized', () => {
+  const s = sandbox();
+  const gone = path.join(s.root, 'acme-wt-removed');
+  const tp = s.transcript('gw', 3);
+  fs.writeFileSync(tp, fs.readFileSync(tp, 'utf8').split(s.repo).join(gone));
+  const dry = JSON.parse(s.run(['discover', '--dry-run', '--json', '--project', 'acme-api']).out);
+  assert.ok(!dry.some((g) => g.sessions.includes('gw')), 'not counted as acme-api');
+
+  // Same slug, different place: the copy is not a git repo with the public remote, so it is anonymized.
+  const twin = path.join(s.root, 'elsewhere', 'acme-api');
+  fs.mkdirSync(twin, { recursive: true });
+  s.transcript('pub', 3, onBranch('pub', 'feat/z'));
+  const tp2 = s.transcript('priv', 3, onBranch('priv', 'feat/z'));
+  const moved = fs.readFileSync(tp2, 'utf8').split(s.repo).join(twin);
+  fs.rmSync(tp2);
+  const dir = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', twin.replace(/[^\w]/g, '-'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'priv.jsonl'), moved);
+  s.run(['discover', '--project', 'acme-api'], { env: reply(topic({ title: 'Login flow', belongs: [1, 2] })) });
+  const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
+  assert.match(prompt, /2 sessions|Session 2 of 2/);
+  assert.match(prompt, /Privacy policy for this project: anonymize/);
+  assert.match(prompt, /Project: \[anonymized\]/);
+});
+
+test('a bare mark the skill wrote a note for does not come back after unmark', () => {
+  const s = sandbox();
+  const bare = { type: 'user', sessionId: 'bk', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args></command-args>' } };
+  const id = JSON.parse(s.run(['scout', '--session', 'bk', '--transcript', s.transcript('bk', 3), '--auto', '--json']).out).logId;
+  s.run(['mark', '--session', 'bk', '--', 'Fixed redis retry storm']);
+  assert.match(s.run(['show', id]).out, /"note":"Fixed redis retry storm"/);
+  s.run(['unmark', id]);
+  const calls = s.calls().length;
+  assert.match(s.run(['scout', '--session', 'bk', '--transcript', s.transcript('bk', 4, [bare]), '--auto']).out, /not enough new activity/);
+  assert.strictEqual(s.calls().length, calls);
+  assert.match(s.run(['show', id]).out, /marked: false/);
+});
+
+test('a scan runs again when another scan of the project created a log meanwhile', async () => {
+  const s = sandbox();
+  const t1 = s.transcript('cc1', 3);
+  const t2 = s.transcript('cc2', 3);
+  const env = { ...reply(topic({ title: 'Fix Redis retry storm' })) };
+  const [a, b] = await Promise.all([
+    slow(s, ['scout', '--session', 'cc1', '--transcript', t1, '--json'], { ...env, STUB_DELAY: '400' }),
+    slow(s, ['scout', '--session', 'cc2', '--transcript', t2, '--json'], { ...env, STUB_DELAY: '1400' }),
+  ]);
+  assert.strictEqual(a.code, 0, a.stderr);
+  assert.strictEqual(b.code, 0, b.stderr);
+  assert.strictEqual(s.calls().length, 3, 'the slower scan looked again with the new log shown');
+});
+
+test('editing requirements.txt or a README in any format is not a handoff', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const now = Date.now();
+  const sess = (id, o) => ({
+    sessionId: id, project: 'p', policy: 'public', branch: 'main', prUrls: [], files: [], readFiles: [], opening: '',
+    startedAt: new Date(now - (id === 'a' ? 240 : 1) * 3600000).toISOString(),
+    endedAt: new Date(now - (id === 'a' ? 239 : 0) * 3600000).toISOString(), ...o,
+  });
+  for (const f of ['/r/requirements.txt', '/r/README.rst', '/r/LICENSE.txt', '/r/CMakeLists.txt']) {
+    assert.strictEqual(linkSessions([sess('a', { files: [f] }), sess('b', { readFiles: [f] })]).length, 2, f);
+  }
+  assert.strictEqual(linkSessions([sess('a', { files: ['/r/notes/handoff.txt'] }), sess('b', { readFiles: ['/r/notes/handoff.txt'] })]).length, 1);
+});

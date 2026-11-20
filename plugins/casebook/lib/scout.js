@@ -210,6 +210,9 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   let mine = T.logsForSessions([sessionId]);
   // Notes the developer unmarked: a /casebook:mark for them in the transcript is not a mark any more.
   const unmarked = new Set(ledger.unmarked || []);
+  // A bare /casebook:mark shows in the transcript with no note: the skill wrote one, so once `casebook mark`
+  // recorded it, the transcript copy is not a separate mark. It is only a fallback if that command failed.
+  const commandMarks = t.commandMarks.filter((n) => n || !ledger.sessionMarked);
   const scanned = Boolean(ledger.scoutedAt || ledger.logId || mine.length);
   if (!manual && scanned) {
     // An auto scout finishes partial logs if the transcript grew at all; otherwise the regrow threshold applies.
@@ -230,7 +233,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
         logs: mine.map((l) => ({ status: 'updated', logId: l.meta.id, score: l.meta.score, title: l.meta.title, angle: l.meta.angle || '' })) };
     }
     // A pending mark always earns a rescan: with several logs, the mark waits for the scan to place it.
-    const hasPending = store.getMarks(sessionId).length > 0 || t.commandMarks.some((n) => !unmarked.has(n) && !mine.some((l) => (l.meta.marks || []).some((m) => m.note === n)));
+    const hasPending = store.getMarks(sessionId).length > 0 || commandMarks.some((n) => !unmarked.has(n) && !mine.some((l) => (l.meta.marks || []).some((m) => m.note === n)));
     if (!(wasPartial && grew) && !hasPending && t.userTurns - (ledger.userTurns || 0) < (config.sweep.regrowTurns || 8)) {
       store.withWriteLock(() => store.setLedger(sessionId, { size }));
       return { status: 'skipped', reason: 'already scanned, not enough new activity' };
@@ -241,7 +244,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   // (a fallback in case the mark command itself failed) that no log of this session has yet.
   const pending = store.getMarks(sessionId);
   const seen = new Set([...mine.flatMap((l) => l.meta.marks || []), ...pending].map((m) => m.note));
-  for (const note of t.commandMarks) {
+  for (const note of commandMarks) {
     if (!seen.has(note) && !unmarked.has(note)) { pending.push({ at: t.endedAt, note }); seen.add(note); }
   }
   const promptMarks = [...mine.flatMap((l) => l.meta.marks || []), ...pending];
@@ -264,6 +267,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
     if (attempt > 3) throw new Error('the logs of this session kept changing during the scan; try again');
     const context = T.contextLogs(info.project, [sessionId], t.startedAt, t.endedAt);
     const versions = T.versionsOf(context);
+    const takenAt = new Date().toISOString();
     const prompt = buildPrompt(t, info, promptMarks, commits, T.renderExisting(context, [sessionId], deleted), maxTopics);
     const found = T.parseTopics(runClaude(prompt, config), maxTopics);
 
@@ -302,7 +306,9 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
     const reserved = new Set(keep.flatMap((x) => x.same_as.filter((id) => { const l = T.resolveLog(id); return l && T.sameAngle(l.meta.angle, x.angle); })));
     logs = store.withWriteLock(() => {
       const watch = [...new Set([...context.filter((l) => T.sessionsOf(l).includes(sessionId)).map((l) => l.meta.id), ...keep.flatMap((x) => x.same_as)])];
-      if (T.changedSince(versions, [sessionId], watch)) return null;
+      // A log of this project another scan created meanwhile may be this same topic: look again with it
+      // shown. On the last attempt only the logs this scan writes count, so a busy project still gets its log.
+      if (T.changedSince(versions, [sessionId], watch, attempt < 3 ? { project: info.project, takenAt } : null)) return null;
       const written = keep.map((topic) => T.applyTopic(topic, {
         members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits, claimed, reserved,
       }));

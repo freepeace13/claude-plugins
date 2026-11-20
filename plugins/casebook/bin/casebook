@@ -209,7 +209,8 @@ const commands = {
     out(`Discovery ${r.id} · ${r.topics.length} topic(s) from ${r.scored} candidate(s) · ${r.sessions} session(s) in ${scope}`);
     for (const t of r.topics) {
       const ms = t.members;
-      const span = `${String(ms[0].startedAt || '').slice(0, 10)} → ${String(ms[ms.length - 1].endedAt || '').slice(0, 10)}`;
+      const last = ms.map((m) => m.endedAt || '').sort().pop();
+      const span = `${String(ms[0].startedAt || '').slice(0, 10)} → ${String(last || '').slice(0, 10)}`;
       out('');
       out(`${t.rank}. [${t.score}${t.partial ? '…' : ''}] ${t.topic.title}`);
       out(`   ${t.info.project} · ${t.topic.angle || 'general'} · ${ms.length} session${ms.length > 1 ? 's' : ''} · ${span}${t.fit ? ` · fit ${t.fit}/3` : ''}`);
@@ -301,11 +302,13 @@ const commands = {
     const note = pos.join(' ');
     // A session with exactly one log: mark that log. With several, the next scan gives the mark to the topic it points to.
     const one = store.withWriteLock(() => {
+      // Recorded so the scan knows a bare /casebook:mark in the transcript (its note written by the skill) was placed.
+      store.setLedger(opt.session, { sessionMarked: true });
       const logs = T.logsForSessions([opt.session]);
       return logs.length === 1 ? store.applyMark(logs[0], note) : null;
     });
     if (one) return out(`📌 Marked ${one.meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
-    const marks = store.withWriteLock(() => store.addPendingMark(opt.session, note));
+    const marks = store.withWriteLock(() => { store.setLedger(opt.session, { sessionMarked: true }); return store.addPendingMark(opt.session, note); });
     out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). It goes to the topic it points to when the session is scanned.`);
   },
 
