@@ -208,7 +208,9 @@ function shortlist(groups, config, { note, tags }) {
   const words = keywords(note);
   const out = [];
   for (const g of groups) {
-    if (g.members.length === 1 && g.members[0].userTurns < config.scan.minTurns) continue;
+    // A session the user marked is always a candidate, however short: its mark waits for a scan of it.
+    const marked = g.members.some((m) => store.getMarks(m.sessionId).length);
+    if (!marked && g.members.length === 1 && g.members[0].userTurns < config.scan.minTurns) continue;
     const text = groupText(g);
     const tagHits = tags.filter((t) => hasWord(text, norm(t)));
     if (tags.length && !tagHits.length) continue;
@@ -218,7 +220,7 @@ function shortlist(groups, config, { note, tags }) {
     const turns = g.members.reduce((n, m) => n + m.userTurns, 0);
     // Linked chains first: they hold the stories no single session tells; a session already logged on its own matters less.
     const solo = g.members.length === 1 && logs.length ? -1 : 0;
-    const prelim = (logScore || 2) + (g.members.length > 1 ? 1 : 0) + solo + 3 * noteFit + tagHits.length + Math.min(1, turns / 40);
+    const prelim = (logScore || 2) + (g.members.length > 1 ? 1 : 0) + solo + 3 * noteFit + tagHits.length + Math.min(1, turns / 40) + (marked ? 2 : 0);
     out.push({ ...g, noteFit, tagHits, prelim, latest: Math.max(...g.members.map((m) => t0(m.endedAt))) });
   }
   return out.sort((a, b) => b.prelim - a.prelim || b.latest - a.latest);
@@ -338,7 +340,7 @@ async function scanChain(g, config, opts) {
     });
   }
   // Pending marks this scan saw and tied to no topic stay pending, but are no longer news for these sessions' logs.
-  if (!found.some((t) => t.marks)) store.withWriteLock(() => { for (const sid of sids) store.markSeen(sid, startedScan); });
+  if (!out.some((f) => f.topic.marks)) store.withWriteLock(() => { for (const sid of sids) store.markSeen(sid, startedScan); });
   return out;
 }
 
@@ -410,6 +412,8 @@ async function discover(config, o) {
   let since;
   try { since = o.since ? parseAge(o.since) : parseAge('90d'); } catch (err) { throw userError(err.message); }
   const tags = (o.tags || []).map((t) => t.trim().toLowerCase()).filter(Boolean);
+  // Before any transcript or mark is read: what is added after it was never scanned.
+  const scanStarted = new Date().toISOString();
   const sessions = collectSessions(config, { project: o.project, since, exclude: o.exclude, force: o.force });
   const groups = linkSessions(sessions);
   const ranked = shortlist(groups, config, { note: o.note, tags });
@@ -464,7 +468,7 @@ async function discover(config, o) {
     pruneDiscoveries();
     id = newDiscoveryId();
     writeJsonAtomic(path.join(discoveriesDir(), `${id}.json`), {
-      id, created_at: new Date().toISOString(), note: o.note || '', tags, minScore: o.minScore || null, force: Boolean(o.force), topics, picked: {},
+      id, created_at: new Date().toISOString(), scan_started_at: scanStarted, note: o.note || '', tags, minScore: o.minScore || null, force: Boolean(o.force), topics, picked: {},
     });
   }
   return { ...summary, id, scored: scanned.filter((s) => s.ok).length, failed, best, topics };
@@ -522,7 +526,7 @@ function pick(config, id, n) {
     }
     const bySession = topic.marks ? sids.map((sid) => [sid, store.getMarks(sid)]) : [];
     const res = T.applyTopic(topic, {
-      members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), note: d.note, commits: t.commits, scannedAt: d.created_at,
+      members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), note: d.note, commits: t.commits, scannedAt: d.scan_started_at || d.created_at,
     });
     for (const [sid, m] of bySession) store.consumeMarks(sid, m);
     return res;

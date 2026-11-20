@@ -69,8 +69,8 @@ function condense(file, maxChars = 60000) {
   const opening = [];
   let aiTitle = null;
   let userTurns = 0;
-  // Inside a casebook command, up to the next turn of the user: its output (topic listings, other logs shown)
-  // is about other work, so it is never read as part of this session.
+  // The reply to a casebook slash command, up to the next turn of the user: its output (topic listings, other
+  // logs shown) is about other work, so it is never read as part of this session.
   let inCasebook = false;
   let startedAt = null;
   let endedAt = null;
@@ -113,10 +113,11 @@ function condense(file, maxChars = 60000) {
         userTurns++;
       }
     } else if (e.type === 'assistant') {
-      // A casebook skill the model invoked, a casebook CLI call or a write into the store: casebook's own flow.
-      if (blocksOf(e.message.content).some(isCasebookTool)) inCasebook = true;
       if (inCasebook) continue;
       for (const b of blocksOf(e.message.content)) {
+        // A casebook skill the model invoked, a casebook CLI call, a file in the store: casebook's own calls are
+        // not work, though the work around them is.
+        if (isCasebookTool(b)) continue;
         if (b.type === 'text' && b.text && b.text.trim()) out.push(`CLAUDE: ${clip(stripNoise(b.text))}`);
         else if (b.type === 'tool_use') {
           out.push(`  ${describeTool(b)}`);

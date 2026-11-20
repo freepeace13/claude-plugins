@@ -470,8 +470,17 @@ test('a mark made between a discovery and its pick stays news', () => {
   const again = s.run(['discover'], { env: same });
   assert.match(again.out, new RegExp(`updates: ${la}`));
   assert.strictEqual(s.run(['discover', 'pick', didOf(again.out), '1']).status, 0);
-  const created = JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'state', 'discoveries', `${didOf(again.out)}.json`), 'utf8')).created_at;
-  assert.strictEqual(logsJson(s).find((l) => l.id === la).scanned_at, created, 'scanned as of the discovery, not the pick');
+  const created = JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'state', 'discoveries', `${didOf(again.out)}.json`), 'utf8')).scan_started_at;
+  assert.strictEqual(logsJson(s).find((l) => l.id === la).scanned_at, created, 'scanned as of the start of the discovery, not the pick');
+});
+
+test('a marked session is a candidate however short', () => {
+  const s = sandbox();
+  s.transcript('tiny', 1);
+  const sids = () => JSON.parse(s.run(['discover', '--dry-run', '--json']).out).flatMap((g) => g.sessions);
+  assert.deepStrictEqual(sids(), []);
+  s.run(['mark', '--session', 'tiny', 'the deadlock fix']);
+  assert.deepStrictEqual(sids(), ['tiny']);
 });
 
 test('a pending mark a scan saw and placed nowhere is no longer news', () => {
@@ -1162,13 +1171,16 @@ test('casebook\'s own commands are not turns of the session', () => {
   assert.doesNotMatch(c.text, /Other session story|casebook:show/, 'what a casebook command printed is not this session\'s work');
   assert.match(c.text, /fixed it[\s\S]*reviewed[\s\S]*tests added/);
 
-  // A casebook skill the model ran, answered in plain text: its CLI calls keep it out too.
-  const tool = (name, input, text) => JSON.stringify({ type: 'assistant', sessionId: 'c', timestamp: '2026-11-01T00:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text }, { type: 'tool_use', name, input }] } });
-  const raw2 = [line('ship it'), tool('Skill', { skill: 'casebook:handoff' }, 'Handoff of another story'), line('yes, the numbers are 40%'),
-    tool('Bash', { command: 'casebook show cb-aaaaaa' }, 'Facts from that log'), line('back to work'), said('working')].join('\n');
+  // Casebook calls the model makes are not work, nor files in the store; the work around them is.
+  const tools = (...content) => JSON.stringify({ type: 'assistant', sessionId: 'c', timestamp: '2026-11-01T00:00:00Z', message: { role: 'assistant', content } });
+  const use = (name, input) => ({ type: 'tool_use', name, input });
+  const raw2 = [line('check the list, then fix the retry bug'), tools(use('Bash', { command: 'casebook list' }), use('Skill', { skill: 'casebook:show' }),
+    use('Write', { file_path: path.join(os.homedir(), '.casebook', 'handoffs', 'x.md') })), tools({ type: 'text', text: 'fixing retries' }, use('Edit', { file_path: '/repo/retry.js' }))].join('\n');
   fs.writeFileSync(f, raw2);
-  assert.doesNotMatch(condense(f).text, /another story|Facts from that log/);
-  assert.match(condense(f).text, /working/);
+  const c2 = condense(f);
+  assert.doesNotMatch(c2.text, /casebook list|casebook:show|handoffs/);
+  assert.match(c2.text, /fixing retries/);
+  assert.deepStrictEqual(c2.files, ['/repo/retry.js']);
 });
 
 test('marketplace is named kinbasco-plugins', () => {

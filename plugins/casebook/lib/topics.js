@@ -60,8 +60,8 @@ function renderExisting(logs, sids, deleted) {
     const others = sessionsOf(l).length - mine;
     const where = mine ? `draws on ${mine === sids.length && sids.length === 1 ? 'this session' : `${mine} of these sessions`}${others ? ` and ${others} other(s)` : ''}` : `from other sessions of this project`;
     // In full: a topic that matches this log rewrites all of its notes, so the model must see all of them.
-    const about = describe(l);
-    parts.push(`### ${m.id} · ${m.angle || 'general'} · score ${m.score ?? '-'} · ${where}\n${about ? `Description: ${about}\n\n` : ''}${l.body.trim()}`);
+    // An older log has no description: its summary, in the body below, stands in for it.
+    parts.push(`### ${m.id} · ${m.angle || 'general'} · score ${m.score ?? '-'} · ${where}\n${m.description ? `Description: ${m.description}\n\n` : ''}${l.body.trim()}`);
   }
   if (deleted.length) {
     parts.push('### Deleted by the developer (never return these topics, however they are titled)');
