@@ -1606,6 +1606,12 @@ test('a note with only a score threshold does not filter by fit; a pick counts i
   const r = s.run(['discover', '--note', 'find anything that scores > 3', '--min-score', '4'], { env: { STUB_FIT: '0' } });
   assert.match(r.out, /^Discovery d-/, r.out);
   const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  // Settled by now, so the pick finishes it and records its size.
+  const old = new Date(Date.now() - 3600000);
+  for (const d of fs.readdirSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects'))) {
+    const f = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', d, 'th1.jsonl');
+    if (fs.existsSync(f)) fs.utimesSync(f, old, old);
+  }
   s.run(['discover', 'pick', did, '1']);
   const dir = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions');
   const ledger = fs.readdirSync(dir).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))).find((l) => l.sessionId === 'th1');
@@ -1754,4 +1760,30 @@ test('a rescan from a folder that is gone keeps the log\'s project; a bad --sinc
   assert.strictEqual(bad.status, 1);
   const log = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
   assert.ok(!fs.existsSync(log) || !/command discover failed/.test(fs.readFileSync(log, 'utf8')));
+});
+
+// ---------------------------------------------------------------- topics review, round 16
+
+test('a pick settles only the logs it writes, and checks the project policy again', () => {
+  const s = sandbox();
+  const tp = s.transcript('pk16', 3, onBranch('pk16', 'feat/k'));
+  s.transcript('pk16b', 3, onBranch('pk16b', 'feat/k'));
+  const r = JSON.parse(s.run(['scout', '--session', 'pk16', '--transcript', tp, '--live', '--json'], {
+    env: reply(topic({ title: 'Halved p99 latency', angle: 'performance' }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })),
+  }).out);
+  const [l1, l2] = r.logs.map((l) => l.logId);
+  const old = new Date(Date.now() - 3600000);
+  for (const d of fs.readdirSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects'))) {
+    for (const n of ['pk16.jsonl', 'pk16b.jsonl']) { const f = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', d, n); if (fs.existsSync(f)) fs.utimesSync(f, old, old); }
+  }
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Halved p99 latency across both', angle: 'performance', same_as: [l1], belongs: [1, 2] })) }).out)[1];
+  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`^Updated ${l1}`));
+  assert.match(s.run(['show', l1]).out, /partial: false/);
+  assert.match(s.run(['show', l2]).out, /partial: true/, 'not touched by the pick: its own final scan settles it');
+
+  const did2 = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Schema change', angle: 'data', belongs: [1, 2] })) }).out)[1];
+  fs.writeFileSync(path.join(s.repo, '.casebook.json'), JSON.stringify({ policy: 'anonymize' }));
+  const p = s.run(['discover', 'pick', did2, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, /no longer public/);
 });

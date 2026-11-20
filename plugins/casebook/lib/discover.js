@@ -451,9 +451,13 @@ function pick(config, id, n) {
       const deleted = d.force ? [] : T.tombstones(sids);
       const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
       if (!topic) throw userError('this topic was deleted since the discovery ran; run discovery again, or with --force');
+      // The project's policy as it is now: it may have changed since the discovery ran.
+      const now = resolveProject(t.info.root || t.info.cwd || null, config);
+      if (t.info.root && now.policy === 'skip') throw userError(`${t.info.project} is now set to skip; nothing was logged`);
+      if (t.info.root && t.info.policy === 'public' && now.policy !== 'public') {
+        throw userError(`${t.info.project} is no longer public; run discovery again so the notes follow its policy`);
+      }
       const bySession = topic.marks ? sids.map((sid) => [sid, store.getMarks(sid)]) : [];
-      // Sessions that have ended are settled in every log they fed.
-      for (const sid of sids) if (!partialSessions.includes(sid)) T.finishSession(sid);
       // Exactly the logs the discovery listed: a title match it did not show is never overwritten.
       const res = T.applyTopic(topic, {
         members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), partial, partialSessions, mode: 'discovery', note: d.note, commits: t.commits, noTwins: true,
@@ -462,10 +466,13 @@ function pick(config, id, n) {
       // The sessions are scanned now: the catch-up and the regrow gate count from here.
       // As of the discovery, so whatever was added since still counts as new.
       // A session scanned again after the discovery keeps that newer record.
+      // A pick settles only the logs it writes (applyTopic): a session with another partial log keeps no size,
+      // so its own final scan still comes.
       for (const m of t.members) {
         const prev = store.getLedger(m.sessionId) || {};
         if (prev.scoutedAt && prev.scoutedAt > d.created_at) continue;
-        store.setLedger(m.sessionId, { project: t.info.project, userTurns: m.userTurns, size: m.size, scoutedAt: new Date().toISOString() });
+        const waiting = T.logsForSessions([m.sessionId]).some((l) => T.partialSessionsOf(l).includes(m.sessionId));
+        store.setLedger(m.sessionId, { project: t.info.project, userTurns: m.userTurns, ...(waiting ? {} : { size: m.size }), scoutedAt: new Date().toISOString() });
       }
       return res;
     });

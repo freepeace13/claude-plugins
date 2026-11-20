@@ -306,12 +306,12 @@ function slugify(s, max = 60) {
     .replace(/-$/, '') || 'untitled';
 }
 
-/** "30d", "12w", "6m", "1y" or an ISO date → Date threshold. */
 /** A mark note as it is compared and stored: outer quotes dropped, whitespace collapsed. */
 function normNote(s) {
   return String(s || '').trim().replace(/^(["'])([\s\S]*)\1$/, '$2').replace(/\s+/g, ' ').trim();
 }
 
+/** "30d", "12w", "6m", "1y" or an ISO date → Date threshold. */
 function parseAge(spec) {
   if (!spec) return null;
   const m = /^(\d+)\s*([dwmy])$/i.exec(String(spec).trim());

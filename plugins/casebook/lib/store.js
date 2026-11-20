@@ -55,7 +55,9 @@ function saveLog(log, { touch = true } = {}) {
 }
 
 function createLogFile(project, meta, body) {
-  const id = newId((candidate) => Boolean(findLog(candidate)));
+  // Never an ID a merged log once had: old references to it resolve through merged_from.
+  const merged = new Set(allLogs().flatMap((l) => l.meta.merged_from || []));
+  const id = newId((candidate) => merged.has(candidate) || Boolean(findLog(candidate)));
   const file = path.join(mkdirp(path.join(paths.logs(), project)), `${id}.md`);
   const now = new Date().toISOString();
   return saveLog({ file, meta: { id, ...meta, created_at: now }, body });
@@ -147,8 +149,6 @@ function consumeMarks(sid, used) {
   if (left.length) writeJsonAtomic(marksFile(sid), left); else clearMarks(sid);
 }
 
-/** Remove a log's marks, and remember their notes so a /casebook:mark found in a transcript is not re-added. */
-// Empty notes count too: a bare /casebook:mark is found in the transcript as ''.
 /**
  * The ledger patch that forgets these marks: their notes join `unmarked`, so a /casebook:mark for them found in
  * the transcript is not re-added. A bare mark has no note to remember: it is counted in `bareMarks` instead,
@@ -164,6 +164,7 @@ function forgetMarks(ledger, marks, sid) {
   };
 }
 
+/** Remove a log's marks, and remember them so a /casebook:mark found in a transcript is not re-added. */
 function clearLogMarks(log) {
   const sessions = Array.isArray(log.meta.sessions) && log.meta.sessions.length ? log.meta.sessions : [log.meta.session_id].filter(Boolean);
   for (const sid of sessions) setLedger(sid, forgetMarks(getLedger(sid) || {}, log.meta.marks || [], sid));

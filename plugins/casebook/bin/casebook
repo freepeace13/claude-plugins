@@ -307,11 +307,12 @@ const commands = {
     };
     // A session with exactly one log: mark that log. With several, the next scan gives the mark to the topic it points to.
     // One lock, so the bare mark is counted exactly once whichever way it goes.
+    // Counted only once the mark is written: if writing it fails, the transcript copy stays the fallback.
     const { one, marks } = store.withWriteLock(() => {
-      recordBare();
       const logs = T.logsForSessions([opt.session]);
-      if (logs.length === 1) return { one: store.applyMark(logs[0], note, opt.session) };
-      return { marks: store.addPendingMark(opt.session, note) };
+      const r = logs.length === 1 ? { one: store.applyMark(logs[0], note, opt.session) } : { marks: store.addPendingMark(opt.session, note) };
+      recordBare();
+      return r;
     });
     if (one) return out(`📌 Marked ${one.meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
     // A session closed since 0.1 (its log deleted before topics) is never scanned again on its own.
