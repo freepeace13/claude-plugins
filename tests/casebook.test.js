@@ -474,6 +474,18 @@ test('a mark made between a discovery and its pick stays news', () => {
   assert.strictEqual(logsJson(s).find((l) => l.id === la).scanned_at, created, 'scanned as of the discovery, not the pick');
 });
 
+test('a pending mark a scan saw and placed nowhere is no longer news', () => {
+  const s = sandbox();
+  s.transcript('pm', 3);
+  const a = seedLog(s, { sessions: ['pm'], title: 'A', scanned_at: new Date(Date.now() - 60000).toISOString() });
+  seedLog(s, { sessions: ['pm'], title: 'B', angle: 'testing', scanned_at: new Date(Date.now() - 60000).toISOString() });
+  s.run(['mark', '--session', 'pm', 'about a deleted topic']);
+  const same = reply(topic({ title: 'A', same_as: [a], belongs: [1], marks: false }));
+  assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${a}`), 'unseen: news');
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'seen and left unplaced: not news again');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'pm.json'), 'utf8')).length, 1, 'still pending');
+});
+
 test('older logs and marks a scan already saw are not news', () => {
   const s = sandbox();
   s.transcript('v1', 3);
@@ -1114,7 +1126,7 @@ test('discovery skill: scans this session too, and passes --force on', () => {
   assert.strictEqual(logSummary('# T\n\n\n## Problem\np'), '', 'an empty summary is not the Problem section');
 });
 
-test('an untouched config of another profile changes nothing', () => {
+test('an untouched config of another profile adds no rules, but its default policy still counts', () => {
   const p = profileSandbox();
   const put = (name, cfg) => { const d = path.join(p.cb, name); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify(cfg)); fs.writeFileSync(path.join(d, 'profile.json'), '{}'); };
   const mine = { defaultPolicy: 'public', projects: [{ match: 'github.com/me/oss', policy: 'public' }, { match: 'github.com/me/*', policy: 'anonymize' }] };
@@ -1122,7 +1134,8 @@ test('an untouched config of another profile changes nothing', () => {
   put('personal', require('../plugins/casebook/lib/util').DEFAULT_CONFIG);
   assert.strictEqual(p.run(['list']).status, 0);
   const c = JSON.parse(fs.readFileSync(path.join(p.cb, 'config.json'), 'utf8'));
-  assert.deepStrictEqual({ defaultPolicy: c.defaultPolicy, projects: c.projects }, mine);
+  assert.deepStrictEqual(c.projects, mine.projects);
+  assert.strictEqual(c.defaultPolicy, 'anonymize', 'the strictest default policy wins');
 });
 
 test('merging configs never loosens a rule: one rule per pattern, the strictest, skip first', () => {
@@ -1148,6 +1161,14 @@ test('casebook\'s own commands are not turns of the session', () => {
   assert.strictEqual(c.userTurns, 3);
   assert.doesNotMatch(c.text, /Other session story|casebook:show/, 'what a casebook command printed is not this session\'s work');
   assert.match(c.text, /fixed it[\s\S]*reviewed[\s\S]*tests added/);
+
+  // A casebook skill the model ran, answered in plain text: its CLI calls keep it out too.
+  const tool = (name, input, text) => JSON.stringify({ type: 'assistant', sessionId: 'c', timestamp: '2026-11-01T00:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text }, { type: 'tool_use', name, input }] } });
+  const raw2 = [line('ship it'), tool('Skill', { skill: 'casebook:handoff' }, 'Handoff of another story'), line('yes, the numbers are 40%'),
+    tool('Bash', { command: 'casebook show cb-aaaaaa' }, 'Facts from that log'), line('back to work'), said('working')].join('\n');
+  fs.writeFileSync(f, raw2);
+  assert.doesNotMatch(condense(f).text, /another story|Facts from that log/);
+  assert.match(condense(f).text, /working/);
 });
 
 test('marketplace is named kinbasco-plugins', () => {

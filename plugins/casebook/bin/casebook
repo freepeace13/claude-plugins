@@ -86,9 +86,10 @@ const commands = {
     if (process.env.CASEBOOK_SCAN) return;
     try {
       if (pos[0] !== 'session-start') return;
-      // Link first: a slow or failed merge never keeps the CLI link from being refreshed.
-      L.linkBin();
-      try { U.migrateProfiles(); } catch (err) { U.logError('merging old profile stores failed', err); }
+      // Apart, and the link first: a slow or failed merge never keeps the link from being refreshed, nor the other way.
+      try { L.linkBin(); } catch (err) { U.logError('linking the casebook CLI failed', err); }
+      // The hook has seconds, not a minute: when the store is busy, the next command merges instead.
+      try { U.migrateProfiles({ waitMs: 2000 }); } catch (err) { U.logError('merging old profile stores failed', err); }
     } catch (err) {
       U.logError(`hook ${pos[0]} failed`, err);
     }

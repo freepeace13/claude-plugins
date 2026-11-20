@@ -288,7 +288,7 @@ function hasNews(log, members) {
   const turns = m.session_turns || (m.session_id ? { [m.session_id]: m.user_turns || 0 } : {});
   const newer = (k) => String(k.at || '') > since;
   // A pending mark the model left unplaced stays pending: only one made since the last scan is news.
-  return members.some((x) => store.getMarks(x.sessionId).some(newer) || (x.userTurns || 0) > (turns[x.sessionId] || 0))
+  return members.some((x) => store.getMarks(x.sessionId).some((k) => !k.seen && newer(k)) || (x.userTurns || 0) > (turns[x.sessionId] || 0))
     || (m.marks || []).some(newer);
 }
 
@@ -299,6 +299,7 @@ async function scanChain(g, config, opts) {
   const lastEnd = g.members.map((m) => m.endedAt || '').sort().pop();
   const context = T.contextLogs(first.project, sids, first.startedAt, lastEnd);
   const deleted = opts.force ? [] : T.tombstones(sids);
+  const startedScan = new Date().toISOString();
   const marks = [...context.filter((l) => T.sessionsOf(l).some((s) => sids.includes(s))).flatMap((l) => l.meta.marks || []),
     ...sids.flatMap((sid) => store.getMarks(sid))];
   const maxTopics = config.scan.maxTopics || 3;
@@ -336,6 +337,8 @@ async function scanChain(g, config, opts) {
       known: T.logsForSessions(members.map((m) => m.sessionId), context).map((l) => l.meta.id),
     });
   }
+  // Pending marks this scan saw and tied to no topic stay pending, but are no longer news for these sessions' logs.
+  if (!found.some((t) => t.marks)) store.withWriteLock(() => { for (const sid of sids) store.markSeen(sid, startedScan); });
   return out;
 }
 
@@ -361,7 +364,7 @@ async function dedupeTopics(list, config) {
   ].join('\n'));
   let groups;
   try {
-    const text = await runClaudeAsync(tpl.replace('{{TOPICS}}', lines.join('\n\n')), config, { timeoutSec: Math.min(config.scan.timeoutSec || 240, 90) });
+    const text = await runClaudeAsync(tpl.replace('{{TOPICS}}', () => lines.join('\n\n')), config, { timeoutSec: Math.min(config.scan.timeoutSec || 240, 90) });
     const raw = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
     groups = Array.isArray(raw.duplicates) ? raw.duplicates : [];
   } catch (err) {

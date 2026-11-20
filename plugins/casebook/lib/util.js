@@ -121,7 +121,9 @@ function mergeConfigs(into, from) {
   // An untouched config (the defaults, the placeholder rule) holds no privacy choice: nothing to fold in.
   const placeholder = (r) => r && /YOUR-GITHUB-HANDLE/.test(String(r.match));
   const own = (b.projects || []).filter((r) => !placeholder(r));
-  if (!own.length && (b.defaultPolicy || DEFAULT_CONFIG.defaultPolicy) === DEFAULT_CONFIG.defaultPolicy) return { added: 0, scanDropped };
+  // Its default policy still counts: the strictest one wins, even from an untouched config.
+  a.defaultPolicy = stricter(a.defaultPolicy || DEFAULT_CONFIG.defaultPolicy, b.defaultPolicy || DEFAULT_CONFIG.defaultPolicy);
+  if (!own.length) { writeJsonAtomic(into, a); return { added: 0, scanDropped }; }
   const rules = new Map();
   let added = 0;
   for (const [r, mine] of [...(a.projects || []).map((x) => [x, true]), ...own.map((x) => [x, false])]) {
@@ -131,7 +133,6 @@ function mergeConfigs(into, from) {
     rules.set(r.match, had ? { ...had, policy: stricter(had.policy, r.policy) } : { ...r });
   }
   a.projects = [...rules.values()].sort((x, y) => (STRICT[y.policy] || 0) - (STRICT[x.policy] || 0));
-  if (b.defaultPolicy) a.defaultPolicy = stricter(a.defaultPolicy || 'anonymize', b.defaultPolicy);
   writeJsonAtomic(into, a);
   return { added, scanDropped };
 }
@@ -150,9 +151,9 @@ function oldStores() {
 
 /** Merge old per-profile stores into the one store, under the write lock so two processes never merge at once.
  *  Safe to run again after a crash. */
-function migrateProfiles() {
+function migrateProfiles({ waitMs } = {}) {
   if (!oldStores().length) return;
-  withWriteLock(migrateLocked);
+  withWriteLock(migrateLocked, { waitMs });
 }
 
 function migrateLocked() {
@@ -230,10 +231,13 @@ function deepMerge(base, over) {
 /** Load config, creating the default file on first use. */
 function loadConfig() {
   // A merge that fails is logged, never in the way of the command.
-  try { migrateProfiles(); } catch (err) { logError('merging old profile stores failed', err); }
+  let failed = false;
+  try { migrateProfiles(); } catch (err) { failed = true; logError('merging old profile stores failed', err); }
   const file = paths.config();
-  if (!fs.existsSync(file)) writeJsonAtomic(file, DEFAULT_CONFIG);
-  const raw = readJson(file, {});
+  // Not merged yet: use the config the merge would move here, and write no default that would take its place.
+  const pending = failed && !fs.existsSync(file) && oldStores().map((n) => path.join(home(), n, 'config.json')).find((f) => fs.existsSync(f));
+  if (!pending && !fs.existsSync(file)) writeJsonAtomic(file, DEFAULT_CONFIG);
+  const raw = readJson(pending || file, {});
   // Before 0.3 the model settings were under "scout".
   if (raw.scout && !raw.scan) raw.scan = raw.scout;
   return deepMerge(DEFAULT_CONFIG, raw);
@@ -243,10 +247,10 @@ function loadConfig() {
  * Run fn while holding the store's write lock. Logs are shared between sessions, so two writers (a pick, a mark,
  * a delete) must not update or create logs at the same moment. Held only for the writes, never during a model call.
  */
-function withWriteLock(fn) {
+function withWriteLock(fn, { waitMs = 60000 } = {}) {
   const file = path.join(paths.home(), 'state', 'write.lock');
   mkdirp(path.dirname(file));
-  const deadline = Date.now() + 60000;
+  const deadline = Date.now() + waitMs;
   const mine = `${process.pid}:${Date.now()}:${Math.random()}`;
   for (;;) {
     try { fs.writeFileSync(file, mine, { flag: 'wx' }); break; } catch (err) {

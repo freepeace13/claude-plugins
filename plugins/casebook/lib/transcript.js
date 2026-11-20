@@ -33,6 +33,15 @@ function blocksOf(content) {
   return Array.isArray(content) ? content : [];
 }
 
+function isCasebookTool(b) {
+  if (!b || b.type !== 'tool_use') return false;
+  const i = b.input || {};
+  if (b.name === 'Skill') return /^casebook:/.test(String(i.skill || i.name || ''));
+  if (b.name === 'Bash') return /^\s*casebook\b/.test(String(i.command || ''));
+  const fp = i.file_path || i.path || '';
+  return Boolean(fp) && path.resolve(String(fp)).startsWith(paths.home() + path.sep);
+}
+
 function describeTool(b) {
   const i = b.input || {};
   const target = i.file_path || i.notebook_path || i.path || i.pattern || i.url || i.description || '';
@@ -103,7 +112,10 @@ function condense(file, maxChars = 60000) {
         if (opening.length < 2) opening.push(clip(t, 1000));
         userTurns++;
       }
-    } else if (e.type === 'assistant' && !inCasebook) {
+    } else if (e.type === 'assistant') {
+      // A casebook skill the model invoked, a casebook CLI call or a write into the store: casebook's own flow.
+      if (blocksOf(e.message.content).some(isCasebookTool)) inCasebook = true;
+      if (inCasebook) continue;
       for (const b of blocksOf(e.message.content)) {
         if (b.type === 'text' && b.text && b.text.trim()) out.push(`CLAUDE: ${clip(stripNoise(b.text))}`);
         else if (b.type === 'tool_use') {

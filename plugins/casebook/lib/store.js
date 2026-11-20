@@ -100,6 +100,12 @@ function addPendingMark(sid, note) {
   writeJsonAtomic(marksFile(sid), marks);
   return marks;
 }
+/** Pending marks a scan saw without placing them: they wait for a pick, but no longer count as news. */
+function markSeen(sid, before) {
+  const marks = getMarks(sid);
+  const saw = (m) => !m.seen && String(m.at || '') <= before;
+  if (marks.some(saw)) writeJsonAtomic(marksFile(sid), marks.map((m) => (saw(m) ? { ...m, seen: true } : m)));
+}
 const clearMarks = (sid) => fs.rmSync(marksFile(sid), { force: true });
 /** Remove only the marks a pick placed: a mark added since the discovery ran stays for the next one. */
 function consumeMarks(sid, used) {
@@ -125,5 +131,5 @@ function applyMark(log, note, session) {
 
 module.exports = {
   listProjects, allLogs, findLog, readLog, saveLog, createLogFile, deleteLog, withWriteLock,
-  getLedger, setLedger, getMarks, addPendingMark, clearMarks, consumeMarks, applyMark, clearLogMarks,
+  getLedger, setLedger, getMarks, markSeen, addPendingMark, clearMarks, consumeMarks, applyMark, clearLogMarks,
 };
