@@ -181,6 +181,12 @@ function screenTopics(found, deleted, shown) {
     const named = known ? x.same_as.filter((id) => known.has(id)) : x.same_as;
     const live = [...new Set(named.map(resolveLog).filter(Boolean).map((l) => l.meta.id))];
     if (!live.length && isTombstoned(x, deleted)) continue;
+    // Every log it names went to a better topic. Another angle on that work is still a new topic; the same
+    // story told again (same angle, a similar title), or a deleted one, is dropped.
+    if (live.length && live.every((id) => claimed.has(id))) {
+      const twins = [...live.map(resolveLog).filter(Boolean).map((l) => l.meta), ...out];
+      if (isTombstoned(x, deleted) || twins.some((t) => sameTitle(t.title, x.title) && sameAngle(t.angle, x.angle))) continue;
+    }
     x.same_as = live.filter((id) => !claimed.has(id));
     for (const id of x.same_as) claimed.add(id);
     out.push(x);
@@ -218,7 +224,8 @@ function uniqMarks(marks) {
  * logs, they were duplicates: they merge into one (a written-up log survives, so its ID stays valid).
  *
  * ctx: { members: [{ sessionId, startedAt, endedAt, userTurns, branch, files }], info: { project, repo, policy, root },
- *        marks, partial, partialSessions?, mode, note?, commits, claimed?, noTwins? }
+ *        marks, partial, partialSessions?, mode, note?, commits, claimed?, reserved?, noTwins? }
+ * reserved: logs other topics of this scan name in same_as; never taken as a title match.
  * noTwins: write exactly the targets in same_as (or a new log), never a title match the caller did not check.
  * Call with the store lock held.
  */
@@ -231,7 +238,8 @@ function applyTopic(topic, ctx) {
   if (!targets.length && !ctx.noTwins) {
     // Never log the same story twice for the same sessions, even if the model reworded the title and did not
     // say so. A log another topic of this scan already wrote is a different angle, not a twin.
-    const mine = logsForSessions(sids).filter((l) => !claimed.has(l.meta.id));
+    const reserved = ctx.reserved || new Set();
+    const mine = logsForSessions(sids).filter((l) => !claimed.has(l.meta.id) && !reserved.has(l.meta.id));
     const twin = mine.find((l) => normTitle(l.meta.title) === normTitle(topic.title))
       || mine.find((l) => sameTitle(l.meta.title, topic.title) && sameAngle(l.meta.angle, topic.angle));
     if (twin) targets = [twin];
@@ -304,7 +312,15 @@ function applyTopic(topic, ctx) {
   };
   if (!survivor.meta.merged_from.length) delete survivor.meta.merged_from;
   survivor.body = body;
+  // Logs live in their project's folder: a log now under another project moves with it.
+  const oldFile = survivor.file;
+  const want = path.join(paths.logs(), ctx.info.project, path.basename(oldFile));
+  if (path.dirname(oldFile) !== path.dirname(want)) { fs.mkdirSync(path.dirname(want), { recursive: true }); survivor.file = want; }
   store.saveLog(survivor);
+  if (survivor.file !== oldFile) {
+    fs.rmSync(oldFile, { force: true });
+    try { fs.rmdirSync(path.dirname(oldFile)); } catch { /* not empty */ }
+  }
   claimed.add(survivor.meta.id);
   for (const l of merged) {
     fs.rmSync(l.file, { force: true });
@@ -315,5 +331,5 @@ function applyTopic(topic, ctx) {
 
 module.exports = {
   sessionsOf, logsForSessions, contextLogs, tombstones, renderExisting, parseTopics, normalizeTopic,
-  isTombstoned, sameTitle, renderBody, applyTopic, normTitle, resolveLog, legacyDeleted, screenTopics, versionsOf, changedSince, partialSessionsOf, finishSession,
+  isTombstoned, sameTitle, renderBody, applyTopic, normTitle, resolveLog, legacyDeleted, screenTopics, versionsOf, changedSince, partialSessionsOf, finishSession, sameAngle,
 };

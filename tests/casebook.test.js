@@ -1478,3 +1478,37 @@ test('scout output labels each log by its own partial state; pick mistakes are n
   const errLog = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
   assert.ok(!fs.existsSync(errLog) || !/no discovery/.test(fs.readFileSync(errLog, 'utf8')));
 });
+
+// ---------------------------------------------------------------- topics review, round 9
+
+test('a losing topic that retells the same story is dropped; a same-angle claim beats a title match', () => {
+  const s = sandbox();
+  const tp = s.transcript('dp9', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'dp9', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fix Redis retry storms' })) }).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'dp9', '--json'], {
+    env: reply(topic({ title: 'Fix Redis retry storms', same_as: [id], score: 5 }), topic({ title: 'Fixing the Redis retry storms', same_as: [id], score: 3 })),
+  }).out);
+  assert.deepStrictEqual(r.logs.map((l) => l.status), ['updated']);
+  assert.strictEqual(logsJson(s).length, 1);
+
+  const r2 = JSON.parse(s.run(['scout', '--session', 'dp9', '--json'], {
+    env: reply(topic({ title: 'Fixed Redis retry storm', score: 5 }), topic({ title: 'Redis retry storms after deploys', same_as: [id], score: 4 })),
+  }).out);
+  const upd = r2.logs.find((l) => l.status === 'updated');
+  assert.strictEqual(upd.logId, id);
+  assert.strictEqual(upd.title, 'Redis retry storms after deploys', 'the topic that named the log updates it');
+});
+
+test('a "continue" opening links to the session that ended last, not the one that started last', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const day = new Date('2026-11-10T00:00:00Z').getTime();
+  const at = (h, m = 0) => new Date(day + (h * 60 + m) * 60000).toISOString();
+  const sess = (id, s, e, o) => ({ sessionId: id, project: 'p', policy: 'public', branch: 'main', prUrls: [], files: [], readFiles: [], opening: '', startedAt: s, endedAt: e, ...o });
+  const groups = linkSessions([
+    sess('A', at(9), at(17), { files: ['/r/app/queue.js'] }),
+    sess('C', at(10), at(10, 30), { files: ['/r/other.js'] }),
+    sess('B', at(17, 5), at(18), { files: ['/r/app/queue.js'], opening: "let's continue where we left off" }),
+  ]);
+  const ab = groups.find((g) => g.members.some((m) => m.sessionId === 'B'));
+  assert.deepStrictEqual(ab.members.map((m) => m.sessionId).sort(), ['A', 'B']);
+});

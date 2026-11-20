@@ -197,7 +197,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const t = condense(tp, config.scout.maxChars);
   const info = resolveProject(cwd || t.cwd, config);
   if (info.policy === 'skip') {
-    store.setLedger(sessionId, { skipped: 'policy', size });
+    store.withWriteLock(() => store.setLedger(sessionId, { skipped: 'policy', size }));
     return { status: 'skipped', reason: 'project policy is skip' };
   }
 
@@ -221,9 +221,9 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
       // the notes are already complete, so finish the logs without another model call.
       // Each log is read again under the lock: another session's scan may have updated it since.
       // Only for this session: a log another running session feeds stays partial for that one.
-      store.withWriteLock(() => T.finishSession(sessionId));
+      // Ledger writes take the lock too: a delete or unmark writes the same ledger under it.
+      store.withWriteLock(() => { T.finishSession(sessionId); store.setLedger(sessionId, { partial: false, size }); });
       mine = T.logsForSessions([sessionId]);
-      store.setLedger(sessionId, { partial: false, size });
       const best = [...mine].sort((a, b) => (b.meta.score || 0) - (a.meta.score || 0))[0];
       if (!best) return { status: 'skipped', reason: 'nothing new since the last scan' };
       return { status: 'updated', logId: best.meta.id, score: best.meta.score, title: best.meta.title, partial: false,
@@ -232,7 +232,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
     // A pending mark always earns a rescan: with several logs, the mark waits for the scan to place it.
     const hasPending = store.getMarks(sessionId).length > 0 || t.commandMarks.some((n) => !unmarked.has(n) && !mine.some((l) => (l.meta.marks || []).some((m) => m.note === n)));
     if (!(wasPartial && grew) && !hasPending && t.userTurns - (ledger.userTurns || 0) < (config.sweep.regrowTurns || 8)) {
-      store.setLedger(sessionId, { size });
+      store.withWriteLock(() => store.setLedger(sessionId, { size }));
       return { status: 'skipped', reason: 'already scanned, not enough new activity' };
     }
   }
@@ -249,7 +249,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   // The turn and score gates decide whether a session earns a log at all; a session already scanned is just rescanned.
   const gated = !manual && !scanned && !pending.length;
   if (gated && t.userTurns < config.scout.minTurns) {
-    store.setLedger(sessionId, { skipped: 'short', userTurns: t.userTurns, size });
+    store.withWriteLock(() => store.setLedger(sessionId, { skipped: 'short', userTurns: t.userTurns, size }));
     return { status: 'skipped', reason: `only ${t.userTurns} turns` };
   }
 
@@ -278,17 +278,17 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
       const onlyDeleted = found.length > 0 && !allowed.length;
       // Marks that only pointed at deleted topics are dropped, and their notes remembered, so a
       // /casebook:mark left in the transcript does not force a rescan every time.
-      if (onlyDeleted) store.withWriteLock(() => store.consumeMarks(sessionId, pending));
       const skipped = onlyDeleted ? 'deleted-topics' : found.length ? 'low-score' : 'no-topic';
-      // A final scan that adds nothing still finishes this session's partial logs: the model saw their notes
-      // and had nothing to add, so they would otherwise be rescanned every time the transcript grows.
-      if (!partial) {
-        store.withWriteLock(() => T.finishSession(sessionId));
-      }
-      const prev = store.getLedger(sessionId) || {};
-      store.setLedger(sessionId, {
-        skipped, score: best, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
-        ...(onlyDeleted ? { unmarked: [...new Set([...(prev.unmarked || []), ...pending.map((m) => m.note || '')])] } : {}),
+      store.withWriteLock(() => {
+        if (onlyDeleted) store.consumeMarks(sessionId, pending);
+        // A final scan that adds nothing still finishes this session's partial logs: the model saw their notes
+        // and had nothing to add, so they would otherwise be rescanned every time the transcript grows.
+        if (!partial) T.finishSession(sessionId);
+        const prev = store.getLedger(sessionId) || {};
+        store.setLedger(sessionId, {
+          skipped, score: best, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
+          ...(onlyDeleted ? { unmarked: [...new Set([...(prev.unmarked || []), ...pending.map((m) => m.note || '')])] } : {}),
+        });
       });
       const reason = onlyDeleted ? 'the only topics found were ones you deleted (use --force to log them again)' : found.length ? `score ${best}` : 'the scout found no topic';
       return { status: 'skipped', reason };
@@ -297,11 +297,14 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
     // Pending marks go to the topics they point to, or to the best one.
     const markTargets = keep.some((x) => x.marks) ? keep.filter((x) => x.marks) : [keep[0]];
     const claimed = new Set();
+    // A log a kept topic of the same angle names is that topic's: another topic's title match must not
+    // take it first. A claim across angles is weaker than a same-angle title match, so it reserves nothing.
+    const reserved = new Set(keep.flatMap((x) => x.same_as.filter((id) => { const l = T.resolveLog(id); return l && T.sameAngle(l.meta.angle, x.angle); })));
     logs = store.withWriteLock(() => {
       const watch = [...new Set([...context.filter((l) => T.sessionsOf(l).includes(sessionId)).map((l) => l.meta.id), ...keep.flatMap((x) => x.same_as)])];
       if (T.changedSince(versions, [sessionId], watch)) return null;
       const written = keep.map((topic) => T.applyTopic(topic, {
-        members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits, claimed,
+        members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits, claimed, reserved,
       }));
       store.consumeMarks(sessionId, pending);
       // In the same lock as the logs: a delete right after must not be undone by this ledger write.

@@ -150,7 +150,10 @@ function linkSessions(sessions) {
     for (let j = 0; j < list.length; j++) {
       const b = list[j];
       let latestBefore = null;
-      for (let i = 0; i < j; i++) if (t0(list[i].endedAt) <= t0(b.startedAt) + HOUR) latestBefore = list[i];
+      // The session that ended last before b began, not the last one to start.
+      for (let i = 0; i < j; i++) {
+        if (t0(list[i].endedAt) <= t0(b.startedAt) + HOUR && (!latestBefore || t0(list[i].endedAt) > t0(latestBefore.endedAt))) latestBefore = list[i];
+      }
       for (let i = 0; i < j; i++) {
         const r = linkReason(list[i], b, latestBefore);
         if (r) edges.push({ a: list[i], b, ...r, gap: t0(b.startedAt) - t0(list[i].endedAt) });
@@ -162,20 +165,26 @@ function linkSessions(sessions) {
   for (const e of edges) {
     const ra = find(e.a.sessionId);
     const rb = find(e.b.sessionId);
-    if (ra === rb) { if (!reasons.has(ra)) reasons.set(ra, new Set()); reasons.get(ra).add(e.why); continue; }
+    const link = { a: e.a.sessionId, b: e.b.sessionId, why: e.why };
+    if (ra === rb) { if (!reasons.has(ra)) reasons.set(ra, []); reasons.get(ra).push(link); continue; }
     if (size.get(ra) + size.get(rb) > MAX_CHAIN) continue;
     parent.set(rb, ra);
     size.set(ra, size.get(ra) + size.get(rb));
-    reasons.set(ra, new Set([...(reasons.get(ra) || []), ...(reasons.get(rb) || []), e.why]));
+    reasons.set(ra, [...(reasons.get(ra) || []), ...(reasons.get(rb) || []), link]);
   }
   const groups = new Map();
   for (const s of sessions) {
     const r = find(s.sessionId);
-    if (!groups.has(r)) groups.set(r, { members: [], reasons: [...(reasons.get(r) || [])] });
+    if (!groups.has(r)) {
+      const links = reasons.get(r) || [];
+      groups.set(r, { members: [], links, reasons: whys(links) });
+    }
     groups.get(r).members.push(s);
   }
   return [...groups.values()];
 }
+
+const whys = (links) => [...new Set(links.map((l) => l.why))];
 
 // ---------- shortlist ----------
 
@@ -281,9 +290,12 @@ async function scanChain(g, config, opts) {
     const same = topic.same_as.map((id) => byId.get(id));
     // Already logged with these very sessions and nothing to merge: not a discovery.
     if (same.length === 1 && members.every((m) => T.sessionsOf(same[0]).includes(m.sessionId))) continue;
+    // Only what concerns this topic's own sessions: their commits, and the links between them.
+    const ids = new Set(members.map((m) => m.sessionId));
     out.push({
-      topic, members, commits,
-      reasons: members.length > 1 ? g.reasons : [],
+      topic, members,
+      commits: members.length === g.members.length ? commits : chainCommits(members, first.root),
+      reasons: members.length > 1 ? whys((g.links || []).filter((l) => ids.has(l.a) && ids.has(l.b))) : [],
       updates: same.map((l) => l.meta.id),
       targets: Object.fromEntries(same.map((l) => [l.meta.id, l.meta.updated_at || l.meta.created_at || ''])),
       // The logs of these sessions the model was shown: a pick refuses if the sessions gained another one.
@@ -367,7 +379,7 @@ async function discover(config, o) {
       id, created_at: new Date().toISOString(), note: o.note || '', tags, minScore: o.minScore || null, force: Boolean(o.force), topics, picked: {},
     });
   }
-  return { ...summary, id, scored: picked.length, failed, best, topics };
+  return { ...summary, id, scored: scanned.filter((s) => s.ok).length, failed, best, topics };
 }
 
 // ---------- pick ----------
