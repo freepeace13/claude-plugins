@@ -17,6 +17,7 @@ function sandbox() {
     ...process.env,
     CASEBOOK_HOME: path.join(root, 'casebook'),
     CLAUDE_CONFIG_DIR: path.join(root, 'claude'),
+    CASEBOOK_BIN_DIR: path.join(root, 'bin'),
     CASEBOOK_SCOUT: '',
   };
   delete env.CASEBOOK_SCOUT;
@@ -378,7 +379,7 @@ console.log(JSON.stringify({score:4,title:'T',summary:'s',problem:'p',constraint
 `);
   fs.chmodSync(stub, 0o755);
 
-  const baseEnv = { ...process.env, HOME: home, CASEBOOK_ROOT: cb };
+  const baseEnv = { ...process.env, HOME: home, CASEBOOK_ROOT: cb, CASEBOOK_BIN_DIR: path.join(root, 'bin') };
   delete baseEnv.CASEBOOK_HOME; delete baseEnv.CASEBOOK_PROFILE; delete baseEnv.CASEBOOK_SCOUT; delete baseEnv.CLAUDE_CONFIG_DIR;
   const config = JSON.stringify({ defaultPolicy: 'public', scout: { command: stub, minTurns: 2 }, sweep: { settleMinutes: 0 } });
   const seedStore = (name) => { fs.mkdirSync(path.join(cb, name), { recursive: true }); fs.writeFileSync(path.join(cb, name, 'config.json'), config); };
@@ -1786,4 +1787,82 @@ test('a pick settles only the logs it writes, and checks the project policy agai
   const p = s.run(['discover', 'pick', did2, '1']);
   assert.strictEqual(p.status, 1);
   assert.match(p.stderr, /no longer public/);
+});
+
+// ---------- link: ~/.local/bin/casebook ----------
+
+function linkSandbox() {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'casebook-link-')));
+  const dir = path.join(root, 'bin');
+  const env = { ...process.env, CASEBOOK_BIN_DIR: dir, CASEBOOK_HOME: path.join(root, 'store'), CLAUDE_CONFIG_DIR: path.join(root, 'claude') };
+  const run = (args, input = '') => spawnSync(process.execPath, [BIN, ...args], { encoding: 'utf8', env, input });
+  // A fake install of this plugin at some version, to point the link at.
+  const fakePlugin = (name, version) => {
+    const p = path.join(root, `${name}-${version}`);
+    fs.mkdirSync(path.join(p, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(p, 'bin'));
+    fs.writeFileSync(path.join(p, '.claude-plugin', 'plugin.json'), JSON.stringify({ name, version }));
+    fs.writeFileSync(path.join(p, 'bin', 'casebook'), '#!/bin/sh\n');
+    return path.join(p, 'bin', 'casebook');
+  };
+  return { root, dir, dest: path.join(dir, 'casebook'), env, run, fakePlugin, target: fs.realpathSync(BIN) };
+}
+
+test('casebook link creates the bin folder and the link, then reports it current', () => {
+  const s = linkSandbox();
+  const r = JSON.parse(s.run(['link', '--json']).stdout);
+  assert.strictEqual(r.status, 'linked');
+  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'current');
+  const help = spawnSync(s.dest, ['help'], { encoding: 'utf8', env: s.env });
+  assert.strictEqual(help.status, 0, 'the CLI runs through the link');
+  assert.match(help.stdout, /casebook/);
+});
+
+test('casebook link replaces a broken link and a link to an older casebook, and keeps a newer one', () => {
+  const s = linkSandbox();
+  fs.mkdirSync(s.dir);
+  fs.symlinkSync(path.join(s.root, 'gone', 'bin', 'casebook'), s.dest);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated');
+  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+
+  fs.unlinkSync(s.dest);
+  fs.symlinkSync(s.fakePlugin('casebook', '0.0.1'), s.dest);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated');
+  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+
+  const newer = s.fakePlugin('casebook', '99.0.0');
+  fs.unlinkSync(s.dest);
+  fs.symlinkSync(newer, s.dest);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'skipped');
+  assert.strictEqual(fs.readlinkSync(s.dest), newer);
+});
+
+test('casebook link leaves a regular file, a link to something else, and "off" alone', () => {
+  const s = linkSandbox();
+  fs.mkdirSync(s.dir);
+  const other = s.fakePlugin('not-casebook', '9.0.0');
+  fs.symlinkSync(other, s.dest);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'skipped');
+  assert.strictEqual(fs.readlinkSync(s.dest), other);
+
+  fs.unlinkSync(s.dest);
+  fs.writeFileSync(s.dest, 'mine');
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'skipped');
+  assert.strictEqual(fs.readFileSync(s.dest, 'utf8'), 'mine');
+
+  const off = spawnSync(process.execPath, [BIN, 'link', '--json'], { encoding: 'utf8', env: { ...s.env, CASEBOOK_BIN_DIR: 'off' } });
+  assert.strictEqual(JSON.parse(off.stdout).status, 'skipped');
+});
+
+test('casebook SessionStart hook links silently and never fails', () => {
+  const s = linkSandbox();
+  const r = s.run(['hook', 'session-start'], JSON.stringify({ session_id: 's', source: 'startup' }));
+  assert.strictEqual(r.status, 0);
+  assert.strictEqual(r.stdout, '', 'SessionStart must not inject context');
+  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+
+  const bad = spawnSync(process.execPath, [BIN, ...['hook', 'session-start']], { encoding: 'utf8', env: { ...s.env, CASEBOOK_BIN_DIR: 'relative/bin' }, input: JSON.stringify({ session_id: 's', source: 'startup' }) });
+  assert.strictEqual(bad.status, 0);
+  assert.strictEqual(bad.stdout, '');
 });

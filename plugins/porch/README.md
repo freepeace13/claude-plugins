@@ -59,7 +59,9 @@ To move the store, set `PORCH_HOME` to an absolute path (or one starting with `~
 
 ## The `porch` command
 
-On your `PATH` inside Claude Code while the plugin is enabled; outside it, run `plugins/porch/bin/porch`. The skills use it for every change to the store, so you and the agent see the same thing.
+On your `PATH` inside Claude Code while the plugin is enabled. The skills use it for every change to the store, so you and the agent see the same thing.
+
+For your terminal, the plugin symlinks `~/.local/bin/porch` to itself at every Claude Code startup, so the link follows updates; make sure `~/.local/bin` is on your PATH. An existing link to an older porch (or a broken one) is replaced; a regular file, a link to anything else, or a link to an equal or newer porch is left alone. Run `porch link` to do it now. Set `PORCH_BIN_DIR` to link into another folder, or to `off` to stop linking. Uninstalling the plugin does not remove the link.
 
 ```text
 porch init <path> --type article|case-study --topic text [--note text] [--force] [--json]
@@ -69,6 +71,7 @@ porch read <id> [brief|draft|review|state] [--path] [--json]
 porch set <id> key=value…      title, topic, slug, tags, status, kind, draft_source, note, porch_id
 porch delete <id>… [--yes]     dry run without --yes
 porch home
+porch link [--json]
 ```
 
 An id may be any unique prefix of 4 or more characters. `init` copies real files and folders only. It skips `.git`, `node_modules`, symlinks, the store itself and anything it cannot read (it lists those). It stops as soon as an intake passes 2000 files or 25 MB unless you pass `--force`. A failed `init` leaves nothing in the store, and only a new store gets mode 0700.

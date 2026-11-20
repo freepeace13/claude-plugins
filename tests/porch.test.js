@@ -668,3 +668,81 @@ test('skills pass values in single quotes, allow spaced paths, and keep drafts p
   assert.match(draft, /no frontmatter with `type`, `title` and `slug`/);
   assert.match(read('agents/writer.md'), /finished draft, copied in unchanged/);
 });
+
+// ---------- link: ~/.local/bin/porch ----------
+
+function linkSandbox() {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'porch-link-')));
+  const dir = path.join(root, 'bin');
+  const env = { ...process.env, PORCH_BIN_DIR: dir, PORCH_HOME: path.join(root, 'store') };
+  const run = (args, input = '') => spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env, input });
+  // A fake install of this plugin at some version, to point the link at.
+  const fakePlugin = (name, version) => {
+    const p = path.join(root, `${name}-${version}`);
+    fs.mkdirSync(path.join(p, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(p, 'bin'));
+    fs.writeFileSync(path.join(p, '.claude-plugin', 'plugin.json'), JSON.stringify({ name, version }));
+    fs.writeFileSync(path.join(p, 'bin', 'porch'), '#!/bin/sh\n');
+    return path.join(p, 'bin', 'porch');
+  };
+  return { root, dir, dest: path.join(dir, 'porch'), env, run, fakePlugin, target: fs.realpathSync(CLI) };
+}
+
+test('porch link creates the bin folder and the link, then reports it current', () => {
+  const s = linkSandbox();
+  const r = JSON.parse(s.run(['link', '--json']).stdout);
+  assert.strictEqual(r.status, 'linked');
+  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'current');
+  const help = spawnSync(s.dest, ['help'], { encoding: 'utf8', env: s.env });
+  assert.strictEqual(help.status, 0, 'the CLI runs through the link');
+  assert.match(help.stdout, /porch/);
+});
+
+test('porch link replaces a broken link and a link to an older porch, and keeps a newer one', () => {
+  const s = linkSandbox();
+  fs.mkdirSync(s.dir);
+  fs.symlinkSync(path.join(s.root, 'gone', 'bin', 'porch'), s.dest);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated');
+  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+
+  fs.unlinkSync(s.dest);
+  fs.symlinkSync(s.fakePlugin('porch', '0.0.1'), s.dest);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated');
+  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+
+  const newer = s.fakePlugin('porch', '99.0.0');
+  fs.unlinkSync(s.dest);
+  fs.symlinkSync(newer, s.dest);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'skipped');
+  assert.strictEqual(fs.readlinkSync(s.dest), newer);
+});
+
+test('porch link leaves a regular file, a link to something else, and "off" alone', () => {
+  const s = linkSandbox();
+  fs.mkdirSync(s.dir);
+  const other = s.fakePlugin('not-porch', '9.0.0');
+  fs.symlinkSync(other, s.dest);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'skipped');
+  assert.strictEqual(fs.readlinkSync(s.dest), other);
+
+  fs.unlinkSync(s.dest);
+  fs.writeFileSync(s.dest, 'mine');
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'skipped');
+  assert.strictEqual(fs.readFileSync(s.dest, 'utf8'), 'mine');
+
+  const off = spawnSync(process.execPath, [CLI, 'link', '--json'], { encoding: 'utf8', env: { ...s.env, PORCH_BIN_DIR: 'off' } });
+  assert.strictEqual(JSON.parse(off.stdout).status, 'skipped');
+});
+
+test('porch SessionStart hook links silently and never fails', () => {
+  const s = linkSandbox();
+  const r = s.run(['link', '--hook'], '{}');
+  assert.strictEqual(r.status, 0);
+  assert.strictEqual(r.stdout, '', 'SessionStart must not inject context');
+  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+
+  const bad = spawnSync(process.execPath, [CLI, ...['link', '--hook']], { encoding: 'utf8', env: { ...s.env, PORCH_BIN_DIR: 'relative/bin' }, input: '{}' });
+  assert.strictEqual(bad.status, 0);
+  assert.strictEqual(bad.stdout, '');
+});
