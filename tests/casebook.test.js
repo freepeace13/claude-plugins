@@ -378,8 +378,9 @@ test('one model call checks the remaining topics for retellings in other words',
   const r = s.run(['discover'], { env: { ...env, STUB_DEDUPE: '{"duplicates":[[1,2]]}' } });
   assert.strictEqual(r.status, 0, r.stderr);
   const asked = fs.readFileSync(path.join(s.root, 'last-dedupe.txt'), 'utf8');
-  assert.match(asked, /### 1\. Stopping retry storms\nProject: acme-api · Angle: debugging · 2 sessions\nDescription: Retry storms in the queue worker\./);
-  assert.match(asked, /### 2\. Queue retry budget, end to end\nProject: acme-api · Angle: debugging · 2 sessions · updates an existing log/);
+  assert.match(asked, /### 1\. Stopping retry storms\nProject A · Angle: debugging · 2 sessions\nDescription: Retry storms in the queue worker\./);
+  assert.doesNotMatch(asked, /acme-api/, 'projects are labels, never names');
+  assert.match(asked, /### 2\. Queue retry budget, end to end\nProject A · Angle: debugging · 2 sessions · updates an existing log/);
   assert.doesNotMatch(r.out, /Stopping retry storms/, 'the new retelling goes; the topic that names the log stays');
   assert.match(r.out, new RegExp(`1\\. \\[4\\] Queue retry budget, end to end[\\s\\S]*updates: ${x}`));
   assert.match(r.out, /2\. \[3\] Schema for job audit/);
@@ -481,6 +482,11 @@ test('a marked session is a candidate however short', () => {
   assert.deepStrictEqual(sids(), []);
   s.run(['mark', '--session', 'tiny', 'the deadlock fix']);
   assert.deepStrictEqual(sids(), ['tiny']);
+  // Logged, and marked again by ID: still a candidate, so the new mark is scanned.
+  const id = discoverPick(s, reply(topic({ title: 'Deadlock fix', marks: true })));
+  assert.deepStrictEqual(sids(), [], 'its marks are placed: short again');
+  s.run(['mark', id, 'the before and after numbers']);
+  assert.deepStrictEqual(sids(), ['tiny']);
 });
 
 test('a pending mark a scan saw and placed nowhere is no longer news', () => {
@@ -493,6 +499,13 @@ test('a pending mark a scan saw and placed nowhere is no longer news', () => {
   assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${a}`), 'unseen: news');
   assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'seen and left unplaced: not news again');
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'pm.json'), 'utf8')).length, 1, 'still pending');
+  // A later scan that places it on a log of these sessions still can.
+  const placed = s.run(['discover'], { env: reply(topic({ title: 'A', same_as: [a], belongs: [1], marks: true })) });
+  assert.match(placed.out, new RegExp(`updates: ${a}`));
+  assert.strictEqual(s.run(['discover', 'pick', didOf(placed.out), '1']).status, 0);
+  const log = logsJson(s).find((l) => l.id === a);
+  assert.deepStrictEqual(log.marks.map((m) => m.note), ['about a deleted topic']);
+  assert.ok(!('seen' in log.marks[0]), 'the scan\'s bookkeeping stays out of the log');
 });
 
 test('older logs and marks a scan already saw are not news', () => {
@@ -1179,6 +1192,8 @@ test('casebook\'s own commands are not turns of the session', () => {
   fs.writeFileSync(f, raw2);
   const c2 = condense(f);
   assert.doesNotMatch(c2.text, /casebook list|casebook:show|handoffs/);
+  fs.writeFileSync(f, tools(use('Bash', { command: 'cd ~/proj && casebook list --all' }), use('Bash', { command: 'casebook-lint .' })));
+  assert.deepStrictEqual(condense(f).text.split('\n'), ['  [Bash] casebook-lint .']);
   assert.match(c2.text, /fixing retries/);
   assert.deepStrictEqual(c2.files, ['/repo/retry.js']);
 });

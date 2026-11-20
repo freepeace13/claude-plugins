@@ -37,7 +37,8 @@ function isCasebookTool(b) {
   if (!b || b.type !== 'tool_use') return false;
   const i = b.input || {};
   if (b.name === 'Skill') return /^casebook:/.test(String(i.skill || i.name || ''));
-  if (b.name === 'Bash') return /^\s*casebook\b/.test(String(i.command || ''));
+  // `casebook` as a command word anywhere in the line: after `cd x &&`, a pipe or VAR=value prefixes.
+  if (b.name === 'Bash') return /(^|[;&|(]\s*|\s)casebook(\s|$)/.test(String(i.command || '').split('\n')[0]);
   const fp = i.file_path || i.path || '';
   return Boolean(fp) && path.resolve(String(fp)).startsWith(paths.home() + path.sep);
 }

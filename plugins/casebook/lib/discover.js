@@ -81,6 +81,8 @@ function collectSessions(config, { project, since, exclude, force }) {
         files: t.files, readFiles: t.readFiles, prUrls: t.prUrls, aiTitle: t.aiTitle, opening: t.opening,
         text: t.text,
         logs: logs.map((l) => ({ id: l.meta.id, score: l.meta.score, title: l.meta.title, tags: l.meta.tags || [] })),
+        // A mark no scan has seen yet: pending and unseen, or on one of its logs since that log's last scan.
+        marked: store.getMarks(sessionId).some((k) => !k.seen) || logs.some((l) => (l.meta.marks || []).some(newerThan(l.meta))),
       });
     }
   }
@@ -209,7 +211,7 @@ function shortlist(groups, config, { note, tags }) {
   const out = [];
   for (const g of groups) {
     // A session the user marked is always a candidate, however short: its mark waits for a scan of it.
-    const marked = g.members.some((m) => store.getMarks(m.sessionId).length);
+    const marked = g.members.some((m) => m.marked);
     if (!marked && g.members.length === 1 && g.members[0].userTurns < config.scan.minTurns) continue;
     const text = groupText(g);
     const tagHits = tags.filter((t) => hasWord(text, norm(t)));
@@ -283,15 +285,22 @@ function memberRecord(m) {
 
 /** Turns or marks a log has not been scanned with yet: a pending mark of its sessions, a mark of the log made since
  *  its last scan, or a session that grew since. */
-function hasNews(log, members) {
+function hasNews(log, members, topic) {
   const m = log.meta;
-  // Older logs: 0.2 has scouted_at, 0.1 only session_id and user_turns (the same fallback as applyTopic).
-  const since = m.scanned_at || m.scouted_at || m.created_at || '';
   const turns = m.session_turns || (m.session_id ? { [m.session_id]: m.user_turns || 0 } : {});
-  const newer = (k) => String(k.at || '') > since;
-  // A pending mark the model left unplaced stays pending: only one made since the last scan is news.
-  return members.some((x) => store.getMarks(x.sessionId).some((k) => !k.seen && newer(k)) || (x.userTurns || 0) > (turns[x.sessionId] || 0))
+  const newer = newerThan(m);
+  const pending = members.map((x) => store.getMarks(x.sessionId));
+  // The model placed the sessions' pending marks on this topic: the pick gives them to the log.
+  if (topic && topic.marks && pending.some((p) => p.length)) return true;
+  // A pending mark a scan saw and left unplaced stays pending, but is news only once.
+  return members.some((x, i) => pending[i].some((k) => !k.seen && newer(k)) || (x.userTurns || 0) > (turns[x.sessionId] || 0))
     || (m.marks || []).some(newer);
+}
+
+/** Made since the log's last scan. Older logs: 0.2 has scouted_at, 0.1 only created_at. */
+function newerThan(meta) {
+  const since = meta.scanned_at || meta.scouted_at || meta.created_at || '';
+  return (k) => String(k.at || '') > since;
 }
 
 /** One model call over a chain. Returns its topics, each cut down to the sessions it belongs to. */
@@ -326,7 +335,7 @@ async function scanChain(g, config, opts) {
     }
     // Already logged with these very sessions and nothing to merge: not a discovery, unless the sessions have
     // news for that log (new turns, or marks made since its last scan), and then it refreshes the log.
-    if (same.length === 1 && members.every((m) => T.sessionsOf(same[0]).includes(m.sessionId)) && !hasNews(same[0], members)) continue;
+    if (same.length === 1 && members.every((m) => T.sessionsOf(same[0]).includes(m.sessionId)) && !hasNews(same[0], members, topic)) continue;
     // Only what concerns this topic's own sessions: their commits, and the links between them.
     const ids = new Set(members.map((m) => m.sessionId));
     out.push({
@@ -340,7 +349,10 @@ async function scanChain(g, config, opts) {
     });
   }
   // Pending marks this scan saw and tied to no topic stay pending, but are no longer news for these sessions' logs.
-  if (!out.some((f) => f.topic.marks)) store.withWriteLock(() => { for (const sid of sids) store.markSeen(sid, startedScan); });
+  // Bookkeeping only: a busy lock must not throw away a scan that worked.
+  if (!out.some((f) => f.topic.marks)) {
+    try { store.withWriteLock(() => { for (const sid of sids) store.markSeen(sid, startedScan); }, { waitMs: 5000 }); } catch (err) { logError('could not record the marks a scan saw', err); }
+  }
   return out;
 }
 
@@ -358,9 +370,12 @@ async function dedupeTopics(list, config) {
   // Only new topics can be dropped: with none, the call could change nothing.
   if (list.length < 2 || list.every((f) => f.updates.length)) return list;
   const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'prompts', 'dedupe.md'), 'utf8');
+  // Only to tell projects apart: a label, never the project's name (it may be anonymized).
+  const labels = new Map();
+  const label = (f) => { const p = projectOf(f); if (!labels.has(p)) labels.set(p, String.fromCharCode(65 + (labels.size % 26)) + (labels.size >= 26 ? labels.size : '')); return labels.get(p); };
   const lines = list.map((f, i) => [
     `### ${i + 1}. ${f.topic.title}`,
-    `Project: ${projectOf(f)} · Angle: ${f.topic.angle || 'general'} · ${f.members.length} session${f.members.length > 1 ? 's' : ''}${f.updates.length ? ' · updates an existing log' : ''}`,
+    `Project ${label(f)} · Angle: ${f.topic.angle || 'general'} · ${f.members.length} session${f.members.length > 1 ? 's' : ''}${f.updates.length ? ' · updates an existing log' : ''}`,
     `Description: ${f.topic.description || '(none)'}`,
     `Summary: ${f.topic.summary || '(none)'}`,
   ].join('\n'));

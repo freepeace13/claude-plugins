@@ -241,7 +241,8 @@ function applyTopic(topic, ctx) {
     profile: (survivor && survivor.meta.profile) || paths.profileName(),
     score: topic.score,
     marked: false,
-    marks: uniqMarks([...prior.flatMap((l) => l.meta.marks || []), ...ctx.marks]),
+    // `seen` is the scan's bookkeeping for pending marks, not part of the mark.
+    marks: uniqMarks([...prior.flatMap((l) => l.meta.marks || []), ...ctx.marks].map(({ seen, ...k }) => k)),
     tags: topic.tags,
     session_id: sessions[0],
     sessions,

@@ -273,6 +273,7 @@ const commands = {
 
   config() {
     U.loadConfig();
+    if (!fs.existsSync(U.paths.config())) fail('old profile stores are still being merged into the shared one; try again in a minute (see casebook doctor)');
     out(U.paths.config());
     out(fs.readFileSync(U.paths.config(), 'utf8'));
   },
