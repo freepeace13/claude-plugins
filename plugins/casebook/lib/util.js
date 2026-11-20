@@ -307,6 +307,11 @@ function slugify(s, max = 60) {
 }
 
 /** "30d", "12w", "6m", "1y" or an ISO date → Date threshold. */
+/** A mark note as it is compared and stored: outer quotes dropped, whitespace collapsed. */
+function normNote(s) {
+  return String(s || '').trim().replace(/^(["'])([\s\S]*)\1$/, '$2').replace(/\s+/g, ' ').trim();
+}
+
 function parseAge(spec) {
   if (!spec) return null;
   const m = /^(\d+)\s*([dwmy])$/i.exec(String(spec).trim());
@@ -331,5 +336,5 @@ function globMatch(pattern, value) {
 
 module.exports = {
   PLUGIN_ROOT, paths, DEFAULT_CONFIG, loadConfig, mkdirp, readJson, writeJsonAtomic, writeFileAtomic,
-  logError, profile, useProfile, listProfiles, normalizeDir, profileNameFor, parseDoc, renderDoc, newId, ID_RE, sessionKey, slugify, parseAge, daysSince, globMatch, expandHome,
+  normNote, logError, profile, useProfile, listProfiles, normalizeDir, profileNameFor, parseDoc, renderDoc, newId, ID_RE, sessionKey, slugify, parseAge, daysSince, globMatch, expandHome,
 };

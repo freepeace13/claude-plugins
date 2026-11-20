@@ -314,6 +314,7 @@ function applyTopic(topic, ctx) {
     claimed.add(log.meta.id);
     return { status: 'created', logId: log.meta.id, score: topic.score, title: topic.title, angle: meta.angle, partial: meta.partial, merged: [] };
   }
+  const was = { project: survivor.meta.project, repo: survivor.meta.repo, policy: survivor.meta.policy };
   survivor.meta = {
     ...survivor.meta, ...meta,
     written_to: uniq(prior.flatMap((l) => l.meta.written_to || [])),
@@ -321,9 +322,17 @@ function applyTopic(topic, ctx) {
   };
   if (!survivor.meta.merged_from.length) delete survivor.meta.merged_from;
   survivor.body = body;
+  // A session whose folder is gone resolves to a guess (its folder's name, no repo): the log keeps the project
+  // and repo it already had, and only ever gets a stricter policy.
+  if (!ctx.info.root && was.project) {
+    survivor.meta.project = was.project;
+    survivor.meta.repo = was.repo || null;
+    const policies = [was.policy, ...merged.map((l) => l.meta.policy), ctx.info.policy];
+    if (policies.some((x) => x && x !== 'public')) survivor.meta.policy = 'anonymize';
+  }
   // Logs live in their project's folder: a log now under another project moves with it.
   const oldFile = survivor.file;
-  const want = path.join(paths.logs(), ctx.info.project, path.basename(oldFile));
+  const want = path.join(paths.logs(), survivor.meta.project, path.basename(oldFile));
   if (path.dirname(oldFile) !== path.dirname(want)) { fs.mkdirSync(path.dirname(want), { recursive: true }); survivor.file = want; }
   store.saveLog(survivor);
   if (survivor.file !== oldFile) {

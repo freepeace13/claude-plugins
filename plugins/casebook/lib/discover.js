@@ -282,7 +282,8 @@ function memberRecord(m) {
 async function scanChain(g, config, opts) {
   const sids = g.members.map((m) => m.sessionId);
   const first = g.members[0];
-  const context = T.contextLogs(first.project, sids, first.startedAt, g.members[g.members.length - 1].endedAt);
+  const lastEnd = g.members.map((m) => m.endedAt || '').sort().pop();
+  const context = T.contextLogs(first.project, sids, first.startedAt, lastEnd);
   const deleted = opts.force ? [] : T.tombstones(sids);
   const marks = [...context.filter((l) => T.sessionsOf(l).some((s) => sids.includes(s))).flatMap((l) => l.meta.marks || []),
     ...sids.flatMap((sid) => store.getMarks(sid))];
@@ -345,7 +346,8 @@ function pruneDiscoveries() {
  * best `top` topics across them. With dryRun nothing is scanned: the shortlist is returned as it would be sent.
  */
 async function discover(config, o) {
-  const since = o.since ? parseAge(o.since) : parseAge('90d');
+  let since;
+  try { since = o.since ? parseAge(o.since) : parseAge('90d'); } catch (err) { throw userError(err.message); }
   const tags = (o.tags || []).map((t) => t.trim().toLowerCase()).filter(Boolean);
   const sessions = collectSessions(config, { project: o.project, since, exclude: o.exclude, force: o.force });
   const groups = linkSessions(sessions);

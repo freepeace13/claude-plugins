@@ -256,9 +256,8 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const pending = store.getMarks(sessionId);
   const seen = new Set([...mine.flatMap((l) => l.meta.marks || []), ...pending].map((m) => m.note));
   for (const note of commandMarks) {
-    if (!seen.has(note) && !unmarked.has(note)) { pending.push({ at: t.endedAt, note }); seen.add(note); }
+    if (!seen.has(note) && !unmarked.has(note)) { pending.push({ at: t.endedAt, note, session: sessionId }); seen.add(note); }
   }
-  const promptMarks = [...mine.flatMap((l) => l.meta.marks || []), ...pending];
 
   // The turn and score gates decide whether a session earns a log at all; a session already scanned is just rescanned.
   const gated = !manual && !scanned && !pending.length;
@@ -268,7 +267,6 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   }
 
   const commits = commitsBetween(info.root, t.startedAt, t.endedAt);
-  const deleted = force ? [] : T.tombstones([sessionId]);
   const maxTopics = config.scout.maxTopics || 3;
   const member = { sessionId, startedAt: t.startedAt, endedAt: t.endedAt, userTurns: t.userTurns, branch: t.branch, files: t.files };
   // The model call runs without the lock, so another scan may update a log shown to it meanwhile. The
@@ -278,6 +276,9 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
     if (attempt > SCAN_ATTEMPTS) throw new Error('the logs of this session kept changing during the scan; try again');
     // Stamped before the logs are read: a log created while they are read counts as new.
     const takenAt = new Date().toISOString();
+    // Read again on every attempt: a retry may be caused by a delete, whose topic must stay deleted.
+    const deleted = force ? [] : T.tombstones([sessionId]);
+    const promptMarks = [...T.logsForSessions([sessionId]).flatMap((l) => l.meta.marks || []), ...pending];
     const context = T.contextLogs(info.project, [sessionId], t.startedAt, t.endedAt);
     const versions = T.versionsOf(context);
     const prompt = buildPrompt(t, info, promptMarks, commits, T.renderExisting(context, [sessionId], deleted), maxTopics);
@@ -414,7 +415,7 @@ function sweep(config, { since, exclude, limit, settleMinutes, dryRun, partialIf
       try {
         const t = condense(c.transcriptPath, config.scout.maxChars);
         userTurns = t.userTurns;
-        project = resolveProject(t.cwd, config).project;
+        project = t.cwd ? resolveProject(t.cwd, config).project : 'unknown';
       } catch { /* unreadable: list it anyway */ }
       return { ...c, status: 'candidate', project, userTurns };
     });

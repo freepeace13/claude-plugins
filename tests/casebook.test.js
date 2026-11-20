@@ -1723,3 +1723,35 @@ test('a pick refuses when any log it merges was deleted; a session with no folde
   assert.match(doc, /project: "unknown"/);
   assert.match(doc, /policy: "anonymize"/);
 });
+
+// ---------------------------------------------------------------- topics review, round 15
+
+test('a log deleted while its session is being scanned stays deleted', async () => {
+  const s = sandbox();
+  const tp = s.transcript('dl15', 3);
+  const x = JSON.parse(s.run(['scout', '--session', 'dl15', '--transcript', tp, '--json']).out).logId;
+  const run = slow(s, ['scout', '--session', 'dl15', '--transcript', tp, '--json'], { STUB_DELAY: '1200' });
+  await pause(600);
+  s.run(['delete', x]);
+  const r = await run;
+  assert.strictEqual(r.code, 0, r.stderr);
+  assert.match(r.out, /"status":"skipped"/);
+  assert.strictEqual(logsJson(s).length, 0);
+});
+
+test('a rescan from a folder that is gone keeps the log\'s project; a bad --since is not logged as a failure', () => {
+  const s = sandbox();
+  const tp = s.transcript('gk15', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'gk15', '--transcript', tp, '--json']).out).logId;
+  fs.writeFileSync(tp, fs.readFileSync(tp, 'utf8').split(s.repo).join(path.join(s.root, 'acme-api-feature')));
+  s.run(['scout', '--session', 'gk15', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [id] })) });
+  const doc = s.run(['show', id]).out;
+  assert.match(doc, /project: "acme-api"/);
+  assert.match(doc, /repo: "github.com\/someone\/acme-api"/);
+  assert.match(doc, /policy: "anonymize"/, 'only ever stricter');
+
+  const bad = s.run(['discover', '--since', '3 months']);
+  assert.strictEqual(bad.status, 1);
+  const log = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
+  assert.ok(!fs.existsSync(log) || !/command discover failed/.test(fs.readFileSync(log, 'utf8')));
+});

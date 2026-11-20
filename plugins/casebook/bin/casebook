@@ -293,13 +293,13 @@ const commands = {
       // Logs are shared between sessions: read and save under the write lock so a scan cannot undo the change.
       const log = store.withWriteLock(() => {
         const l = findLog(pos[0]);
-        return l && store.applyMark(l, pos.slice(1).join(' '));
+        return l && store.applyMark(l, U.normNote(pos.slice(1).join(' ')));
       });
       if (!log) fail(`no log with id "${pos[0]}"`);
       return out(`📌 Marked ${log.meta.id}: ${log.meta.title}`);
     }
     if (!opt.session) fail('mark needs a log ID, or --session <id> to mark the current session');
-    const note = pos.join(' ');
+    const note = U.normNote(pos.join(' '));
     // --generated: the skill wrote the note for a bare /casebook:mark, which the transcript shows with no note.
     // Counted so the scan knows that empty transcript mark was placed (it is only a fallback for a failed mark).
     const recordBare = () => {
@@ -310,11 +310,15 @@ const commands = {
     const { one, marks } = store.withWriteLock(() => {
       recordBare();
       const logs = T.logsForSessions([opt.session]);
-      if (logs.length === 1) return { one: store.applyMark(logs[0], note) };
+      if (logs.length === 1) return { one: store.applyMark(logs[0], note, opt.session) };
       return { marks: store.addPendingMark(opt.session, note) };
     });
     if (one) return out(`📌 Marked ${one.meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
-    out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). It goes to the topic it points to when the session is scanned.`);
+    // A session closed since 0.1 (its log deleted before topics) is never scanned again on its own.
+    const closed = T.legacyDeleted(store.getLedger(opt.session));
+    out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). ${closed
+      ? `Its log was deleted in an older casebook, so it is not scanned on its own: run /casebook:scout ${opt.session} --force to place the mark.`
+      : 'It goes to the topic it points to when the session is scanned.'}`);
   },
 
   unmark({ pos }) {
