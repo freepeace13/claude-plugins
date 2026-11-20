@@ -960,7 +960,7 @@ test('discovery: new angles, nothing-new topics, deleted topics, and the score, 
 
   // A deleted topic is not offered again, unless --force.
   s.run(['delete', id]);
-  const env = reply(topic({ title: 'Testing reconnects across deploys', belongs: [2] }));
+  const env = reply(topic({ title: 'Testing reconnects across deploys', angle: 'testing', belongs: [2] }));
   assert.match(s.run(['discover'], { env }).out, /No topic matched/);
   assert.match(s.run(['discover', '--force'], { env }).out, /Testing reconnects across deploys/);
 });
@@ -1435,4 +1435,46 @@ test('a pick refuses when its sessions were logged again since; a reply with no 
     assert.strictEqual(r.out, 'Skipped: the scout found no topic', bad);
   }
   assert.strictEqual(logsJson(s).length, 1);
+});
+
+// ---------------------------------------------------------------- topics review, round 8
+
+test('a new angle with a similar title is a new log, and a deleted angle does not block it', () => {
+  const s = sandbox();
+  const tp = s.transcript('an8', 3);
+  const lag = JSON.parse(s.run(['scout', '--session', 'an8', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer lag' })) }).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'an8', '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer restarts', angle: 'reliability' })) }).out);
+  assert.strictEqual(r.status, 'created');
+  assert.notStrictEqual(r.logId, lag);
+  assert.match(s.run(['show', lag]).out, /^# Debugging Redis stream consumer lag$/m);
+  s.run(['delete', r.logId]);
+  const again = JSON.parse(s.run(['scout', '--session', 'an8', '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer restart', angle: 'architecture' })) }).out);
+  assert.strictEqual(again.status, 'created', 'another angle than the deleted one');
+});
+
+test('a nearby log changing during the model call does not rerun the scan', async () => {
+  const s = sandbox();
+  const near = JSON.parse(s.run(['scout', '--session', 'nb8', '--transcript', s.transcript('nb8', 3), '--auto', '--json'], { env: reply(topic({ title: 'Nearby work', angle: 'data' })) }).out).logId;
+  const tp = s.transcript('mn8', 3);
+  const before = s.calls().length;
+  const run = slow(s, ['scout', '--session', 'mn8', '--transcript', tp, '--json'], { ...reply(topic({ title: 'Own work' })), STUB_DELAY: '1200' });
+  await pause(600);
+  s.run(['mark', near, 'meanwhile']);
+  const r = await run;
+  assert.strictEqual(r.code, 0, r.stderr);
+  assert.strictEqual(s.calls().length, before + 1);
+  assert.match(s.run(['show', near]).out, /"note":"meanwhile"/);
+});
+
+test('scout output labels each log by its own partial state; pick mistakes are not logged as errors', () => {
+  const s = sandbox();
+  const l = JSON.parse(s.run(['scout', '--session', 'q1', '--transcript', s.transcript('q1', 3), '--json']).out).logId;
+  const tp2 = s.transcript('q2', 3);
+  s.run(['scout', '--session', 'q2', '--transcript', tp2, '--auto']);
+  const out = s.run(['scout', '--session', 'q2', '--transcript', s.transcript('q2', 12)], { env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [l] })) }).out;
+  assert.match(out, new RegExp(`Updated ${l} \\(score \\d, partial\\)`), 'q1 is still partial');
+  const p = s.run(['discover', 'pick', 'd-000000', '1']);
+  assert.strictEqual(p.status, 1);
+  const errLog = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
+  assert.ok(!fs.existsSync(errLog) || !/no discovery/.test(fs.readFileSync(errLog, 'utf8')));
 });

@@ -295,6 +295,9 @@ async function scanChain(g, config, opts) {
 
 // ---------- discover ----------
 
+/** A mistake the user can fix (an old discovery, a changed log): reported, not logged as a failure. */
+function userError(msg) { const err = new Error(msg); err.user = true; return err; }
+
 const discoveriesDir = () => path.join(paths.home(), 'state', 'discoveries');
 const newDiscoveryId = () => `d-${crypto.randomBytes(4).toString('hex').slice(0, 6)}`;
 
@@ -373,9 +376,9 @@ async function discover(config, o) {
 function pick(config, id, n) {
   const file = path.join(discoveriesDir(), `${id}.json`);
   const d = readJson(file, null);
-  if (!d) throw new Error(`no discovery "${id}" (discoveries are kept for 7 days)`);
+  if (!d) throw userError(`no discovery "${id}" (discoveries are kept for 7 days)`);
   const t = d.topics.find((x) => x.rank === Number(n));
-  if (!t) throw new Error(`discovery ${id} has no topic ${n}; pick 1 to ${d.topics.length}`);
+  if (!t) throw userError(`discovery ${id} has no topic ${n}; pick 1 to ${d.topics.length}`);
   const done = d.picked && d.picked[t.rank] && T.resolveLog(d.picked[t.rank]);
   if (done) return { status: 'exists', logId: done.meta.id, title: done.meta.title };
 
@@ -385,7 +388,7 @@ function pick(config, id, n) {
   try {
     for (const sid of sids) {
       const release = acquireSessionLock(sid, { wait: false, timeoutMs: (config.scout.timeoutSec || 240) * 1000 });
-      if (!release) throw new Error(`a scout of session ${sid.slice(0, 8)} is running; try again in a minute`);
+      if (!release) throw userError(`a scout of session ${sid.slice(0, 8)} is running; try again in a minute`);
       releases.push(release);
     }
     // Partial as of now, not as of the discovery: a session that has since settled is finished.
@@ -396,24 +399,24 @@ function pick(config, id, n) {
     const r = store.withWriteLock(() => {
       const gone = t.updates.filter((uid) => !T.resolveLog(uid));
       if (gone.length && gone.length === t.updates.length) {
-        throw new Error(`the log this topic updates is gone (${gone.join(', ')}); run discovery again`);
+        throw userError(`the log this topic updates is gone (${gone.join(', ')}); run discovery again`);
       }
       // The notes were taken from the logs as they were then: a log changed since would lose its new notes.
       const changed = t.updates.filter((uid) => {
         const l = T.resolveLog(uid);
         return l && t.targets && (l.meta.id !== uid || (l.meta.updated_at || l.meta.created_at || '') !== t.targets[uid]);
       });
-      if (changed.length) throw new Error(`${changed.join(', ')} changed since the discovery ran; run discovery again`);
+      if (changed.length) throw userError(`${changed.join(', ')} changed since the discovery ran; run discovery again`);
       // A log these sessions gained since may already tell this story: the discovery never weighed it.
       if (t.known) {
         // Logs made by earlier picks of this same discovery are other topics it listed, not news.
         const mineToo = Object.values(d.picked || {}).map((x) => T.resolveLog(x)).filter(Boolean).map((l) => l.meta.id);
         const fresh = T.logsForSessions(sids).map((l) => l.meta.id).filter((x) => !t.known.includes(x) && !t.updates.includes(x) && !mineToo.includes(x));
-        if (fresh.length) throw new Error(`these sessions were logged again since the discovery ran (${fresh.join(', ')}); run discovery again`);
+        if (fresh.length) throw userError(`these sessions were logged again since the discovery ran (${fresh.join(', ')}); run discovery again`);
       }
       const deleted = d.force ? [] : T.tombstones(sids);
       const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
-      if (!topic) throw new Error('this topic was deleted since the discovery ran; run discovery again, or with --force');
+      if (!topic) throw userError('this topic was deleted since the discovery ran; run discovery again, or with --force');
       const bySession = topic.marks ? sids.map((sid) => [sid, store.getMarks(sid)]) : [];
       // Exactly the logs the discovery listed: a title match it did not show is never overwritten.
       const res = T.applyTopic(topic, {
@@ -422,7 +425,11 @@ function pick(config, id, n) {
       for (const [sid, m] of bySession) store.consumeMarks(sid, m);
       return res;
     });
-    writeJsonAtomic(file, { ...d, picked: { ...(d.picked || {}), [t.rank]: r.logId } });
+    // Read it again under the lock: another pick of this discovery may have recorded its own log meanwhile.
+    store.withWriteLock(() => {
+      const now = readJson(file, d);
+      writeJsonAtomic(file, { ...now, picked: { ...(now.picked || {}), [t.rank]: r.logId } });
+    });
     return { ...r, sessions: sids, partial };
   } finally {
     for (const release of releases) release();

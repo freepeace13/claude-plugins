@@ -298,18 +298,21 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
     const markTargets = keep.some((x) => x.marks) ? keep.filter((x) => x.marks) : [keep[0]];
     const claimed = new Set();
     logs = store.withWriteLock(() => {
-      if (T.changedSince(versions, [sessionId])) return null;
+      const watch = [...new Set([...context.filter((l) => T.sessionsOf(l).includes(sessionId)).map((l) => l.meta.id), ...keep.flatMap((x) => x.same_as)])];
+      if (T.changedSince(versions, [sessionId], watch)) return null;
       const written = keep.map((topic) => T.applyTopic(topic, {
         members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits, claimed,
       }));
       store.consumeMarks(sessionId, pending);
+      // In the same lock as the logs: a delete right after must not be undone by this ledger write.
+      // applyTopic already lifted a 'deleted' flag, since the session has a log again.
+      store.setLedger(sessionId, {
+        project: info.project, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
+        logId: undefined, skipped: undefined,
+      });
       return written;
     });
   }
-  store.setLedger(sessionId, {
-    project: info.project, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
-    logId: undefined, skipped: undefined, deleted: undefined, deletedAt: undefined,
-  });
   const best = logs.reduce((a, b) => (b.score > a.score ? b : a));
   return { status: logs.some((l) => l.status === 'created') ? 'created' : 'updated', logId: best.logId, score: best.score, title: best.title, partial, logs };
 }

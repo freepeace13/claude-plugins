@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { paths } = require('./util');
+const { paths, ID_RE } = require('./util');
 
 const MAX_MSG = 2000;
 
@@ -87,8 +87,8 @@ function condense(file, maxChars = 60000) {
         if (b.type !== 'text' || !b.text) continue;
         const cmd = parseCommand(b.text);
         if (cmd) {
-          // A mark of another log by its ID is not a mark of this session.
-          if (/casebook:mark$/.test(cmd.name) && !/^cb-[a-z0-9]{6}\b/.test(cmd.args.trim())) commandMarks.push(cmd.args);
+          // A mark of another log by its ID is not a mark of this session (the same test as `casebook mark`).
+          if (/casebook:mark$/.test(cmd.name) && !ID_RE.test(cmd.args.trim().split(/\s+/)[0])) commandMarks.push(cmd.args);
           out.push(`USER: ${cmd.name} ${clip(cmd.args, 400)}`.trim());
           userTurns++;
           continue;

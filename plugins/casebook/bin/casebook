@@ -86,7 +86,7 @@ function parseLimit(v, fallback, flag = '--limit') {
 }
 
 function describe(r) {
-  const one = (l) => `${l.status === 'created' ? 'Created' : 'Updated'} ${l.logId} (score ${l.score}${r.partial ? ', partial' : ''}${r.logs && r.logs.length > 1 && l.angle ? `, ${l.angle}` : ''}): ${l.title}${l.merged && l.merged.length ? ` (merged ${l.merged.join(', ')})` : ''}`;
+  const one = (l) => `${l.status === 'created' ? 'Created' : 'Updated'} ${l.logId} (score ${l.score}${(l.partial ?? r.partial) ? ', partial' : ''}${r.logs && r.logs.length > 1 && l.angle ? `, ${l.angle}` : ''}): ${l.title}${l.merged && l.merged.length ? ` (merged ${l.merged.join(', ')})` : ''}`;
   if (r.status === 'created' || r.status === 'updated') return (r.logs && r.logs.length ? r.logs : [{ ...r }]).map(one).join('\n');
   if (r.status === 'running') return r.reason;
   if (r.status === 'error') return `Failed: ${r.reason}`;
@@ -113,7 +113,7 @@ function scoutPending(config, opt) {
   }
   const { results, locked } = sweep(config, o);
   if (locked) return out('A catch-up is already running. Check /casebook:list in a minute.');
-  if (opt.json) return out(JSON.stringify(results.map(({ sessionId, status, logId, reason, score, title, partial }) => ({ sessionId, status, logId, reason, score, title, partial }))));
+  if (opt.json) return out(JSON.stringify(results.map(({ sessionId, status, logId, reason, score, title, partial, logs }) => ({ sessionId, status, logId, reason, score, title, partial, logs }))));
   if (!results.length) return out('No sessions to catch up on.');
   for (const r of results) out(`${id8(r)}  ${describe(r)}`);
 }
@@ -392,7 +392,7 @@ const commands = {
     }
     const { locked } = sweep(config, {
       since, limit, settleMinutes: 0, partialIfRecent: true,
-      onResult: (c, r) => out(`${c.sessionId.slice(0, 8)}  ${r.status}${r.logId ? ' ' + r.logId : ''}${r.reason ? ' (' + r.reason + ')' : ''}${r.title ? ' — ' + r.title : ''}`),
+      onResult: (c, r) => out(`${c.sessionId.slice(0, 8)}  ${r.status}${r.logs && r.logs.length ? ' ' + r.logs.map((l) => l.logId).join(', ') : r.logId ? ' ' + r.logId : ''}${r.reason ? ' (' + r.reason + ')' : ''}${r.title ? ' — ' + r.title : ''}`),
     });
     if (locked) out('A catch-up is already running. Check /casebook:list in a minute.');
   },
@@ -457,7 +457,7 @@ if ('profile' in opt && fn && !opt.help && name !== 'help') {
 if (!fn || opt.help) commands.help();
 else {
   const onError = (err) => {
-    U.logError(`command ${name} failed`, err);
+    if (!err.user) U.logError(`command ${name} failed`, err);
     fail(err.message);
   };
   try {

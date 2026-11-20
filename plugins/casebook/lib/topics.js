@@ -139,7 +139,9 @@ function sameTitle(a, b) {
   const shared = [...x].filter((w) => y.has(w)).length;
   return shared / new Set([...x, ...y]).size >= 0.6;
 }
-const isTombstoned = (topic, deleted) => deleted.some((d) => sameTitle(d.title, topic.title));
+// Another angle on the same work is another topic, however alike the titles are.
+const sameAngle = (a, b) => !a || !b || String(a).toLowerCase() === String(b).toLowerCase();
+const isTombstoned = (topic, deleted) => deleted.some((d) => sameTitle(d.title, topic.title) && sameAngle(d.angle, topic.angle));
 
 /** A log by id, following merges: an id merged into another log resolves to the log that absorbed it. */
 function resolveLog(id) {
@@ -150,13 +152,15 @@ function resolveLog(id) {
 const versionsOf = (logs) => new Map(logs.map((l) => [l.meta.id, l.meta.updated_at || l.meta.created_at || '']));
 
 /**
- * Whether a scan's view is out of date: a log it was shown changed or went away, or the sessions gained a
- * log it was not shown. Its notes would then overwrite what another scan just wrote. Call under the lock.
+ * Whether a scan's view is out of date for what it is about to write: a log in `watch` (the logs it may
+ * write: those it names, and its sessions' own logs) changed or went away, or the sessions gained a log it
+ * was not shown. Its notes would then overwrite what another scan just wrote. Nearby logs it only read may
+ * change freely. Call under the lock.
  */
-function changedSince(versions, sids) {
-  for (const [id, v] of versions) {
+function changedSince(versions, sids, watch) {
+  for (const id of watch) {
     const l = store.findLog(id);
-    if (!l || (l.meta.updated_at || l.meta.created_at || '') !== v) return true;
+    if (!l || (l.meta.updated_at || l.meta.created_at || '') !== versions.get(id)) return true;
   }
   return logsForSessions(sids).some((l) => !versions.has(l.meta.id));
 }
@@ -228,7 +232,8 @@ function applyTopic(topic, ctx) {
     // Never log the same story twice for the same sessions, even if the model reworded the title and did not
     // say so. A log another topic of this scan already wrote is a different angle, not a twin.
     const mine = logsForSessions(sids).filter((l) => !claimed.has(l.meta.id));
-    const twin = mine.find((l) => normTitle(l.meta.title) === normTitle(topic.title)) || mine.find((l) => sameTitle(l.meta.title, topic.title));
+    const twin = mine.find((l) => normTitle(l.meta.title) === normTitle(topic.title))
+      || mine.find((l) => sameTitle(l.meta.title, topic.title) && sameAngle(l.meta.angle, topic.angle));
     if (twin) targets = [twin];
   }
   const relFiles = (m) => (ctx.info.root ? m.files.map((f) => path.relative(ctx.info.root, f) || f) : m.files);
@@ -290,7 +295,7 @@ function applyTopic(topic, ctx) {
   if (!survivor) {
     const log = store.createLogFile(ctx.info.project, { ...meta, written_to: [] }, body);
     claimed.add(log.meta.id);
-    return { status: 'created', logId: log.meta.id, score: topic.score, title: topic.title, angle: meta.angle, merged: [] };
+    return { status: 'created', logId: log.meta.id, score: topic.score, title: topic.title, angle: meta.angle, partial: meta.partial, merged: [] };
   }
   survivor.meta = {
     ...survivor.meta, ...meta,
@@ -305,7 +310,7 @@ function applyTopic(topic, ctx) {
     fs.rmSync(l.file, { force: true });
     try { fs.rmdirSync(path.dirname(l.file)); } catch { /* not empty */ }
   }
-  return { status: 'updated', logId: survivor.meta.id, score: meta.score, title: topic.title, angle: meta.angle, merged: merged.map((l) => l.meta.id) };
+  return { status: 'updated', logId: survivor.meta.id, score: meta.score, title: topic.title, angle: meta.angle, partial: meta.partial, merged: merged.map((l) => l.meta.id) };
 }
 
 module.exports = {
