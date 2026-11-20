@@ -298,7 +298,7 @@ Areas, in the order they appear in `voice.md`:
   > ## The symptom
   > ## The profile
   > ## The fix
-- rule: Make the opening paragraph sum up the whole piece. Within the outline's headings, keep sections short and lead each with its point, so a skimmer can follow along.
+- rule: Make the paragraph that first states the point sum up the whole piece. Within the outline's headings, keep sections short and lead each with its point, so a skimmer can follow along.
 
 #### `story` One story
 - description: Few headings. It reads straight through.
@@ -434,33 +434,33 @@ Areas, in the order they appear in `voice.md`:
 - description: A question to the reader, or an invitation to share.
 - preview:
   > What's the slowest fixture in your suite? I'd bet it's older than you think.
-- rule: End with a question or an invitation to the reader, in one sentence.
+- rule: End with a question or an invitation to the reader, in one sentence. This line may address the reader even when other rules keep them out of the text.
 
 ## Audience engagement and adaptability
 
 ### Q15 `depth`: active reading of the room
 
 - header: `15/16 Depth`
-- question: How much do you explain to the brief's reader?
+- question: How much background do you give the brief's reader?
 
 #### `brief` Just what they need
 - description: Explain only what the reader named in the brief wouldn't know.
 - preview:
   > (For backend engineers) The fixture ran migrate:fresh per file.
   > (For newcomers) The fixture rebuilt the database, every table from scratch, before each test file.
-- rule: Explain only what the brief's reader wouldn't know.
+- rule: Give only the background the brief's reader lacks. Word choice and terms follow the words rule.
 
 #### `more` Err toward more
-- description: Define terms the reader might only half know.
+- description: Background the reader might only half know.
 - preview:
   > The fixture ran migrate:fresh, which drops every table and runs all migrations again, before each test file.
-- rule: Explain a little more than the brief's reader needs: define terms they might only half know.
+- rule: Give a little more background than the brief's reader needs: the context they might only half know.
 
 #### `less` Err toward less
-- description: Skip anything the reader could look up.
+- description: Skip context the reader could look up.
 - preview:
   > The fixture ran migrate:fresh per file.
-- rule: Explain a little less than the brief's reader needs: skip anything they could look up.
+- rule: Give a little less background than the brief's reader needs: skip context they could look up.
 
 #### `hard` Hard part first
 - description: Whatever the reader, most words go to the hard part.
