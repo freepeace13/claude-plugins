@@ -4,11 +4,13 @@ Turns a notes file, folder or finished draft into a reviewed article or case stu
 
 ```text
 /plugin install porch@kinbasco-plugins
+/porch:voice
 /porch:brief notes/queue-backoff.md article "focus on the retry storm, skip the Redis tuning"
 /porch:draft 1a2b3c4d
 /porch:push 1a2b3c4d
 ```
 
+- `/porch:voice [--from <file>]` captures how you write. It asks 16 multiple-choice questions in 4 rounds, and every option shows the same short passage written in that style. It then writes a sample paragraph for you to approve and saves `$PORCH_HOME/voice.md` (see [Your voice](#your-voice)).
 - `/porch:brief <path> <article | case-study> [note]` first checks that the intake carries one topic (a concrete subject, a first-hand part, at least 3 concrete facts, a point; see [references/intake.md](references/intake.md)). It asks at most 3 questions and checks Porch for duplicates. Only then does it copy the file or folder into a new work folder and write `brief.md`. A thin intake creates nothing and tells you what to add.
 - `/porch:draft <id>` runs the writer agent on a ready brief and reviews the draft against it (2 revision rounds, then it hands back to you).
 - `/porch:push <id>` refuses unless the draft is approved and has no `<!-- verify` markers, then creates or updates the Porch draft.
@@ -16,13 +18,28 @@ Turns a notes file, folder or finished draft into a reviewed article or case stu
 
 Text only: no images in or out. Tags, covers and featuring stay admin steps; the work folder suggests tags.
 
+## Your voice
+
+[references/voice.md](references/voice.md) is the base voice. Its **Fixed** rules always apply: first person, no invented facts or numbers, and verify markers for anything unknown. Its **Defaults** (short sentences, no hype, no emoji, no closing summary, and so on) apply unless your voice says otherwise. `$PORCH_HOME/voice.md` extends it: where one of your rules covers the same thing as a Default, your rule wins.
+
+`/porch:voice` builds that file from 16 questions. Each one turns a speaking trait into a writing trait:
+
+| Area | Questions |
+|---|---|
+| Vocal characteristics → Rhythm | sentence length, pauses, pace, confidence, word choice |
+| Body language and stage presence → Presence | addressing the reader, openness about mistakes, emoji, feeling |
+| Content and delivery → Delivery | layout, how ideas come in, formality, formatting, endings |
+| Audience → Audience | assumed reader knowledge, how failures are told |
+
+Each answer writes a fixed rule from [references/voice-questions.md](references/voice-questions.md), so the same answers always give the same file. "Other" turns your own words into the rule. `--from <file>` reads a piece you wrote and marks the option it matches as "(Recommended)" on each question where the evidence is clear. Run it again to redo everything or one area. The old file is kept as `voice.md.bak`. A hand-written `voice.md` works too, since it also extends the base voice.
+
 ## The store
 
 Everything lives in one store, so the plugin works from any folder you start Claude Code in.
 
 ```text
 $PORCH_HOME                 default ~/.porch
-├── voice.md                optional: your voice rules, replacing the default
+├── voice.md                optional: your voice, from /porch:voice; extends the base voice
 ├── articles/<uuid>/
 └── case-studies/<uuid>/
     ├── state.json          id, type, status, title, topic, slug, tags, note, source, porch_id, timestamps

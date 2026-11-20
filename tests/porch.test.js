@@ -74,7 +74,7 @@ test('manifest and marketplace agree', () => {
 });
 
 test('skills and agent have name, description and valid tools', () => {
-  for (const f of ['skills/brief/SKILL.md', 'skills/draft/SKILL.md', 'skills/push/SKILL.md', 'agents/writer.md']) {
+  for (const f of ['skills/brief/SKILL.md', 'skills/draft/SKILL.md', 'skills/push/SKILL.md', 'skills/voice/SKILL.md', 'agents/writer.md']) {
     const fm = frontmatter(path.join(ROOT, f));
     assert.match(fm, /^name: \w+/m, f);
     assert.match(fm, /^description:/m, f);
@@ -96,7 +96,7 @@ test('brief and draft skills never get a create or update tool; push is user-onl
 });
 
 test('every references/ file named in the prompts exists', () => {
-  const files = ['skills/brief/SKILL.md', 'skills/draft/SKILL.md', 'skills/push/SKILL.md', 'agents/writer.md'];
+  const files = ['skills/brief/SKILL.md', 'skills/draft/SKILL.md', 'skills/push/SKILL.md', 'skills/voice/SKILL.md', 'agents/writer.md'];
   for (const f of files) {
     const text = fs.readFileSync(path.join(ROOT, f), 'utf8');
     for (const m of text.matchAll(/references\/([\w-]+\.md)/g)) {
@@ -120,6 +120,81 @@ test('point-of-view rule is in the brief, voice, intake, review and writer', () 
   }
   assert.match(read('skills/brief/SKILL.md'), /point of view/);
   assert.match(read('skills/draft/SKILL.md'), /"the owner", "the user", "operator" and "Claude"/);
+});
+
+// Voice: base voice with Fixed and Defaults, the question bank, and voice_user wiring.
+test('base voice has Fixed rules before Defaults, and the POV rule is fixed', () => {
+  const v = fs.readFileSync(path.join(ROOT, 'references/voice.md'), 'utf8');
+  const fixed = v.indexOf('\n## Fixed\n');
+  const defaults = v.indexOf('\n## Defaults\n');
+  assert.ok(fixed > 0 && defaults > fixed);
+  assert.match(v.slice(fixed, defaults), /first person/);
+  assert.match(v.slice(fixed, defaults), /Numbers only when they are facts/);
+});
+
+function questionBank() {
+  const text = fs.readFileSync(path.join(ROOT, 'references/voice-questions.md'), 'utf8');
+  return text.split(/\n### Q/).slice(1).map((block) => {
+    const head = block.match(/^(\d+) `(\w+)`/);
+    const options = block.split(/\n#### /).slice(1).map((o) => ({
+      id: o.match(/^`(\w+)`/)[1],
+      label: o.match(/^`\w+` (.+)/)[1],
+      description: /\n- description: \S/.test(o),
+      preview: /\n- preview:\n  > \S/.test(o),
+      rule: (o.match(/\n- rule: (.+)/) || [])[1],
+    }));
+    return {
+      n: Number(head[1]),
+      id: head[2],
+      header: (block.match(/\n- header: `([^`]+)`/) || [])[1],
+      question: (block.match(/\n- question: (.+\?)\n/) || [])[1],
+      options,
+    };
+  });
+}
+
+test('voice bank has 16 questions with 2 to 4 options, each with a preview and a rule', () => {
+  const qs = questionBank();
+  assert.strictEqual(qs.length, 16);
+  qs.forEach((q, i) => {
+    assert.strictEqual(q.n, i + 1);
+    assert.ok(q.header && q.header.length <= 12, `${q.id} header`);
+    assert.ok(q.header.startsWith(`${i + 1}/16 `), `${q.id} header count`);
+    assert.ok(q.question, `${q.id} question`);
+    assert.ok(q.options.length >= 2 && q.options.length <= 4, `${q.id} options`);
+    assert.strictEqual(new Set(q.options.map((o) => o.id)).size, q.options.length, `${q.id} ids`);
+    for (const o of q.options) {
+      assert.ok(o.label.split(/\s+/).length <= 5, `${q.id}.${o.id} label`);
+      assert.ok(o.description && o.preview && o.rule, `${q.id}.${o.id}`);
+    }
+  });
+  assert.strictEqual(new Set(qs.map((q) => q.id)).size, 16);
+});
+
+test('voice skill lists every question id in its format, and each area table row exists', () => {
+  const skill = fs.readFileSync(path.join(ROOT, 'skills/voice/SKILL.md'), 'utf8');
+  const bank = fs.readFileSync(path.join(ROOT, 'references/voice-questions.md'), 'utf8');
+  for (const q of questionBank()) {
+    assert.match(skill, new RegExp(`\\n  ${q.id}: \\w+`), q.id);
+    assert.match(skill, new RegExp(`<${q.id} rule>`), q.id);
+    assert.match(bank.split('\n## ')[0], new RegExp(`\\b${q.id}\\b`), `area table ${q.id}`);
+  }
+  for (const h of ['Rhythm', 'Presence', 'Delivery', 'Audience']) assert.match(skill, new RegExp(`\\n## ${h}\\n`));
+});
+
+test('voice skill writes only the voice file and never calls Porch', () => {
+  const fm = frontmatter(path.join(ROOT, 'skills/voice/SKILL.md'));
+  assert.match(fm, /^allowed-tools: Read, Write, AskUserQuestion, Bash\(porch:\*\)$/m);
+  assert.doesNotMatch(fm, /mcp__/);
+});
+
+test('brief, writer and review read the base voice and voice_user', () => {
+  const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+  for (const f of ['references/brief.md', 'skills/brief/SKILL.md', 'agents/writer.md', 'skills/draft/SKILL.md']) {
+    assert.match(read(f), /voice_user/, f);
+  }
+  for (const f of ['agents/writer.md', 'skills/draft/SKILL.md']) assert.match(read(f), /references\/voice\.md/, f);
+  assert.match(read('agents/writer.md'), /Fixed rules always apply/);
 });
 
 // porch CLI: work folders in $PORCH_HOME.

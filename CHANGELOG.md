@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- porch 0.3.0: `/porch:voice [--from <file>]` asks 16 multiple-choice questions (each option previews a passage in that style) on rhythm, presence, delivery and audience, approves a sample paragraph and writes `$PORCH_HOME/voice.md`; reruns can redo one area, keeping the old file as `voice.md.bak`
+- porch: `$PORCH_HOME/voice.md` now extends the base voice instead of replacing it. `references/voice.md` splits into Fixed rules (always apply) and Defaults (your voice overrides them); briefs name the base as `voice` and your file as `voice_user`
 - casebook: `/casebook:handoff <id…>` checks logs against `handoff.md` and writes a handoff folder (`handoff.md` + `logs/`) for a writer; `casebook out-path --handoff` names the folder
 - casebook: `out-path` names files and folders with the local date instead of the UTC date
 

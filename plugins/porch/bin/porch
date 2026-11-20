@@ -3,7 +3,7 @@
 // porch CLI: manages work folders in the Porch store. On PATH inside Claude Code while the plugin is enabled.
 //
 // Store: $PORCH_HOME (default ~/.porch)
-//   voice.md                      optional, replaces the plugin's default voice
+//   voice.md                      optional, written by /porch:voice; extends the plugin's base voice
 //   articles/<uuid>/              one work folder per piece
 //   case-studies/<uuid>/
 //     state.json                  id, type, status, title, topic, slug, tags, timestamps, ...
