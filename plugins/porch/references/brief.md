@@ -15,7 +15,8 @@ topic: Queue retries storming Redis after deploys
 slug: backoff-after-deploys
 status: ready            # draft | ready
 plugin_root: /abs/path/to/plugin
-voice: /abs/path/to/voice.md   # $PORCH_HOME/voice.md when present, else references/voice.md
+voice: /abs/path/to/plugin/references/voice.md   # base voice, always
+voice_user: /abs/path/to/voice.md                # $PORCH_HOME/voice.md, only when present; extends the base
 reader: Backend engineers running queue workers
 pov: first person, the site owner is the author   # fixed; never "the owner" or "the user"
 thesis: One sentence the whole piece defends
@@ -55,7 +56,7 @@ stack: [Laravel, Redis]  # case study only
 - AC-2 States the thesis in the first two paragraphs
 - AC-3 Follows the outline's section order and headings
 - AC-4 Length within range
-- AC-5 Passes voice.md rules; first person throughout, no "the owner", "the user" or operator
+- AC-5 Passes the voice rules (base Fixed rules, then voice_user, then the base Defaults it does not cover; for an author's finished draft, only what the writer added can fail); first person throughout, no "the owner", "the user" or operator
 - AC-6 Never names anything in never_name
 - AC-7 Follows body-format.md and the type's template
 - AC-8+ Piece-specific criteria added by intake
