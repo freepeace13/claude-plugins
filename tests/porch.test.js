@@ -205,7 +205,7 @@ test('brief, writer and review read the base voice and voice_user', () => {
   assert.match(draft, /set `voice_user` to it; otherwise remove the `voice_user` line/);
   assert.match(draft, /For `kind=draft`.*AC-5 checks only the Fixed rules/);
   const voice = read('skills/voice/SKILL.md');
-  assert.match(voice, /`voice\.md\.bak`; if that already exists, read it before writing/);
+  assert.match(voice, /voice\.md\.bak`; if that already exists, read it before writing/);
   assert.match(voice, /voice\.handwritten-2\.md/);
   assert.match(voice, /both `generated_by: \/porch:voice` and `answers`/);
   assert.match(voice, /The `updated` date and the Sample section are always new/);
