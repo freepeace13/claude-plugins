@@ -200,6 +200,12 @@ test('brief, writer and review read the base voice and voice_user', () => {
   }
   for (const f of ['agents/writer.md', 'skills/draft/SKILL.md']) assert.match(read(f), /references\/voice\.md/, f);
   assert.match(read('agents/writer.md'), /Fixed rules always apply/);
+  const draft = read('skills/draft/SKILL.md');
+  assert.match(draft, /set `plugin_root` to `\$\{CLAUDE_PLUGIN_ROOT\}`/);
+  assert.match(draft, /add `voice_user` with that path/);
+  const voice = read('skills/voice/SKILL.md');
+  assert.match(voice, /If a `voice\.md\.bak` already exists, read it before writing/);
+  assert.match(voice, /The `updated` date and the Sample section are always new/);
 });
 
 // porch CLI: work folders in $PORCH_HOME.

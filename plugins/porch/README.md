@@ -75,6 +75,10 @@ An id may be any unique prefix of 4 or more characters. `init` copies real files
 
 The writer agent writes `draft.md` in the store, outside your project, so Claude Code may ask before the first write. Allow `Write(~/.porch/**)` to skip the prompt.
 
+## Upgrading from 0.2.0
+
+A hand-written `$PORCH_HOME/voice.md` used to replace the base voice. It now extends it, so the base Defaults (short sentences, no emoji, no hedging, no closing summary) apply on every point your file does not cover. Add a rule for each one you want changed (for example "Long, flowing sentences are fine"), or run `/porch:voice`. `/porch:draft` points older briefs at the current plugin folder and at your voice file before writing.
+
 ## Upgrading from 0.1.0
 
 0.1.0 kept work in `<project>/.porch/<slug>/`. Those folders are no longer read. Import them from each project:
