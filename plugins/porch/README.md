@@ -10,7 +10,7 @@ Turns a notes file, folder or finished draft into a reviewed article or case stu
 /porch:push 1a2b3c4d
 ```
 
-- `/porch:voice [--from <file>]` captures how you write. It asks 16 multiple-choice questions in 4 rounds, and every option shows the same short passage written in that style. It then writes a sample paragraph for you to approve and saves `$PORCH_HOME/voice.md` (see [Your voice](#your-voice)).
+- `/porch:voice [--from <file>]` captures how you write. It asks 16 multiple-choice questions in 4 rounds, and every option previews one topic written in that style. It then writes a sample paragraph for you to approve and saves `$PORCH_HOME/voice.md` (see [Your voice](#your-voice)).
 - `/porch:brief <path> <article | case-study> [note]` first checks that the intake carries one topic (a concrete subject, a first-hand part, at least 3 concrete facts, a point; see [references/intake.md](references/intake.md)). It asks at most 3 questions and checks Porch for duplicates. Only then does it copy the file or folder into a new work folder and write `brief.md`. A thin intake creates nothing and tells you what to add.
 - `/porch:draft <id>` runs the writer agent on a ready brief and reviews the draft against it (2 revision rounds, then it hands back to you).
 - `/porch:push <id>` refuses unless the draft is approved and has no `<!-- verify` markers, then creates or updates the Porch draft.
@@ -29,9 +29,9 @@ Text only: no images in or out. Tags, covers and featuring stay admin steps; the
 | Vocal characteristics → Rhythm | sentence length, pauses, pace, confidence, word choice |
 | Body language and stage presence → Presence | addressing the reader, openness about mistakes, emoji, feeling |
 | Content and delivery → Delivery | layout, how ideas come in, formality, formatting, endings |
-| Audience → Audience | assumed reader knowledge, how failures are told |
+| Audience → Audience | how much to explain to the brief's reader, how failures are told |
 
-Each answer writes a fixed rule from [references/voice-questions.md](references/voice-questions.md), so the same answers always give the same file. "Other" turns your own words into the rule. `--from <file>` reads a piece you wrote and marks the option it matches as "(Recommended)" on each question where the evidence is clear. Run it again to redo everything or one area. The old file is kept as `voice.md.bak`. A hand-written `voice.md` works too, since it also extends the base voice.
+Each answer writes a fixed rule from [references/voice-questions.md](references/voice-questions.md), so the same answers always give the same rules (the sample paragraph and the date change on each run). A rule never asks for content the brief lacks, and the brief's reader, outline and length always win. "Other" turns your own words into the rule. `--from <file>` reads a piece you wrote and marks the option it matches as "(Recommended)" on each question where the evidence is clear. Run it again to redo everything or one area. The old file is kept as `voice.md.bak`. A hand-written `voice.md` works too, since it also extends the base voice.
 
 ## The store
 

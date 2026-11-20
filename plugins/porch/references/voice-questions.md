@@ -1,6 +1,10 @@
 # Voice questions
 
-`/porch:voice` asks these 16 questions to capture how the author writes. Each one turns a trait of a good speaker into its equivalent on the page. Every option has a preview, which is the same short passage written in that style, so the author picks by ear instead of by label. Each option also has the rule it writes into `voice.md`. The previews are samples: their content is invented.
+`/porch:voice` asks these 16 questions to capture how the author writes. Each one turns a trait of a good speaker into its equivalent on the page. Every option has a preview, which shows one topic written in that option's style, so the author picks by ear instead of by label. Each option also has the rule it writes into `voice.md`. The previews are samples: their content is invented.
+
+A rule never asks for content the brief does not give. Where a style needs a feeling, a moment, a cost or a next step, the rule applies only when the brief has it. The brief's reader, outline and length, the type's template and `body-format.md` always win over a voice rule.
+
+Labels are at most 4 words, so ` (Recommended)` still fits.
 
 Each question has an id (the key in `voice.md`'s `answers`), an area, the `header` chip (at most 12 characters) and the question text. Each option has an id, a label (shown as the choice), a description, a preview and a rule. When the author picks "Other", their own words become the rule (see the skill).
 
@@ -49,7 +53,7 @@ Areas, in the order they appear in `voice.md`:
 - header: `2/16 Pauses`
 - question: How do you make a key point land?
 
-#### `none` Let the sentence do it
+#### `none` The sentence does it
 - description: No dramatic breaks. The words carry the weight.
 - preview:
   > Caching the fixture cut the run from 14 minutes to 3, which was the only change that mattered.
@@ -63,7 +67,7 @@ Areas, in the order they appear in `voice.md`:
   > The fixture was the whole problem.
 - rule: Land a section's key point in a one-line paragraph, at most twice per piece.
 
-#### `dash` A dash or colon first
+#### `dash` Dash or colon first
 - description: A beat before the payoff, inside the sentence.
 - preview:
   > I tried three fixes before profiling. The answer was the one thing I hadn't looked at: the fixture.
@@ -98,7 +102,7 @@ Areas, in the order they appear in `voice.md`:
   > It was the third time that week I'd pushed a one-line fix and gone to make coffee while CI ran.
   >
   > The run took 14 minutes, and most of it was one fixture.
-- rule: Open with a short scene of one paragraph at most, and state the point in the second paragraph.
+- rule: When the brief gives a concrete moment, open with it as a short scene of one paragraph at most. Otherwise open with context. State the point by the second paragraph.
 
 #### `question` With the question
 - description: Open with the question the piece answers.
@@ -127,7 +131,7 @@ Areas, in the order they appear in `voice.md`:
 - description: Show the doubts you had at the time, and what you still don't know.
 - preview:
   > I wasn't sure caching would hold. Some tests might write to those tables, and I still haven't checked all of them.
-- rule: Show the reasoning as it happened, including doubts at the time. Say plainly what you still don't know, without apologising.
+- rule: Show the reasoning as it happened, including the doubts the brief records. Say plainly what is still unknown, without apologising.
 
 #### `strong` Strong opinions
 - description: Direct advice, in the imperative.
@@ -198,7 +202,7 @@ Areas, in the order they appear in `voice.md`:
 - description: Say what went wrong and what it cost.
 - preview:
   > I added parallel workers first. It made the run flaky and cost me two days.
-- rule: Name your mistakes plainly, with what they cost.
+- rule: Name your mistakes plainly, with what they cost when the brief says.
 
 #### `relevant` When it matters
 - description: Mention a mistake when the story needs it.
@@ -236,7 +240,7 @@ Areas, in the order they appear in `voice.md`:
   > - ❌ Add more workers
 - rule: Use emoji only as status markers at the start of a list item (✅, ❌, ⚠️). Never inside a sentence.
 
-#### `tone` Now and then, for tone
+#### `tone` Sometimes, for tone
 - description: An emoji may close a sentence to show how you feel.
 - preview:
   > Caching the fixture worked. The run takes 3 minutes now 🎉
@@ -269,13 +273,13 @@ Areas, in the order they appear in `voice.md`:
 - description: Show the fun and the frustration.
 - preview:
   > Watching the run finish in 3 minutes for the first time felt ridiculous, in the best way.
-- rule: Let warmth and playfulness show, including frustration and relief.
+- rule: Let warmth and playfulness show in how you tell it. Name a feeling, such as frustration or relief, only when the brief gives it.
 
 #### `excited` Enthusiastic
 - description: Show excitement when something works. Exclamation marks allowed.
 - preview:
   > Three minutes! From fourteen! I reran it twice to be sure.
-- rule: Show excitement when something works. An exclamation mark is fine, at most one per section.
+- rule: Show excitement when a result in the brief works. An exclamation mark is fine, at most one per section.
 
 ## Content and delivery style
 
@@ -285,14 +289,14 @@ Areas, in the order they appear in `voice.md`:
 - question: How do you lay a piece out?
 
 #### `skim` Built for skimming
-- description: The opening paragraph sums it up. A heading every few paragraphs.
+- description: The opening paragraph sums it up. Each section leads with its point.
 - preview:
   > Caching one fixture took our test run from 14 minutes to 3. Here's how I found it.
   >
   > ## The symptom
   > ## The profile
   > ## The fix
-- rule: Make the opening paragraph sum up the whole piece, and break sections so a skimmer can follow the headings alone.
+- rule: Make the opening paragraph sum up the whole piece. Within the outline's headings, keep sections short and lead each with its point, so a skimmer can follow along.
 
 #### `story` One story
 - description: Few headings. It reads straight through.
@@ -302,7 +306,7 @@ Areas, in the order they appear in `voice.md`:
   > The first thing it showed was the fixture.
 - rule: Use only the outline's headings, no extra subheadings, and join sections with a linking sentence.
 
-#### `steps` Steps where there's a sequence
+#### `steps` Numbered steps
 - description: Numbered steps whenever the reader would follow along.
 - preview:
   > 1. Profile the run.
@@ -335,7 +339,7 @@ Areas, in the order they appear in `voice.md`:
   > DatabaseFixture  11m 02s
   > ```
   > One fixture, 11 minutes.
-- rule: Bring in each idea with the code or output that shows it, then explain it.
+- rule: After the opening paragraph, bring in each idea with the code or output from the brief that shows it, then explain it. Without one, state the idea first.
 
 #### `contrast` Before and after
 - description: Show the two states side by side.
@@ -348,7 +352,7 @@ Areas, in the order they appear in `voice.md`:
 - header: `12/16 Tone`
 - question: How formal is your writing?
 
-#### `casual` Like talking to a teammate
+#### `casual` Teammate talk
 - description: Contractions, asides, the odd "honestly".
 - preview:
   > Honestly, I'd ignored it for months. It's the kind of thing you stop seeing.
@@ -375,9 +379,9 @@ Areas, in the order they appear in `voice.md`:
 - description: Paragraphs, with code blocks only when needed.
 - preview:
   > I profiled the run, found the fixture and cached it. The change was four lines.
-- rule: Write in paragraphs. Use a code block only when the code is the point. No bold, and no lists unless the outline needs one.
+- rule: Write in paragraphs. Use a code block only when the code is the point. No bold. Use a list only for steps or when the outline needs one.
 
-#### `lists` Prose and the odd list
+#### `lists` Prose, odd list
 - description: Mostly paragraphs, a list when items really are a list.
 - preview:
   > Three things didn't help:
@@ -406,7 +410,7 @@ Areas, in the order they appear in `voice.md`:
 - header: `14/16 Ending`
 - question: How do you end a piece?
 
-#### `stop` Stop at the last point
+#### `stop` Stop at the end
 - description: When it's said, it's done.
 - preview:
   > ...and the run has stayed at 3 minutes since.
@@ -422,7 +426,7 @@ Areas, in the order they appear in `voice.md`:
 - description: What you'd do next, or what is still open.
 - preview:
   > Next I want to split the fixture so the tests that need only users don't build the rest.
-- rule: End with what you would do next or what is still open, in one or two sentences.
+- rule: When the brief gives a next step or an open question, end with it in one or two sentences. Otherwise end on the last point.
 
 #### `invite` An invitation
 - description: A question to the reader, or an invitation to share.
@@ -435,32 +439,32 @@ Areas, in the order they appear in `voice.md`:
 ### Q15 `depth`: active reading of the room
 
 - header: `15/16 Depth`
-- question: How much do you assume your reader knows?
+- question: How much do you explain to the brief's reader?
 
-#### `brief` Match the brief's reader
+#### `brief` Just what they need
 - description: Explain only what the reader named in the brief wouldn't know.
 - preview:
   > (For backend engineers) The fixture ran migrate:fresh per file.
   > (For newcomers) The fixture rebuilt the database, every table from scratch, before each test file.
-- rule: Match depth to the brief's reader. Explain only what that reader wouldn't know.
+- rule: Explain only what the brief's reader wouldn't know.
 
-#### `newcomer` From the ground up
-- description: Explain the basics so anyone can follow.
+#### `more` Err toward more
+- description: Define terms the reader might only half know.
 - preview:
-  > Tests need data to start from. That data is called a fixture, and ours was rebuilt before every file.
-- rule: Write so a newcomer can follow. Explain the basics before the specifics.
+  > The fixture ran migrate:fresh, which drops every table and runs all migrations again, before each test file.
+- rule: Explain a little more than the brief's reader needs: define terms they might only half know.
 
-#### `working` A working developer
-- description: Skip the basics, explain the specifics.
+#### `less` Err toward less
+- description: Skip anything the reader could look up.
 - preview:
-  > The fixture ran a full migration per test file. That's fine for 10 files. We had 400.
-- rule: Assume a working developer. Skip the basics and explain what is specific to this case.
+  > The fixture ran migrate:fresh per file.
+- rule: Explain a little less than the brief's reader needs: skip anything they could look up.
 
-#### `senior` A senior peer
-- description: Straight to the hard part.
+#### `hard` Hard part first
+- description: Whatever the reader, most words go to the hard part.
 - preview:
   > Per-file migrate:fresh was the cost. Transactions weren't an option because of the queue tests.
-- rule: Assume a senior peer. Go straight to the hard part and the trade-offs.
+- rule: Spend most words on the hard part and the trade-offs, and keep the basics to a line.
 
 ### Q16 `pressure`: composure under pressure
 
@@ -471,13 +475,13 @@ Areas, in the order they appear in `voice.md`:
 - description: What broke, what I did, what changed. No drama.
 - preview:
   > At 14:10 the deploy went out. By 14:20 the queue had backed up. I rolled back at 14:25.
-- rule: Tell failures as a calm timeline: what broke, what you did, what changed.
+- rule: Tell failures calmly and in order: what broke, what you did, what changed. Give times only when the brief has them.
 
 #### `candid` Candid, with feeling
 - description: Including how it felt at the time.
 - preview:
   > The queue backed up ten minutes after the deploy, and my stomach dropped. I rolled back.
-- rule: Tell failures candidly, including how they felt at the time, in a sentence or two, then get back to what you did.
+- rule: Tell failures candidly. When the brief says how it felt, give that a sentence or two, then get back to what you did.
 
 #### `blameless` Blameless
 - description: Systems, not people. What the system allowed and what changed.

@@ -164,7 +164,8 @@ test('voice bank has 16 questions with 2 to 4 options, each with a preview and a
     assert.ok(q.options.length >= 2 && q.options.length <= 4, `${q.id} options`);
     assert.strictEqual(new Set(q.options.map((o) => o.id)).size, q.options.length, `${q.id} ids`);
     for (const o of q.options) {
-      assert.ok(o.label.split(/\s+/).length <= 5, `${q.id}.${o.id} label`);
+      // At most 4 words, so ' (Recommended)' still fits the 5-word label limit.
+      assert.ok(o.label.split(/\s+/).length <= 4, `${q.id}.${o.id} label`);
       assert.ok(o.description && o.preview && o.rule, `${q.id}.${o.id}`);
     }
   });
@@ -177,8 +178,12 @@ test('voice skill lists every question id in its format, and each area table row
   for (const q of questionBank()) {
     assert.match(skill, new RegExp(`\\n  ${q.id}: \\w+`), q.id);
     assert.match(skill, new RegExp(`<${q.id} rule>`), q.id);
-    assert.match(bank.split('\n## ')[0], new RegExp(`\\b${q.id}\\b`), `area table ${q.id}`);
   }
+  // Each area's table row lists exactly its questions, in bank order.
+  const rows = bank.split('\n## ')[0].split('\n').filter((l) => /^\| [A-Z]/.test(l) && !l.startsWith('| Area'));
+  const listed = rows.flatMap((r) => r.split('|')[3].split(',').map((s) => s.trim()));
+  assert.strictEqual(rows.length, 4);
+  assert.deepStrictEqual(listed, questionBank().map((q) => q.id));
   for (const h of ['Rhythm', 'Presence', 'Delivery', 'Audience']) assert.match(skill, new RegExp(`\\n## ${h}\\n`));
 });
 

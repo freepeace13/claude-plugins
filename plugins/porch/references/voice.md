@@ -11,6 +11,7 @@ Every draft follows this file. The author's own voice, `$PORCH_HOME/voice.md` (d
 - Numbers only when they are facts in the brief. Never round up, never imply a number.
 - Never add a fact, name, timeline or result that the brief does not give. If something is unknown, write around it and mark it with a verify comment.
 - A voice file's sample paragraph shows rhythm and tone only. Never reuse its content.
+- The brief's reader, outline and length, the type's template and `body-format.md` win over any voice rule. A voice rule that needs content the brief does not give (a feeling, a moment, a next step) does not apply.
 
 ## Defaults
 
