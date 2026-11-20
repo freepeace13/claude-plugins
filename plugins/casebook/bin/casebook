@@ -305,7 +305,7 @@ const commands = {
       return logs.length === 1 ? store.applyMark(logs[0], note) : null;
     });
     if (one) return out(`📌 Marked ${one.meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
-    const marks = store.addPendingMark(opt.session, note);
+    const marks = store.withWriteLock(() => store.addPendingMark(opt.session, note));
     out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). It goes to the topic it points to when the session is scanned.`);
   },
 

@@ -138,6 +138,13 @@ function addPendingMark(sid, note) {
   return marks;
 }
 const clearMarks = (sid) => fs.rmSync(marksFile(sid), { force: true });
+/** Remove only the marks a scan placed: a mark added while the scan ran stays for the next one. */
+function consumeMarks(sid, used) {
+  const key = (m) => `${m.at}|${m.note || ''}`;
+  const gone = new Set(used.map(key));
+  const left = getMarks(sid).filter((m) => !gone.has(key(m)));
+  if (left.length) writeJsonAtomic(marksFile(sid), left); else clearMarks(sid);
+}
 
 /** Remove a log's marks, and remember their notes so a /casebook:mark found in a transcript is not re-added. */
 // Empty notes count too: a bare /casebook:mark is found in the transcript as ''.
@@ -160,5 +167,5 @@ function applyMark(log, note) {
 
 module.exports = {
   listProjects, allLogs, findLog, readLog, saveLog, createLogFile, deleteLog, withWriteLock,
-  getLedger, setLedger, getMarks, addPendingMark, clearMarks, applyMark, clearLogMarks,
+  getLedger, setLedger, getMarks, addPendingMark, clearMarks, consumeMarks, applyMark, clearLogMarks,
 };

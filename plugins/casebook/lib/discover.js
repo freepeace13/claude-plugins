@@ -80,7 +80,10 @@ function collectSessions(config, { project, since, exclude, force }) {
       });
     }
   }
-  return out.sort((a, b) => t0(a.startedAt) - t0(b.startedAt));
+  // One session can sit in two project folders (resumed from another directory): keep its newest transcript.
+  const newest = new Map();
+  for (const s of out) if (!newest.has(s.sessionId) || newest.get(s.sessionId).mtimeMs < s.mtimeMs) newest.set(s.sessionId, s);
+  return [...newest.values()].sort((a, b) => t0(a.startedAt) - t0(b.startedAt));
 }
 
 /** The first cwd recorded in a transcript, from its first 64 KB only; null if none is found there. */
@@ -114,9 +117,11 @@ function linkReason(a, b, latestBefore) {
   const handoff = a.files.find((f) => {
     const name = base(f);
     if (COMMON_DOCS.test(name)) return false;
-    // Only a real file name counts as a mention (handoff.md, not the word "casebook").
-    const mentioned = /^[^.].*\.\w+$/.test(name) && name.length >= 6 && hasWord(opening, name.toLowerCase());
-    return mentioned || (DOC_RE.test(f) && b.readFiles.includes(f));
+    // Only a document someone wrote to hand over counts (handoff.md, notes.txt), never code or a manifest:
+    // a later session naming package.json is not continuing the work.
+    if (!DOC_RE.test(name) || /^skill\.md$/i.test(name)) return false;
+    const mentioned = name.length >= 6 && hasWord(opening, name.toLowerCase());
+    return mentioned || b.readFiles.includes(f);
   });
   if (handoff) return { strength: 3, why: `${b.sessionId.slice(0, 8)} picks up ${base(handoff)} from ${a.sessionId.slice(0, 8)}` };
   const shared = a.files.filter((f) => b.files.includes(f));
@@ -157,7 +162,7 @@ function linkSessions(sessions) {
   for (const e of edges) {
     const ra = find(e.a.sessionId);
     const rb = find(e.b.sessionId);
-    if (ra === rb) { reasons.get(ra).add(e.why); continue; }
+    if (ra === rb) { if (!reasons.has(ra)) reasons.set(ra, new Set()); reasons.get(ra).add(e.why); continue; }
     if (size.get(ra) + size.get(rb) > MAX_CHAIN) continue;
     parent.set(rb, ra);
     size.set(ra, size.get(ra) + size.get(rb));
@@ -268,10 +273,10 @@ async function scanChain(g, config, opts) {
   const found = T.parseTopics(await runClaudeAsync(prompt, config), maxTopics);
   const byId = new Map(context.map((l) => [l.meta.id, l]));
   const out = [];
-  for (const topic of T.screenTopics(found, deleted)) {
+  for (const topic of T.screenTopics(found, deleted, context)) {
     const idx = [...new Set(topic.belongs.filter((i) => i >= 1 && i <= g.members.length))].sort((a, b) => a - b);
     const members = idx.length ? idx.map((i) => g.members[i - 1]) : g.members;
-    const same = topic.same_as.map((id) => byId.get(id) || T.resolveLog(id)).filter(Boolean);
+    const same = topic.same_as.map((id) => byId.get(id) || T.resolveLog(id)).filter(Boolean);  // screened: shown logs only
     // Already logged with these very sessions and nothing to merge: not a discovery.
     if (same.length === 1 && members.every((m) => T.sessionsOf(same[0]).includes(m.sessionId))) continue;
     out.push({
@@ -395,11 +400,14 @@ function pick(config, id, n) {
     // Partial as of now, not as of the discovery: a session that has since settled is finished.
     const settled = Date.now() - (config.sweep.settleMinutes || 0) * 60000;
     const partial = sids.some((sid) => { const f = findTranscript(sid); try { return f && fs.statSync(f).mtimeMs > settled; } catch { return false; } });
-    const pending = topic.marks ? sids.flatMap((sid) => store.getMarks(sid)) : [];
-    const r = store.withWriteLock(() => T.applyTopic(topic, {
-      members: t.members, info: t.info, marks: pending, partial, mode: 'discovery', note: d.note, commits: t.commits,
-    }));
-    if (pending.length) for (const sid of sids) store.clearMarks(sid);
+    const r = store.withWriteLock(() => {
+      const bySession = topic.marks ? sids.map((sid) => [sid, store.getMarks(sid)]) : [];
+      const res = T.applyTopic(topic, {
+        members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), partial, mode: 'discovery', note: d.note, commits: t.commits,
+      });
+      for (const [sid, m] of bySession) store.consumeMarks(sid, m);
+      return res;
+    });
     writeJsonAtomic(file, { ...d, picked: { ...(d.picked || {}), [t.rank]: r.logId } });
     return { ...r, sessions: sids, partial };
   } finally {

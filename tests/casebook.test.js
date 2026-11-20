@@ -1263,3 +1263,88 @@ test('linking: "continuous" is not a continuation; reasons name no repo or branc
   const [pg] = linkSessions([sess('a', { prUrls: pr, policy: 'public' }), sess('b', { prUrls: pr, policy: 'public' })]);
   assert.match(pg.reasons.join(), /acme-corp\/billing\/pull\/12/);
 });
+
+// ---------------------------------------------------------------- topics review, round 5
+
+const slow = (s, args, env) => new Promise((res) => {
+  let out = '';
+  let err = '';
+  const p = spawn(process.execPath, [BIN, ...args], { cwd: s.repo, env: { ...s.env, ...env } });
+  p.stdout.on('data', (d) => { out += d; });
+  p.stderr.on('data', (d) => { err += d; });
+  p.on('close', (code) => res({ code, out: out.trim(), stderr: err }));
+});
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('a mark made while a scout runs is kept; a log changed meanwhile makes the scan run again', async () => {
+  const s = sandbox();
+  const tp = s.transcript('rc', 3);
+  const two = reply(topic({ title: 'Halved p99 latency', angle: 'performance' }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' }));
+  const [a] = JSON.parse(s.run(['scout', '--session', 'rc', '--transcript', tp, '--json'], { env: two }).out).logs.map((l) => l.logId);
+  const before = s.calls().length;
+  const run = slow(s, ['scout', '--session', 'rc', '--transcript', tp, '--json'], { ...two, STUB_DELAY: '1500' });
+  await pause(700);
+  assert.strictEqual(s.run(['mark', '--session', 'rc', 'the', 'backoff', 'decision']).status, 0);
+  assert.strictEqual(s.run(['mark', a, 'direct note']).status, 0);
+  const r = await run;
+  assert.strictEqual(r.code, 0, r.stderr);
+  assert.strictEqual(s.calls().length, before + 2, 'the log changed during the first call, so the scan ran again');
+  assert.match(s.run(['show', a]).out, /"note":"direct note"/, 'the change made meanwhile survives');
+  const marks = JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'rc.json'), 'utf8'));
+  assert.deepStrictEqual(marks.map((m) => m.note), ['the backoff decision'], 'the mark added meanwhile waits for the next scan');
+});
+
+test('marks that only point at deleted topics stop forcing rescans; a mark of another log is not this session\'s', () => {
+  const s = sandbox();
+  const cmd = (sid, args) => ({ type: 'user', sessionId: sid, cwd: s.repo, message: { role: 'user', content: `<command-name>/casebook:mark</command-name><command-args>${args}</command-args>` } });
+  const A = topic({ title: 'Halved p99 latency', angle: 'performance' });
+  const r = JSON.parse(s.run(['scout', '--session', 'dd', '--transcript', s.transcript('dd', 3), '--json'], { env: reply(A, topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })) }).out);
+  s.run(['delete', r.logs[0].logId]);
+  // The manual scout left the other log partial; the first auto scan that adds nothing finishes it.
+  const calls = s.calls().length;
+  const first = s.run(['scout', '--session', 'dd', '--transcript', s.transcript('dd', 4, [cmd('dd', 'retry storm')]), '--auto'], { env: reply(A) });
+  assert.match(first.out, /ones you deleted/);
+  assert.strictEqual(s.calls().length, calls + 1);
+  assert.match(s.run(['show', r.logs[1].logId]).out, /partial: false/);
+  const again = s.run(['scout', '--session', 'dd', '--transcript', s.transcript('dd', 5, [cmd('dd', 'retry storm')]), '--auto'], { env: reply(A) });
+  assert.match(again.out + again.stderr, /not enough new activity/, JSON.stringify(again));
+  assert.strictEqual(s.calls().length, calls + 1, 'no rescan for a mark already found to point at a deleted topic');
+
+  const tp2 = s.transcript('om', 3, [cmd('om', 'cb-abc123 great example')]);
+  const l = JSON.parse(s.run(['scout', '--session', 'om', '--transcript', tp2, '--auto', '--json']).out).logId;
+  assert.match(s.run(['show', l]).out, /marked: false/);
+});
+
+test('same_as can only name a log shown to the model; one session in two folders does not crash discovery', () => {
+  const s = sandbox();
+  const other = path.join(s.root, 'client-x');
+  fs.mkdirSync(other);
+  const tpx = s.transcript('cx', 3);
+  const moved = fs.readFileSync(tpx, 'utf8').split(s.repo).join(other);
+  const dir = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', other.replace(/[^\w]/g, '-'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'cx.jsonl'), moved);
+  fs.rmSync(tpx);
+  const x = JSON.parse(s.run(['scout', '--session', 'cx', '--transcript', path.join(dir, 'cx.jsonl'), '--json'], { env: reply(topic({ title: 'Client billing' })) }).out).logId;
+  const r = JSON.parse(s.run(['scout', '--session', 'mine', '--transcript', s.transcript('mine', 3), '--json'], { env: reply(topic({ title: 'Gateway', same_as: [x] })) }).out);
+  assert.strictEqual(r.status, 'created');
+  assert.match(s.run(['show', x]).out, /^# Client billing$/m, 'the unseen log is untouched');
+
+  const dup = path.join(dir, 'twin.jsonl');
+  fs.writeFileSync(dup, moved.split('"cx"').join('"twin"'));
+  fs.copyFileSync(dup, path.join(path.dirname(s.transcript('twin', 3)), 'twin.jsonl'));
+  const d = s.run(['discover', '--dry-run', '--all']);
+  assert.strictEqual(d.status, 0, d.stderr);
+});
+
+test('a later session naming package.json is not a handoff', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const now = Date.now();
+  const sess = (id, o) => ({
+    sessionId: id, project: 'p', policy: 'public', branch: 'main', prUrls: [], files: [], readFiles: [], opening: '',
+    startedAt: new Date(now - (id === 'a' ? 200 : 1) * 3600000).toISOString(),
+    endedAt: new Date(now - (id === 'a' ? 199 : 0) * 3600000).toISOString(), ...o,
+  });
+  assert.strictEqual(linkSessions([sess('a', { files: ['/r/package.json'] }), sess('b', { opening: 'why does package.json pin node 18?' })]).length, 2);
+  assert.strictEqual(linkSessions([sess('a', { files: ['/r/docs/handoff.md'] }), sess('b', { opening: 'read handoff.md and carry on' })]).length, 1);
+});

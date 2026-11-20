@@ -86,6 +86,9 @@ async function runClaudeAsync(prompt, config) {
     const child = spawn(cmd, args, { cwd: os.tmpdir(), env: childEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
     const timer = setTimeout(() => { child.kill('SIGTERM'); finish({ status: null, error: new Error(`scout timed out after ${config.scout.timeoutSec || 240}s`) }); },
       (config.scout.timeoutSec || 240) * 1000);
+    // Decode as a stream: a character split across two chunks must not turn into U+FFFD.
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
     child.on('error', (error) => finish({ status: null, error }));
@@ -251,37 +254,62 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   }
 
   const commits = commitsBetween(info.root, t.startedAt, t.endedAt);
-  const context = T.contextLogs(info.project, [sessionId], t.startedAt, t.endedAt);
   const deleted = force ? [] : T.tombstones([sessionId]);
   const maxTopics = config.scout.maxTopics || 3;
-  const prompt = buildPrompt(t, info, promptMarks, commits, T.renderExisting(context, [sessionId], deleted), maxTopics);
-  const found = T.parseTopics(runClaude(prompt, config), maxTopics);
-
-  // A topic the developer deleted never comes back (unless --force). A new topic must clear keepMinScore
-  // unless it carries a mark; a manual scout, and a marked session, keep at least their best topic.
-  const allowed = T.screenTopics(found, deleted);
-  let keep = allowed.filter((x) => x.same_as.length || x.score >= config.scout.keepMinScore || (x.marks && pending.length));
-  if ((manual || pending.length) && !keep.length && allowed.length) keep = [allowed[0]];
-  if (!keep.length) {
-    const best = found.reduce((n, x) => Math.max(n, x.score), 0);
-    // No topic at all is not the same as only deleted ones: marks are kept for the next scan.
-    const onlyDeleted = found.length > 0 && !allowed.length;
-    // Marks that only pointed at deleted topics are dropped, so they do not force a rescan every time.
-    if (onlyDeleted) store.clearMarks(sessionId);
-    const skipped = onlyDeleted ? 'deleted-topics' : found.length ? 'low-score' : 'no-topic';
-    store.setLedger(sessionId, { skipped, score: best, userTurns: t.userTurns, size, scoutedAt: new Date().toISOString() });
-    const reason = onlyDeleted ? 'the only topics found were ones you deleted (use --force to log them again)' : found.length ? `score ${best}` : 'the scout found no topic';
-    return { status: 'skipped', reason };
-  }
-
-  // Pending marks go to the topics they point to, or to the best one.
-  const markTargets = keep.some((x) => x.marks) ? keep.filter((x) => x.marks) : [keep[0]];
   const member = { sessionId, startedAt: t.startedAt, endedAt: t.endedAt, userTurns: t.userTurns, branch: t.branch, files: t.files };
-  const claimed = new Set();
-  const logs = store.withWriteLock(() => keep.map((topic) => T.applyTopic(topic, {
-    members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits, claimed,
-  })));
-  store.clearMarks(sessionId);
+  // The model call runs without the lock, so another scan may update a log shown to it meanwhile. The
+  // notes are then written only if nothing it saw changed; otherwise the scan runs again on the new notes.
+  let logs = null;
+  for (let attempt = 1; !logs; attempt++) {
+    if (attempt > 3) throw new Error('the logs of this session kept changing during the scan; try again');
+    const context = T.contextLogs(info.project, [sessionId], t.startedAt, t.endedAt);
+    const versions = T.versionsOf(context);
+    const prompt = buildPrompt(t, info, promptMarks, commits, T.renderExisting(context, [sessionId], deleted), maxTopics);
+    const found = T.parseTopics(runClaude(prompt, config), maxTopics);
+
+    // A topic the developer deleted never comes back (unless --force). A new topic must clear keepMinScore
+    // unless it carries a mark; a manual scout, and a marked session, keep at least their best topic.
+    const allowed = T.screenTopics(found, deleted, context);
+    let keep = allowed.filter((x) => x.same_as.length || x.score >= config.scout.keepMinScore || (x.marks && pending.length));
+    if ((manual || pending.length) && !keep.length && allowed.length) keep = [allowed[0]];
+    if (!keep.length) {
+      const best = found.reduce((n, x) => Math.max(n, x.score), 0);
+      // No topic at all is not the same as only deleted ones: marks are kept for the next scan.
+      const onlyDeleted = found.length > 0 && !allowed.length;
+      // Marks that only pointed at deleted topics are dropped, and their notes remembered, so a
+      // /casebook:mark left in the transcript does not force a rescan every time.
+      if (onlyDeleted) store.withWriteLock(() => store.consumeMarks(sessionId, pending));
+      const skipped = onlyDeleted ? 'deleted-topics' : found.length ? 'low-score' : 'no-topic';
+      // A final scan that adds nothing still finishes this session's partial logs: the model saw their notes
+      // and had nothing to add, so they would otherwise be rescanned every time the transcript grows.
+      if (!partial) {
+        store.withWriteLock(() => {
+          for (const l of T.logsForSessions([sessionId])) {
+            if (l.meta.partial === true && T.sessionsOf(l).every((sid) => sid === sessionId)) { l.meta.partial = false; store.saveLog(l); }
+          }
+        });
+      }
+      const prev = store.getLedger(sessionId) || {};
+      store.setLedger(sessionId, {
+        skipped, score: best, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
+        ...(onlyDeleted ? { unmarked: [...new Set([...(prev.unmarked || []), ...pending.map((m) => m.note || '')])] } : {}),
+      });
+      const reason = onlyDeleted ? 'the only topics found were ones you deleted (use --force to log them again)' : found.length ? `score ${best}` : 'the scout found no topic';
+      return { status: 'skipped', reason };
+    }
+
+    // Pending marks go to the topics they point to, or to the best one.
+    const markTargets = keep.some((x) => x.marks) ? keep.filter((x) => x.marks) : [keep[0]];
+    const claimed = new Set();
+    logs = store.withWriteLock(() => {
+      if (T.changedSince(versions, [sessionId])) return null;
+      const written = keep.map((topic) => T.applyTopic(topic, {
+        members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits, claimed,
+      }));
+      store.consumeMarks(sessionId, pending);
+      return written;
+    });
+  }
   store.setLedger(sessionId, {
     project: info.project, userTurns: t.userTurns, size, partial, scoutedAt: new Date().toISOString(),
     logId: undefined, skipped: undefined, deleted: undefined, deletedAt: undefined,

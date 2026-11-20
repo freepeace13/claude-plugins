@@ -125,18 +125,36 @@ function resolveLog(id) {
   return store.findLog(id) || store.allLogs().find((l) => (l.meta.merged_from || []).includes(id)) || null;
 }
 
+/** A version stamp per log, taken when its notes are shown to the model. */
+const versionsOf = (logs) => new Map(logs.map((l) => [l.meta.id, l.meta.updated_at || l.meta.created_at || '']));
+
+/**
+ * Whether a scan's view is out of date: a log it was shown changed or went away, or the sessions gained a
+ * log it was not shown. Its notes would then overwrite what another scan just wrote. Call under the lock.
+ */
+function changedSince(versions, sids) {
+  for (const [id, v] of versions) {
+    const l = store.findLog(id);
+    if (!l || (l.meta.updated_at || l.meta.created_at || '') !== v) return true;
+  }
+  return logsForSessions(sids).some((l) => !versions.has(l.meta.id));
+}
+
 /** A ledger from before topics: the session's one log was deleted, and no topic was remembered. */
 const legacyDeleted = (ledger) => Boolean(ledger && ledger.deleted && !(ledger.deletedTopics || []).length);
 
 /**
  * Drop deleted topics (unless the topic updates a log that still exists), keep only same_as ids that resolve,
  * and let each existing log be claimed by one topic only: the best-scored one. Topics come best first.
+ * With `shown` (the logs in the prompt), same_as may only name those: never a log the model did not see.
  */
-function screenTopics(found, deleted) {
+function screenTopics(found, deleted, shown) {
+  const known = shown && new Set(shown.flatMap((l) => [l.meta.id, ...(l.meta.merged_from || [])]));
   const claimed = new Set();
   const out = [];
   for (const x of found) {
-    const live = [...new Set(x.same_as.map(resolveLog).filter(Boolean).map((l) => l.meta.id))];
+    const named = known ? x.same_as.filter((id) => known.has(id)) : x.same_as;
+    const live = [...new Set(named.map(resolveLog).filter(Boolean).map((l) => l.meta.id))];
     if (!live.length && isTombstoned(x, deleted)) continue;
     x.same_as = live.filter((id) => !claimed.has(id));
     for (const id of x.same_as) claimed.add(id);
@@ -269,5 +287,5 @@ function applyTopic(topic, ctx) {
 
 module.exports = {
   sessionsOf, logsForSessions, contextLogs, tombstones, renderExisting, parseTopics, normalizeTopic,
-  isTombstoned, sameTitle, renderBody, applyTopic, normTitle, resolveLog, legacyDeleted, screenTopics,
+  isTombstoned, sameTitle, renderBody, applyTopic, normTitle, resolveLog, legacyDeleted, screenTopics, versionsOf, changedSince,
 };
