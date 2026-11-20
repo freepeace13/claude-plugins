@@ -18,4 +18,4 @@ Work id: `$ARGUMENTS`
    - On `revise`, start the writer again with the brief, draft and review paths.
    - When the draft passes every criterion, append `approved` to `review.md` and run `porch set <id> status=approved title='<draft title>'` (single quotes; write a `'` inside the title as `'\''`). If a write to `review.md` is refused, say so and do not call the draft approved.
    - After round 2 with failures left, write `escalate`, run `porch set <id> status=escalated`, show the failing criteria and say whether the brief or the draft looks wrong.
-5. **Report** in 4 to 6 lines: the draft path, title, word count, open verify items, for `kind=draft` every note on the body from `review.md` (term hits first, so the author can fix them before pushing), and "run /porch:push <short id> when you're happy with it".
+5. **Report** in 4 to 6 lines: the draft path, title, word count, open verify items, and "run /porch:push <short id> when you're happy with it". For `kind=draft`, then list every note on the body from `review.md`, term hits first, so the author can fix them before pushing; these lines are not counted.
