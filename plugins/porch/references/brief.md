@@ -56,7 +56,7 @@ stack: [Laravel, Redis]  # case study only
 - AC-2 States the thesis in the first two paragraphs
 - AC-3 Follows the outline's section order and headings
 - AC-4 Length within range
-- AC-5 Passes the voice rules (base Fixed rules, then voice_user, then the base Defaults it does not cover); first person throughout, no "the owner", "the user" or operator
+- AC-5 Passes the voice rules (base Fixed rules, then voice_user, then the base Defaults it does not cover; for an author's finished draft, the Fixed rules only); first person throughout, no "the owner", "the user" or operator
 - AC-6 Never names anything in never_name
 - AC-7 Follows body-format.md and the type's template
 - AC-8+ Piece-specific criteria added by intake

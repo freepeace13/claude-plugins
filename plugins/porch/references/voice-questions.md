@@ -4,6 +4,8 @@
 
 A rule never asks for content the brief does not give. Where a style needs a feeling, a moment, a cost or a next step, the rule applies only when the brief has it. The brief's reader, outline and length, the type's template and `body-format.md` always win over a voice rule.
 
+Rules are worded so any one option of each question can sit with any option of another. A rule that relaxes a base Default says so, or covers the same thing.
+
 Labels are at most 4 words, so ` (Recommended)` still fits.
 
 Each question has an id (the key in `voice.md`'s `answers`), an area, the `header` chip (at most 12 characters) and the question text. Each option has an id, a label (shown as the choice), a description, a preview and a rule. When the author picks "Other", their own words become the rule (see the skill).
@@ -125,13 +127,13 @@ Areas, in the order they appear in `voice.md`:
 - description: Assert, and qualify only when there is a reason, which you name.
 - preview:
   > The fixture was the bottleneck. Caching it is safe here because no test writes to those tables. If yours do, it isn't.
-- rule: Assert claims. Qualify one only when there is a real condition, and name the condition.
+- rule: Assert claims. Qualify one only when there is a real condition, and name the condition. A named condition is not hedging.
 
 #### `thinking` Thinking out loud
 - description: Show the doubts you had at the time, and what you still don't know.
 - preview:
   > I wasn't sure caching would hold. Some tests might write to those tables, and I still haven't checked all of them.
-- rule: Show the reasoning as it happened, including the doubts the brief records, without apologising. The brief's Unknowns are still written around with a verify marker.
+- rule: Show the reasoning as it happened, including the doubts the brief records, without apologising. This replaces the base Default against hedging. The brief's Unknowns are still written around with a verify marker.
 
 #### `strong` Strong opinions
 - description: Direct advice, in the imperative.
@@ -173,7 +175,7 @@ Areas, in the order they appear in `voice.md`:
 - description: Tell what I did and why. No "you".
 - preview:
   > I profiled the suite before changing anything. The fixture stood out at once.
-- rule: Don't address the reader. Tell what you did and why.
+- rule: Don't address the reader, except in advice given as an imperative. Tell what you did and why.
 
 #### `advice` "You" for advice
 - description: Speak to the reader only when giving advice or a step.
@@ -238,7 +240,7 @@ Areas, in the order they appear in `voice.md`:
 - preview:
   > - ✅ Cache the fixture
   > - ❌ Add more workers
-- rule: Use emoji only as status markers at the start of a list item (✅, ❌, ⚠️). Never inside a sentence.
+- rule: When there is a list, emoji may mark the status at the start of an item (✅, ❌, ⚠️). Never inside a sentence.
 
 #### `tone` Sometimes, for tone
 - description: An emoji may close a sentence to show how you feel.
