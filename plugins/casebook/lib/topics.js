@@ -237,7 +237,8 @@ function applyTopic(topic, ctx) {
     project: ctx.info.project,
     repo: ctx.info.repo || null,
     policy: ctx.info.policy,
-    profile: paths.profileName(),
+    // The profile the log was first made under: an update from another profile does not take it over.
+    profile: (survivor && survivor.meta.profile) || paths.profileName(),
     score: topic.score,
     marked: false,
     marks: uniqMarks([...prior.flatMap((l) => l.meta.marks || []), ...ctx.marks]),

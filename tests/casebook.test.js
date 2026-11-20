@@ -379,8 +379,8 @@ test('one model call checks the remaining topics for retellings in other words',
   const r = s.run(['discover'], { env: { ...env, STUB_DEDUPE: '{"duplicates":[[1,2]]}' } });
   assert.strictEqual(r.status, 0, r.stderr);
   const asked = fs.readFileSync(path.join(s.root, 'last-dedupe.txt'), 'utf8');
-  assert.match(asked, /### 1\. Stopping retry storms\nAngle: debugging · 2 sessions\nDescription: Retry storms in the queue worker\./);
-  assert.match(asked, /### 2\. Queue retry budget, end to end\nAngle: debugging · 2 sessions · updates an existing log/);
+  assert.match(asked, /### 1\. Stopping retry storms\nProject: acme-api · Angle: debugging · 2 sessions\nDescription: Retry storms in the queue worker\./);
+  assert.match(asked, /### 2\. Queue retry budget, end to end\nProject: acme-api · Angle: debugging · 2 sessions · updates an existing log/);
   assert.doesNotMatch(r.out, /Stopping retry storms/, 'the new retelling goes; the topic that names the log stays');
   assert.match(r.out, new RegExp(`1\\. \\[4\\] Queue retry budget, end to end[\\s\\S]*updates: ${x}`));
   assert.match(r.out, /2\. \[3\] Schema for job audit/);
@@ -393,6 +393,12 @@ test('one model call checks the remaining topics for retellings in other words',
   // One topic left: nothing to compare, no call.
   const calls = fs.readFileSync(path.join(s.root, 'dedupe-calls.log'), 'utf8').trim().split('\n').length;
   s.run(['discover'], { env: reply(topic({ title: 'Only one', angle: 'testing', belongs: [2] })) });
+  assert.strictEqual(fs.readFileSync(path.join(s.root, 'dedupe-calls.log'), 'utf8').trim().split('\n').length, calls);
+  // Every topic updates a log: nothing could be dropped, no call.
+  const y = seedLog(s, { sessions: ['u2'], title: 'Schema for job audit', angle: 'data' });
+  s.run(['mark', x, 'news']); s.run(['mark', y, 'news']);
+  const all = s.run(['discover'], { env: reply(topic({ title: 'Queue retry budget', same_as: [x], belongs: [1] }), topic({ title: 'Schema for job audit', angle: 'data', same_as: [y], belongs: [2] })) });
+  assert.match(all.out, /2 topic\(s\)/);
   assert.strictEqual(fs.readFileSync(path.join(s.root, 'dedupe-calls.log'), 'utf8').trim().split('\n').length, calls);
 });
 
@@ -450,6 +456,22 @@ test('a discovery rewrites a log of the same sessions only when they have new ma
 
   s.transcript('ra', 5);
   assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${la}`), 'new turns are news');
+});
+
+test('older logs and marks a scan already saw are not news', () => {
+  const s = sandbox();
+  s.transcript('v1', 3);
+  // A 0.1 log: no session_turns, no scanned_at.
+  const old = seedLog(s, { sessions: undefined, session_id: 'v1', user_turns: 3, session_turns: undefined });
+  const same = reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [old], belongs: [1] }));
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/);
+  // A pending mark left unplaced by the last scan stays pending, but is no longer news.
+  const marks = path.join(s.env.CASEBOOK_HOME, 'marks', 'v1.json');
+  fs.mkdirSync(path.dirname(marks), { recursive: true });
+  fs.writeFileSync(marks, JSON.stringify([{ at: new Date(Date.now() - 86400000).toISOString(), note: 'seen', session: 'v1' }]));
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/);
+  s.run(['mark', '--session', 'v1', 'fresh']);
+  assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${old}`), 'a mark of its one log since it was made is news');
 });
 
 test('a --force pick reopens a session closed by an older casebook', () => {
@@ -1021,38 +1043,49 @@ test('old per-profile stores are merged into the one store', () => {
     fs.writeFileSync(path.join(store, 'case-studies', 'x.md'), name);
     old[name] = r.logId;
   }
-  fs.writeFileSync(path.join(p.cb, 'personal', 'config.json'), JSON.stringify({ defaultPolicy: 'skip' }));
+  fs.writeFileSync(path.join(p.cb, 'personal', 'config.json'), JSON.stringify({ defaultPolicy: 'skip', projects: [{ match: '*/client-x/*', policy: 'skip' }] }));
 
   const logs = JSON.parse(p.run(['list', '--json']).out);
   assert.deepStrictEqual(logs.map((l) => l.id).sort(), [old.default, old.personal].sort());
   assert.ok(logs.every((l) => l.marked));
   for (const id of Object.values(old)) assert.ok(fs.existsSync(path.join(p.cb, 'logs', 'acme-api', `${id}.md`)));
-  assert.notStrictEqual(JSON.parse(fs.readFileSync(path.join(p.cb, 'config.json'), 'utf8')).defaultPolicy, 'skip', 'the default profile\'s config is used');
+  const merged = JSON.parse(fs.readFileSync(path.join(p.cb, 'config.json'), 'utf8'));
+  assert.strictEqual(merged.defaultPolicy, 'skip', 'the strictest default policy wins');
+  assert.deepStrictEqual(merged.projects[0], { match: '*/client-x/*', policy: 'skip' }, 'another profile\'s privacy rules are kept, first');
+  assert.ok(merged.scan.command, 'the default profile\'s scan settings stay');
+  assert.ok(fs.existsSync(path.join(p.cb, 'personal', 'config.migrated.json')));
   for (const name of ['default', 'personal']) {
     assert.ok(fs.existsSync(path.join(p.cb, name, 'profile.migrated.json')));
     assert.ok(!fs.existsSync(path.join(p.cb, name, 'profile.json')));
     assert.strictEqual(fs.readFileSync(path.join(p.cb, name, 'case-studies', 'x.md'), 'utf8'), name, 'case studies stay put');
     assert.ok(!fs.existsSync(path.join(p.cb, name, 'logs')));
   }
-  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /merged profile store "personal".*config\.json was not used/);
+  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /merged profile store "personal".*default policy and 1 project rule\(s\) were merged/);
   // Pending marks and discoveries come along.
   for (const name of ['default', 'personal']) assert.ok(fs.existsSync(path.join(p.cb, 'marks', `pending-${name}.json`)));
   assert.strictEqual(fs.readdirSync(path.join(p.cb, 'state', 'discoveries')).length, 2);
 });
 
-test('a file already in the shared store is left in the old store, and the merge finishes on a rerun', () => {
+test('a session in two stores keeps the marks and deleted topics of both; a log with the same ID is left behind', () => {
   const p = profileSandbox();
   p.seedStore();
   const store = path.join(p.cb, 'work');
-  fs.mkdirSync(path.join(store, 'marks'), { recursive: true });
-  fs.mkdirSync(path.join(p.cb, 'marks'), { recursive: true });
-  fs.writeFileSync(path.join(store, 'marks', 'dup.json'), '{"old":true}');
-  fs.writeFileSync(path.join(p.cb, 'marks', 'dup.json'), '{"new":true}');
-  fs.writeFileSync(path.join(store, 'profile.json'), '{}');
+  const put = (base, rel, data) => { const f = path.join(base, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, typeof data === 'string' ? data : JSON.stringify(data)); };
+  put(store, 'marks/dup.json', [{ at: '1', note: 'old' }, { at: '2', note: 'both' }]);
+  put(p.cb, 'marks/dup.json', [{ at: '2', note: 'both' }, { at: '3', note: 'new' }]);
+  put(store, 'state/sessions/dup.json', { sessionId: 'dup', deletedTopics: [{ id: 'cb-aaaaaa', title: 'A' }] });
+  put(p.cb, 'state/sessions/dup.json', { sessionId: 'dup', deletedTopics: [{ id: 'cb-bbbbbb', title: 'B' }] });
+  put(store, 'logs/acme-api/cb-same01.md', 'old');
+  put(p.cb, 'logs/acme-api/cb-same01.md', 'new');
+  put(store, 'profile.json', '{}');
   assert.strictEqual(p.run(['list']).status, 0);
-  assert.strictEqual(fs.readFileSync(path.join(p.cb, 'marks', 'dup.json'), 'utf8'), '{"new":true}', 'never overwritten');
-  assert.strictEqual(fs.readFileSync(path.join(store, 'marks', 'dup.json'), 'utf8'), '{"old":true}');
-  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /1 file\(s\) already present were left in/);
+  const read = (rel) => JSON.parse(fs.readFileSync(path.join(p.cb, rel), 'utf8'));
+  assert.deepStrictEqual(read('marks/dup.json').map((m) => m.note), ['both', 'new', 'old']);
+  assert.deepStrictEqual(read('state/sessions/dup.json').deletedTopics.map((t) => t.id), ['cb-bbbbbb', 'cb-aaaaaa']);
+  assert.ok(!fs.existsSync(path.join(store, 'marks', 'dup.json')));
+  assert.strictEqual(fs.readFileSync(path.join(p.cb, 'logs/acme-api/cb-same01.md'), 'utf8'), 'new', 'never overwritten');
+  assert.strictEqual(fs.readFileSync(path.join(store, 'logs/acme-api/cb-same01.md'), 'utf8'), 'old');
+  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /1 file\(s\) already present .* were left in/);
   assert.ok(fs.existsSync(path.join(store, 'profile.migrated.json')));
 });
 

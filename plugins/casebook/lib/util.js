@@ -63,20 +63,63 @@ const paths = {
 // `written_to` paths in logs keep working.
 const MOVED = ['logs', 'marks', path.join('state', 'sessions'), path.join('state', 'discoveries')];
 
-/** Move every file under `from` into `to` that `to` does not have yet. Returns the files left behind. */
-function mergeTree(from, to) {
+/** Move every file under `from` into `to`. A file `to` already has is merged into it by `merge(src, dst)` when it
+ *  can be (true when merged), else left behind. Returns the number of files left behind. */
+function mergeTree(from, to, merge) {
   let left = 0;
   let entries = [];
   try { entries = fs.readdirSync(from, { withFileTypes: true }); } catch { return 0; }
   for (const e of entries) {
     const src = path.join(from, e.name);
     const dst = path.join(to, e.name);
-    if (e.isDirectory()) { left += mergeTree(src, dst); continue; }
-    if (fs.existsSync(dst)) { left++; continue; }
+    if (e.isDirectory()) { left += mergeTree(src, dst, merge); continue; }
+    if (fs.existsSync(dst)) {
+      let merged = false;
+      try { merged = Boolean(merge && merge(src, dst)); } catch { /* unreadable: leave it */ }
+      if (merged) fs.rmSync(src, { force: true }); else left++;
+      continue;
+    }
     try { mkdirp(to); fs.renameSync(src, dst); } catch (err) { if (err.code !== 'ENOENT') left++; }
   }
   try { fs.rmdirSync(from); } catch { /* not empty */ }
   return left;
+}
+
+const readStrict = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
+const markKey = (m) => `${m.session || ''}|${m.at}|${m.note || ''}`;
+const topicKey = (t) => `${t.id || ''}|${t.title || ''}|${t.angle || ''}`;
+const union = (a, b, key) => { const seen = new Set(); return [...a, ...b].filter((x) => { const k = key(x); return !seen.has(k) && seen.add(k); }); };
+
+// The same session in two stores: its pending marks and its deleted topics are kept from both.
+const MERGERS = {
+  marks: (src, dst) => {
+    const a = readStrict(dst); const b = readStrict(src);
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    writeJsonAtomic(dst, union(a, b, markKey));
+    return true;
+  },
+  [path.join('state', 'sessions')]: (src, dst) => {
+    const a = readStrict(dst); const b = readStrict(src);
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+    writeJsonAtomic(dst, { ...b, ...a, deletedTopics: union(a.deletedTopics || [], b.deletedTopics || [], topicKey) });
+    return true;
+  },
+};
+
+// skip is stricter than anonymize, which is stricter than public.
+const STRICT = { public: 1, anonymize: 2, skip: 3 };
+const stricter = (a, b) => ((STRICT[b] || 0) > (STRICT[a] || 0) ? b : a);
+
+/** Another profile's config folded into the shared one, so no privacy rule is lost: the strictest default policy,
+ *  and its project rules too. Its stricter rules go first (the first match wins), its public ones last. */
+function mergeConfigs(into, from) {
+  const a = readStrict(into); const b = readStrict(from);
+  const have = new Set((a.projects || []).map((r) => `${r.match}|${r.policy}`));
+  const extra = (b.projects || []).filter((r) => r && r.match && !have.has(`${r.match}|${r.policy}`));
+  a.projects = [...extra.filter((r) => r.policy !== 'public'), ...(a.projects || []), ...extra.filter((r) => r.policy === 'public')];
+  if (b.defaultPolicy) a.defaultPolicy = stricter(a.defaultPolicy || 'anonymize', b.defaultPolicy);
+  writeJsonAtomic(into, a);
+  return extra.length;
 }
 
 /** Old stores are folders of the store holding a profile.json. Merged ones keep it as profile.migrated.json. */
@@ -91,18 +134,25 @@ function oldStores() {
   }
 }
 
-/** Merge old per-profile stores into the one store. Safe to run from several processes at once, and again after a crash. */
+/** Merge old per-profile stores into the one store. Safe to run again after a crash. */
 function migrateProfiles() {
   for (const name of oldStores()) {
     const dir = path.join(home(), name);
     let left = 0;
-    for (const sub of MOVED) left += mergeTree(path.join(dir, sub), path.join(home(), sub));
-    let config = 'kept';
+    for (const sub of MOVED) left += mergeTree(path.join(dir, sub), path.join(home(), sub), MERGERS[sub]);
+    const old = path.join(dir, 'config.json');
+    let config = '';
     if (!fs.existsSync(paths.config())) {
-      try { fs.renameSync(path.join(dir, 'config.json'), paths.config()); config = 'moved'; } catch { /* none, or another process won */ }
+      try { fs.renameSync(old, paths.config()); config = '; its config.json is the shared one'; } catch { /* none, or another process won */ }
+    } else if (fs.existsSync(old)) {
+      try {
+        const n = mergeConfigs(paths.config(), old);
+        fs.renameSync(old, path.join(dir, 'config.migrated.json'));
+        config = `; its default policy and ${n} project rule(s) were merged into ${paths.config()}`;
+      } catch (err) { config = `; its config.json could not be merged (${err.message}), see ${dir}`; }
     }
     try { fs.renameSync(path.join(dir, 'profile.json'), path.join(dir, 'profile.migrated.json')); } catch { continue; }
-    logError(`merged profile store "${name}" into ${home()}${config === 'kept' && fs.existsSync(path.join(dir, 'config.json')) ? `; its config.json was not used (see ${dir})` : ''}${left ? `; ${left} file(s) already present were left in ${dir}` : ''}`);
+    logError(`merged profile store "${name}" into ${home()}${config}${left ? `; ${left} file(s) already present (logs or discoveries with the same ID) were left in ${dir}` : ''}`);
   }
 }
 

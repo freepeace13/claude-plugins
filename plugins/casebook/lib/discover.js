@@ -283,10 +283,13 @@ function memberRecord(m) {
  *  its last scan, or a session that grew since. */
 function hasNews(log, members) {
   const m = log.meta;
-  const since = m.scanned_at || m.created_at || '';
-  const turns = m.session_turns || {};
-  return members.some((x) => store.getMarks(x.sessionId).length || (x.userTurns || 0) > (turns[x.sessionId] || 0))
-    || (m.marks || []).some((k) => String(k.at || '') > since);
+  // Older logs: 0.2 has scouted_at, 0.1 only session_id and user_turns (the same fallback as applyTopic).
+  const since = m.scanned_at || m.scouted_at || m.created_at || '';
+  const turns = m.session_turns || (m.session_id ? { [m.session_id]: m.user_turns || 0 } : {});
+  const newer = (k) => String(k.at || '') > since;
+  // A pending mark the model left unplaced stays pending: only one made since the last scan is news.
+  return members.some((x) => store.getMarks(x.sessionId).some(newer) || (x.userTurns || 0) > (turns[x.sessionId] || 0))
+    || (m.marks || []).some(newer);
 }
 
 /** One model call over a chain. Returns its topics, each cut down to the sessions it belongs to. */
@@ -344,12 +347,15 @@ async function scanChain(g, config, opts) {
  * new topics in it are dropped. A topic that updates a log is never dropped: it names that log. On failure the
  * list is returned as it was.
  */
+const projectOf = (f) => f.members[0].project;
+
 async function dedupeTopics(list, config) {
-  if (list.length < 2) return list;
+  // Only new topics can be dropped: with none, the call could change nothing.
+  if (list.length < 2 || list.every((f) => f.updates.length)) return list;
   const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'prompts', 'dedupe.md'), 'utf8');
   const lines = list.map((f, i) => [
     `### ${i + 1}. ${f.topic.title}`,
-    `Angle: ${f.topic.angle || 'general'} · ${f.members.length} session${f.members.length > 1 ? 's' : ''}${f.updates.length ? ' · updates an existing log' : ''}`,
+    `Project: ${projectOf(f)} · Angle: ${f.topic.angle || 'general'} · ${f.members.length} session${f.members.length > 1 ? 's' : ''}${f.updates.length ? ' · updates an existing log' : ''}`,
     `Description: ${f.topic.description || '(none)'}`,
     `Summary: ${f.topic.summary || '(none)'}`,
   ].join('\n'));
@@ -366,8 +372,12 @@ async function dedupeTopics(list, config) {
   for (const g of groups) {
     const idx = [...new Set((Array.isArray(g) ? g : []).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= list.length))].sort((a, b) => a - b);
     if (idx.length < 2) continue;
-    const keep = idx.find((n) => list[n - 1].updates.length) || idx[0];
-    for (const n of idx) if (n !== keep && !list[n - 1].updates.length) drop.add(n);
+    // Work in two projects is two stories, whatever the model says: group within each project.
+    for (const p of new Set(idx.map((n) => projectOf(list[n - 1])))) {
+      const mine = idx.filter((n) => projectOf(list[n - 1]) === p);
+      const keep = mine.find((n) => list[n - 1].updates.length) || mine[0];
+      for (const n of mine) if (n !== keep && !list[n - 1].updates.length) drop.add(n);
+    }
   }
   return list.filter((_, i) => !drop.has(i + 1));
 }
@@ -427,8 +437,8 @@ async function discover(config, o) {
     })(new Set()))
     // The same new story found twice (one chain's scan, or two chains near each other): only the best one is offered.
     .filter(((kept) => (f) => {
-      if (!f.updates.length && kept.some((k) => T.sameTopic(k, f.topic))) return false;
-      kept.push(f.topic);
+      if (!f.updates.length && kept.some((k) => projectOf(k) === projectOf(f) && T.sameTopic(k.topic, f.topic))) return false;
+      kept.push(f);
       return true;
     })([]));
   // Retellings in other words get past the title and description checks: the model compares what is left.
@@ -495,7 +505,7 @@ function pick(config, id, n) {
     }
     // A new topic that retells what an earlier pick of this discovery already logged is that log.
     if (!t.updates.length) {
-      const twin = pickedNow.find((l) => T.sameTopic(l, t.topic));
+      const twin = pickedNow.find((l) => l.meta.project === t.info.project && T.sameTopic(l, t.topic));
       if (twin) return { status: 'exists', logId: twin.meta.id, title: twin.meta.title };
     }
     const deleted = d.force ? [] : T.tombstones(sids);

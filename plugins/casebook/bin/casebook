@@ -30,7 +30,7 @@ function parseArgs(argv) {
     if (a.startsWith('--')) {
       const [k, inline] = a.slice(2).split(/=(.*)/s);
       // Flags of older casebooks fail loudly: silently ignoring a filter would widen a batch delete.
-      if (REMOVED[k]) fail(`--${k} was removed in 0.3: ${REMOVED[k]}`);
+      if (Object.hasOwn(REMOVED, k)) fail(`--${k} was removed in 0.3: ${REMOVED[k]}`);
       const key = k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       if (inline !== undefined) opt[key] = inline;
       else if (BOOL.has(k)) opt[key] = true;
@@ -81,7 +81,10 @@ const commands = {
   hook({ pos }) {
     if (process.env.CASEBOOK_SCAN) return;
     try {
-      if (pos[0] === 'session-start') { U.migrateProfiles(); L.linkBin(); }
+      if (pos[0] !== 'session-start') return;
+      // Apart, so a failed merge never keeps the CLI link from being refreshed.
+      try { U.migrateProfiles(); } catch (err) { U.logError('merging old profile stores failed', err); }
+      L.linkBin();
     } catch (err) {
       U.logError(`hook ${pos[0]} failed`, err);
     }
