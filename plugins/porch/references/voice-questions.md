@@ -4,7 +4,7 @@
 
 A rule never asks for content the brief does not give. Where a style needs a feeling, a moment, a cost or a next step, the rule applies only when the brief has it. The brief's reader, outline and length, the type's template and `body-format.md` always win over a voice rule.
 
-Rules are worded so any one option of each question can sit with any option of another. A rule that relaxes a base Default says so, or covers the same thing.
+Where two rules meet, the more specific one wins: a rule about one part (the opening, the ending, failures, code, terms) over a general one. `voice.md` says so, and the skill asks the author about any clash that rule does not settle. A rule that relaxes a base Default says so, or covers the same thing.
 
 Labels are at most 4 words, so ` (Recommended)` still fits.
 
@@ -216,7 +216,7 @@ Areas, in the order they appear in `voice.md`:
 - description: Own it with some self-deprecating humour.
 - preview:
   > My first fix was to throw more workers at it. Two flaky days later, I opened the profiler like I should have on day one.
-- rule: Own your mistakes with light, self-deprecating humour. Keep the joke to one line.
+- rule: Own your mistakes with light, self-deprecating humour about facts the brief gives. Keep the joke to one line.
 
 #### `brief` Brief, then the fix
 - description: Professional. A mistake is one sentence, then on to the fix.
@@ -269,7 +269,7 @@ Areas, in the order they appear in `voice.md`:
 - description: An occasional dry remark.
 - preview:
   > The run went from 14 minutes to 3. The coffee machine misses me.
-- rule: Allow an occasional dry remark, at most one per section.
+- rule: Allow an occasional dry remark about facts the brief gives, at most one per section.
 
 #### `warm` Warm and playful
 - description: Show the fun and the frustration.
@@ -495,4 +495,4 @@ Areas, in the order they appear in `voice.md`:
 - description: Some humour, looking back from safety.
 - preview:
   > For ten minutes the queue was the busiest thing in the building, including me. Then I rolled back.
-- rule: Allow some lightness when telling a failure that is fixed, in one line, without making light of its impact.
+- rule: Allow some lightness about facts the brief gives when telling a failure that is fixed, in one line, without making light of its impact.

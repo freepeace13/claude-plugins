@@ -203,7 +203,8 @@ test('brief, writer and review read the base voice and voice_user', () => {
   const draft = read('skills/draft/SKILL.md');
   assert.match(draft, /set `plugin_root` to `\$\{CLAUDE_PLUGIN_ROOT\}`/);
   assert.match(draft, /set `voice_user` to it; otherwise remove the `voice_user` line/);
-  assert.match(draft, /For `kind=draft`.*AC-5 checks only the Fixed rules/);
+  assert.match(draft, /For `kind=draft`.*AC-5 fails only on what the writer added/);
+  assert.match(fs.readFileSync(path.join(ROOT, "skills/voice/SKILL.md"), "utf8"), /\*\*extra\*\*/);
   const voice = read('skills/voice/SKILL.md');
   assert.match(voice, /voice\.md\.bak`; if that already exists, read it before writing/);
   assert.match(voice, /voice\.handwritten-2\.md/);
