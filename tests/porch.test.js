@@ -189,7 +189,7 @@ test('voice skill lists every question id in its format, and each area table row
 
 test('voice skill writes only the voice file and never calls Porch', () => {
   const fm = frontmatter(path.join(ROOT, 'skills/voice/SKILL.md'));
-  assert.match(fm, /^allowed-tools: Read, Write, AskUserQuestion, Bash\(porch:\*\)$/m);
+  assert.match(fm, /^allowed-tools: Read, Write, Glob, AskUserQuestion, Bash\(porch:\*\)$/m);
   assert.doesNotMatch(fm, /mcp__/);
 });
 
@@ -204,7 +204,8 @@ test('brief, writer and review read the base voice and voice_user', () => {
   assert.match(draft, /set `plugin_root` to `\$\{CLAUDE_PLUGIN_ROOT\}`/);
   assert.match(draft, /set `voice_user` to it; otherwise remove the `voice_user` line/);
   assert.match(draft, /For `kind=draft`.*AC-5 fails only on what the writer added/);
-  assert.match(fs.readFileSync(path.join(ROOT, "skills/voice/SKILL.md"), "utf8"), /\*\*extra\*\*/);
+  assert.match(fs.readFileSync(path.join(ROOT, "skills/voice/SKILL.md"), "utf8"), /\n## My additions\n/);
+  assert.match(draft, /with Edit, which you use for nothing else, editing only these frontmatter lines in `dir\/brief\.md`/);
   const voice = read('skills/voice/SKILL.md');
   assert.match(voice, /voice\.md\.bak`; if that already exists, read it before writing/);
   assert.match(voice, /voice\.handwritten-2\.md/);
