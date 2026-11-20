@@ -201,11 +201,12 @@ test('brief, writer and review read the base voice and voice_user', () => {
   for (const f of ['agents/writer.md', 'skills/draft/SKILL.md']) assert.match(read(f), /references\/voice\.md/, f);
   assert.match(read('agents/writer.md'), /Fixed rules always apply/);
   const draft = read('skills/draft/SKILL.md');
-  assert.match(draft, /set `plugin_root` to `\$\{CLAUDE_PLUGIN_ROOT\}`/);
-  assert.match(draft, /set `voice_user` to it; otherwise remove the `voice_user` line/);
+  assert.match(draft, /`plugin_root` should be `\$\{CLAUDE_PLUGIN_ROOT\}`/);
+  assert.match(draft, /When all three already match, skip the Edit/);
+  assert.match(draft, /`voice_user` should be that path; otherwise there should be no `voice_user` line/);
   assert.match(draft, /For `kind=draft`.*AC-5 fails only on what the writer added/);
   assert.match(fs.readFileSync(path.join(ROOT, "skills/voice/SKILL.md"), "utf8"), /\n## My additions\n/);
-  assert.match(draft, /with Edit, which you use for nothing else, editing only these frontmatter lines in `dir\/brief\.md`/);
+  assert.match(draft, /with Edit, which you use for nothing else, changing only these frontmatter lines in `dir\/brief\.md`/);
   const voice = read('skills/voice/SKILL.md');
   assert.match(voice, /voice\.md\.bak`; if that already exists, read it before writing/);
   assert.match(voice, /voice\.handwritten-2\.md/);

@@ -30,7 +30,7 @@ Input: `$ARGUMENTS`. If it has `--from`, everything after it is a path to a piec
 
 ## voice.md format
 
-Replace every `<...>` placeholder. `updated` is today's date. Each `answers` value is the chosen option's id from the bank, or `other`. Write no comments into the file.
+Replace every `<...>` placeholder. `updated` is today's date. Each `answers` value is the chosen option's id from the bank, or `other`. Write no comments into the file, except the one in an empty My additions section. My additions is always the last section; only text under that heading is kept on a rerun.
 
 ```markdown
 ---
@@ -83,13 +83,13 @@ This extends the Porch base voice. Where a rule here covers the same thing as on
 - <depth rule>
 - <pressure rule>
 
-## My additions
-
-<the old file's section word for word, or the empty-section comment>
-
 ## Sample
 
 The paragraph below shows rhythm and tone only. Its content is invented; never reuse it in a draft.
 
 <the sample the author approved>
+
+## My additions
+
+<the old file's section word for word, or the empty-section comment>
 ```

@@ -489,7 +489,7 @@ Areas, in the order they appear in `voice.md`:
 - description: Systems, not people. What the system allowed and what changed.
 - preview:
   > The deploy process let a migration run before the workers drained. We changed the order.
-- rule: Tell failures blamelessly: describe what the system allowed and what changed, never who was at fault.
+- rule: Tell failures blamelessly: describe what the system allowed and what changed, never which other person was at fault. Your own mistakes follow the candor rule.
 
 #### `light` Light, once it's fixed
 - description: Some humour, looking back from safety.
