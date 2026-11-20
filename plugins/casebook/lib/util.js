@@ -251,7 +251,7 @@ function renderDoc(meta, body) {
 
 /** A log's summary: the paragraph between its title and its first section. */
 function logSummary(body) {
-  return String(body || '').replace(/^\s*# .*\n+/, '').split(/\n## /)[0].trim();
+  return String(body || '').replace(/^\s*# .*\n+/, '').split(/^## /m)[0].trim();
 }
 
 // ---------- misc ----------

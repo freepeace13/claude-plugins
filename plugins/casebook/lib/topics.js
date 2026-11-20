@@ -284,6 +284,9 @@ function applyTopic(topic, ctx) {
   // Fields older casebooks kept that nothing reads any more.
   for (const k of ['partial', 'partial_sessions', 'scouted_at', 'scout_mode']) delete survivor.meta[k];
   if (!survivor.meta.merged_from.length) delete survivor.meta.merged_from;
+  // Write-ups recorded by casebooks before 0.3 stay with the story.
+  const written = uniq(prior.flatMap((l) => l.meta.written_to || []));
+  if (written.length) survivor.meta.written_to = written;
   survivor.body = body;
   // A session whose folder is gone resolves to a guess (its folder's name, no repo): the log keeps the project
   // and repo it already had, and only ever gets a stricter policy.

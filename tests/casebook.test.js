@@ -18,9 +18,8 @@ function sandbox() {
     CASEBOOK_HOME: path.join(root, 'casebook'),
     CLAUDE_CONFIG_DIR: path.join(root, 'claude'),
     CASEBOOK_BIN_DIR: path.join(root, 'bin'),
-    CASEBOOK_SCOUT: '',
   };
-  delete env.CASEBOOK_SCOUT;
+  delete env.CASEBOOK_SCAN;
 
   // A git repo standing in for a real project.
   const repo = path.join(root, 'acme-api');
@@ -930,7 +929,7 @@ console.log(JSON.stringify({score:4,title:'T',summary:'s',problem:'p',constraint
   fs.chmodSync(stub, 0o755);
 
   const baseEnv = { ...process.env, HOME: home, CASEBOOK_HOME: cb, CASEBOOK_BIN_DIR: path.join(root, 'bin') };
-  delete baseEnv.CASEBOOK_PROFILE; delete baseEnv.CASEBOOK_SCOUT; delete baseEnv.CLAUDE_CONFIG_DIR;
+  delete baseEnv.CASEBOOK_PROFILE; delete baseEnv.CASEBOOK_SCAN; delete baseEnv.CLAUDE_CONFIG_DIR;
   const config = JSON.stringify({ defaultPolicy: 'public', scan: { command: stub, minTurns: 2 } });
   const seedStore = (dir = cb) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'config.json'), config); };
 
@@ -1087,6 +1086,15 @@ test('a session in two stores keeps the marks and deleted topics of both; a log 
   assert.strictEqual(fs.readFileSync(path.join(store, 'logs/acme-api/cb-same01.md'), 'utf8'), 'old');
   assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /1 file\(s\) already present .* were left in/);
   assert.ok(fs.existsSync(path.join(store, 'profile.migrated.json')));
+});
+
+test('discovery skill: scans this session too, and passes --force on', () => {
+  const skill = fs.readFileSync(path.resolve(__dirname, '../plugins/casebook/skills/discovery/SKILL.md'), 'utf8');
+  assert.doesNotMatch(skill, /--exclude/);
+  assert.match(skill, /argument-hint: .*\[--force\]/);
+  assert.match(skill, /`--force` pass through/);
+  const { logSummary } = require('../plugins/casebook/lib/util');
+  assert.strictEqual(logSummary('# T\n\n\n## Problem\np'), '', 'an empty summary is not the Problem section');
 });
 
 test('marketplace is named kinbasco-plugins', () => {

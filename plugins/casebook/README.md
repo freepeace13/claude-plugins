@@ -29,7 +29,7 @@ casebook config      # prints the path, ~/.casebook/config.json
 
 | Command | What it does |
 |---|---|
-| `/casebook:discovery [note] [--score N] [--tags a,b] [--all \| --project P] [--since 90d]` | Find topics in your sessions, rank the best 3 and log the one you pick. See Discovery. |
+| `/casebook:discovery [note] [--score N] [--tags a,b] [--all \| --project P] [--since 90d] [--force]` | Find topics in your sessions, rank the best 3 and log the one you pick. See Discovery. |
 | `/casebook:mark [note]` | Mark the current session. With no note, Claude writes a one-line note itself. |
 | `/casebook:mark <id> [note]` | Mark an existing log. |
 | `/casebook:list [--marked] [--all \| --project P] [--min-score N] [--since 30d]` | List logs. Defaults to the current repository's project. |
@@ -113,7 +113,7 @@ A log is one topic, not one session.
 
 `/casebook:discovery` is how logs are made. It looks across sessions, so work carried over several of them becomes one log:
 
-1. **Collect.** It reads every transcript of this profile from the last 90 days (`--since`), in the current project (`--all` or `--project P` to widen it). Skipped projects stay out. Sessions that are already logged stay in: a new scan can find another angle.
+1. **Collect.** It reads every transcript of this profile from the last 90 days (`--since`), this session's too as far as it has gone, in the current project (`--all` or `--project P` to widen it). Skipped projects stay out. Sessions that are already logged stay in: a new scan can find another angle.
 2. **Link.** Sessions of one project are linked when the later one continues the earlier one, within 14 days:
    - the same pull request,
    - the same feature branch (not `main`, `master`, `develop` and the like),
