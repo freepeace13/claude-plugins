@@ -131,7 +131,7 @@ Areas, in the order they appear in `voice.md`:
 - description: Show the doubts you had at the time, and what you still don't know.
 - preview:
   > I wasn't sure caching would hold. Some tests might write to those tables, and I still haven't checked all of them.
-- rule: Show the reasoning as it happened, including the doubts the brief records. Say plainly what is still unknown, without apologising.
+- rule: Show the reasoning as it happened, including the doubts the brief records, without apologising. The brief's Unknowns are still written around with a verify marker.
 
 #### `strong` Strong opinions
 - description: Direct advice, in the imperative.

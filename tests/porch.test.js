@@ -176,7 +176,7 @@ test('voice skill lists every question id in its format, and each area table row
   const skill = fs.readFileSync(path.join(ROOT, 'skills/voice/SKILL.md'), 'utf8');
   const bank = fs.readFileSync(path.join(ROOT, 'references/voice-questions.md'), 'utf8');
   for (const q of questionBank()) {
-    assert.match(skill, new RegExp(`\\n  ${q.id}: \\w+`), q.id);
+    assert.match(skill, new RegExp(`\\n  ${q.id}: <option id or other>\\n`), q.id);
     assert.match(skill, new RegExp(`<${q.id} rule>`), q.id);
   }
   // Each area's table row lists exactly its questions, in bank order.
@@ -202,7 +202,8 @@ test('brief, writer and review read the base voice and voice_user', () => {
   assert.match(read('agents/writer.md'), /Fixed rules always apply/);
   const draft = read('skills/draft/SKILL.md');
   assert.match(draft, /set `plugin_root` to `\$\{CLAUDE_PLUGIN_ROOT\}`/);
-  assert.match(draft, /add `voice_user` with that path/);
+  assert.match(draft, /set `voice_user` to it; otherwise remove the `voice_user` line/);
+  assert.match(draft, /For `kind=draft`.*AC-5 checks only the Fixed rules/);
   const voice = read('skills/voice/SKILL.md');
   assert.match(voice, /If a `voice\.md\.bak` already exists, read it before writing/);
   assert.match(voice, /The `updated` date and the Sample section are always new/);

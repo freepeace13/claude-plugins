@@ -19,7 +19,7 @@ Input: `$ARGUMENTS`. If it has `--from`, everything after it is a path to a piec
 3. **Ask the questions** with AskUserQuestion, at most 4 per call, in the bank's order: Q1 to Q4, Q5 to Q8, Q9 to Q12, Q13 to Q16 (for one area, its questions only, at most 4 per call). For each question, use the bank's `header`, `question`, and each option's label, description and preview, with `multiSelect: false`. Keep the bank's option order unless step 2 moved one first. Map each chosen label back to its option id, after removing any ` (Recommended)` suffix. Do not add, drop or reword questions.
    - **Other.** When the author writes their own answer, turn it into one rule in the imperative that keeps their meaning and their key words, and record the answer as `other`. If part of it breaks a Fixed rule of the base voice (for example, invented numbers or third person), drop that part and say in one line that the base rule stays.
 4. **Build the file** in the format below. Write one bullet per question, in bank order under its area's heading, using the option's rule word for word or the rule made from an Other answer. On a one-area redo, rebuild only that area's section and its `answers` keys, and copy the other sections and their `answers` keys from the old file unchanged. The `updated` date and the Sample section are always new. Then read all the rules together. If two of them contradict each other (most often an Other answer against a chosen option), ask the author in one question which one wins. Change only a rule in the area being asked (all of them on a full run), never one in a kept section, and record a reworded rule's answer as `other`.
-5. **Write a sample** of 90 to 130 words in the new voice. Make it about an invented, everyday engineering moment (not one of the bank's previews, and nothing about the author's real work), with one heading if the layout answer uses headings. Show it, and ask one question: "Sounds like me", "Adjust an area" or "Start over".
+5. **Write a sample** of 90 to 130 words in the new voice. Make it about an invented, everyday engineering moment (not one of the bank's previews, and nothing about the author's real work), as one or two paragraphs with no heading. Show it, and ask one question: "Sounds like me", "Adjust an area" or "Start over".
    - Adjust: ask which area, ask that area's questions again, rebuild, and write a new sample.
    - Start over: this is now a full run. Go back to step 3 with all 16 questions, keeping step 2's recommendations, and rebuild every section in step 4.
    - After three adjustments, suggest using "Other" on the question that still feels off.
@@ -28,27 +28,29 @@ Input: `$ARGUMENTS`. If it has `--from`, everything after it is a path to a piec
 
 ## voice.md format
 
+Replace every `<...>` placeholder. `updated` is today's date. Each `answers` value is the chosen option's id from the bank, or `other`. Write no comments into the file.
+
 ```markdown
 ---
 generated_by: /porch:voice
-updated: 2026-11-20          # today's date
+updated: <YYYY-MM-DD>
 answers:
-  rhythm: punch              # option id, or other
-  pauses: oneline
-  pace: first
-  stance: reasoned
-  words: gloss
-  reader: advice
-  candor: relevant
-  emoji: never
-  mood: dry
-  layout: skim
-  openings: story
-  register: neutral
-  format: lists
-  ending: takeaway
-  depth: brief
-  pressure: calm
+  rhythm: <option id or other>
+  pauses: <option id or other>
+  pace: <option id or other>
+  stance: <option id or other>
+  words: <option id or other>
+  reader: <option id or other>
+  candor: <option id or other>
+  emoji: <option id or other>
+  mood: <option id or other>
+  layout: <option id or other>
+  openings: <option id or other>
+  register: <option id or other>
+  format: <option id or other>
+  ending: <option id or other>
+  depth: <option id or other>
+  pressure: <option id or other>
 ---
 
 # My voice
