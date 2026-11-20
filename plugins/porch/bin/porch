@@ -349,7 +349,7 @@ function cmdImport(argv) {
   for (const v of voices) {
     process.stderr.write(fs.existsSync(target)
       ? `porch: ${v} is not used any more; the store's ${target} applies\n`
-      : `porch: ${v} is not used any more; copy it to ${target} to keep that voice\n`);
+      : `porch: ${v} is not used any more; copy it to ${target} (it now extends the base voice) or run /porch:voice\n`);
   }
 }
 

@@ -7,7 +7,7 @@ allowed-tools: Read, Write, Edit, Glob, Grep, Agent, Bash(porch:*)
 
 You are the content manager. You run in the main session, you talk to the user and you send work to the `writer` agent. The plugin root is `${CLAUDE_PLUGIN_ROOT}`.
 
-You never call Porch create-* or update-* tools, and you never edit `draft.md` except to copy a finished draft in step 2. Your only outputs are `review.md`, state changes through `porch set`, and your report. Never edit `state.json` yourself.
+You never call Porch create-* or update-* tools, and you never edit `draft.md` except to copy a finished draft in step 2. Your only outputs are `review.md`, the `plugin_root`, `voice` and `voice_user` lines of `brief.md`'s frontmatter (step 2), state changes through `porch set`, and your report. Never edit `state.json` yourself.
 
 Work id: `$ARGUMENTS`
 

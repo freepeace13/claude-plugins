@@ -7,13 +7,13 @@ allowed-tools: Read, Write, AskUserQuestion, Bash(porch:*)
 
 You capture how the author writes and save it as their voice file. You ask questions, write one sample paragraph and write one file, `voice.md`, plus its backup. The plugin root is `${CLAUDE_PLUGIN_ROOT}`. Before step 1, read `${CLAUDE_PLUGIN_ROOT}/references/voice-questions.md` (the 16 questions, their previews and the rule each option writes) and `${CLAUDE_PLUGIN_ROOT}/references/voice.md` (the base voice and its Fixed rules).
 
-You never call Porch tools and never touch work folders. You write only `<home>/voice.md` and `<home>/voice.md.bak`.
+You never call Porch tools and never touch work folders. You write only `<home>/voice.md` and one backup: `<home>/voice.md.bak` for a file this skill made, `<home>/voice.handwritten.md` for one the author wrote.
 
 Input: `$ARGUMENTS`. If it has `--from`, everything after it is a path to a piece the author wrote, which may contain spaces (drop surrounding quotes, and backslashes before spaces). Anything else in the arguments is not used; say so in one line and go on.
 
 1. **Find the voice file.** Run `porch home`. The target is that path plus `/voice.md`. If the target exists, read it.
    - If its frontmatter has `generated_by: /porch:voice` and `answers`, ask one question: redo all 16, redo one area, or cancel. For one area, ask which (Rhythm, Presence, Delivery, Audience). Only that area's questions are asked; the other sections stay word for word.
-   - If it exists without that frontmatter, the author wrote it by hand. Ask: replace it (it is kept as `voice.md.bak`), or cancel. Say that it now extends the base voice instead of replacing it: it still works as it is, but the base Defaults now also apply on every point it does not cover.
+   - If it exists without that frontmatter, the author wrote it by hand. Ask: replace it (it is kept as `voice.handwritten.md`, which later runs never touch), or cancel. Say that it now extends the base voice instead of replacing it: it still works as it is, but the base Defaults now also apply on every point it does not cover.
    - On cancel, stop. Nothing is written.
 2. **Read the sample, with `--from` only.** If the file is missing or not text, say so and stop. Read it as the author's writing. For each question, pick the option whose rule the file clearly follows. Pick none when the file gives no clear evidence, and never guess. A picked option goes first in its question, with ` (Recommended)` added to its label and `Seen in your file: "<at most 12 words quoted>"` added to its description. Never copy the file's content into `voice.md`.
 3. **Ask the questions** with AskUserQuestion, at most 4 per call, in the bank's order: Q1 to Q4, Q5 to Q8, Q9 to Q12, Q13 to Q16 (for one area, its questions only, at most 4 per call). For each question, use the bank's `header`, `question`, and each option's label, description and preview, with `multiSelect: false`. Keep the bank's option order unless step 2 moved one first. Map each chosen label back to its option id, after removing any ` (Recommended)` suffix. Do not add, drop or reword questions.
@@ -23,7 +23,7 @@ Input: `$ARGUMENTS`. If it has `--from`, everything after it is a path to a piec
    - Adjust: ask which area, ask that area's questions again, rebuild, and write a new sample.
    - Start over: this is now a full run. Go back to step 3 with all 16 questions, keeping step 2's recommendations, and rebuild every section in step 4.
    - After three adjustments, suggest using "Other" on the question that still feels off.
-6. **Save.** If the target exists, first write its current content to `<home>/voice.md.bak`. If a `voice.md.bak` already exists, read it before writing, since Write refuses to replace a file it has not read; the new backup replaces it. Then write the target. If a write is refused, say so, show the file content so the author can save it, and do not say it was saved.
+6. **Save.** If the target exists, first back up its current content: to `<home>/voice.md.bak` when it has `generated_by: /porch:voice`, else to `<home>/voice.handwritten.md`. If that backup file already exists, read it before writing, since Write refuses to replace a file it has not read; the new backup replaces it. Then write the target. If a write is refused, say so, show the file content so the author can save it, and do not say it was saved.
 7. **Report** in 3 to 4 lines: the path, the backup path if one was made, the number of rules, and "every draft from now on uses it, including drafts of pieces already briefed".
 
 ## voice.md format

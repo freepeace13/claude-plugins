@@ -31,7 +31,7 @@ Text only: no images in or out. Tags, covers and featuring stay admin steps; the
 | Content and delivery → Delivery | layout, how ideas come in, formality, formatting, endings |
 | Audience → Audience | how much to explain to the brief's reader, how failures are told |
 
-Each answer writes a fixed rule from [references/voice-questions.md](references/voice-questions.md), so the same answers always give the same rules (the sample paragraph and the date change on each run). A rule never asks for content the brief lacks, and the brief's reader, outline and length always win. "Other" turns your own words into the rule. `--from <file>` reads a piece you wrote and marks the option it matches as "(Recommended)" on each question where the evidence is clear. Run it again to redo everything or one area. The old file is kept as `voice.md.bak`. A hand-written `voice.md` works too, since it also extends the base voice.
+Each answer writes a set rule from [references/voice-questions.md](references/voice-questions.md), so the same answers always give the same rules (the sample paragraph and the date change on each run). A rule never asks for content the brief lacks, and the brief's reader, outline and length always win. "Other" turns your own words into the rule. `--from <file>` reads a piece you wrote and marks the option it matches as "(Recommended)" on each question where the evidence is clear. Run it again to redo everything or one area. The previous file is kept as `voice.md.bak`, and a hand-written one you replace as `voice.handwritten.md`, which later runs leave alone. A hand-written `voice.md` works too, since it also extends the base voice.
 
 ## The store
 
