@@ -16,7 +16,8 @@ const { runClaudeAsync, POLICY_RULES, acquireSessionLock } = require('./scout');
 const MAX_CHAIN = 6;          // sessions in one linked topic
 const LINK_DAYS = 14;         // how far apart linked sessions may be
 const TRUNKS = new Set(['main', 'master', 'develop', 'dev', 'trunk', 'head', 'staging', 'production']);
-const CONTINUE_RE = /\b(continu\w*|pick(?:ing)? up|resum\w*|left off|previous session|last session|hand-?off|carry on|where we were)\b/i;
+// Phrases, not word stems: "continuous integration" or "resume.pdf" is not a continued session.
+const CONTINUE_RE = /\b(continue (?:where|from|with (?:the|our|my)|on (?:the|our|my)|working)|let'?s continue|pick(?:ing)? up (?:where|from)|resume (?:where|from|the|our|my|work)|left off|previous session|last session|earlier session|other session|hand-?off|carry on|where we were)\b/i;
 const DOC_RE = /\.(md|mdx|txt|rst)$/i;
 const COMMON_DOCS = /^(readme|changelog|claude|agents|license|contributing)\.md$/i;
 const STOP = new Set(('a an and any are as at be by can could find for from get has have how i in into is it its look looking me my '
@@ -55,6 +56,11 @@ function collectSessions(config, { project, since, exclude, force }) {
       if (since && st.mtimeMs < since.getTime()) continue;
       // Deleted before topics existed: the whole session stays closed unless --force.
       if (!force && T.legacyDeleted(store.getLedger(sessionId))) continue;
+      // The project first, from the head of the file: a session of another project is never read in full.
+      const cwd = peekCwd(file);
+      if (cwd && !byCwd.has(cwd)) byCwd.set(cwd, resolveProject(cwd, config));
+      const early = cwd && byCwd.get(cwd);
+      if (early && (early.policy === 'skip' || (project && early.project !== project))) continue;
       let t;
       try { t = condense(file, config.scout.maxChars); } catch { continue; }
       if (!t.userTurns) continue;
@@ -77,6 +83,20 @@ function collectSessions(config, { project, since, exclude, force }) {
   return out.sort((a, b) => t0(a.startedAt) - t0(b.startedAt));
 }
 
+/** The first cwd recorded in a transcript, from its first 64 KB only; null if none is found there. */
+function peekCwd(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(65536);
+    const head = buf.subarray(0, fs.readSync(fd, buf, 0, buf.length, 0)).toString('utf8');
+    for (const line of head.split('\n')) {
+      try { const e = JSON.parse(line); if (e && e.cwd) return e.cwd; } catch { /* a cut line */ }
+    }
+  } catch { /* unreadable */ } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch { /* closed */ } }
+  return null;
+}
+
 // ---------- link ----------
 
 const base = (f) => path.basename(String(f));
@@ -86,8 +106,10 @@ function linkReason(a, b, latestBefore) {
   const gap = t0(b.startedAt) - t0(a.endedAt);
   if (gap > LINK_DAYS * DAY || gap < -DAY) return null;
   const pr = a.prUrls.find((u) => b.prUrls.includes(u));
-  if (pr) return { strength: 3, why: `same pull request ${pr.replace(/^https?:\/\/(www\.)?github\.com\//, '')}` };
-  if (a.branch && a.branch === b.branch && !TRUNKS.has(a.branch.toLowerCase())) return { strength: 3, why: `same branch ${a.branch}` };
+  // Only a public project's reasons name the repository and branch: they go into the prompt.
+  const pub = a.policy === 'public';
+  if (pr) return { strength: 3, why: pub ? `same pull request ${pr.replace(/^https?:\/\/(www\.)?github\.com\//, '')}` : 'same pull request' };
+  if (a.branch && a.branch === b.branch && !TRUNKS.has(a.branch.toLowerCase())) return { strength: 3, why: pub ? `same branch ${a.branch}` : 'same feature branch' };
   const opening = b.opening.toLowerCase();
   const handoff = a.files.find((f) => {
     const name = base(f);
@@ -188,7 +210,8 @@ function sessionsBlock(members, maxChars) {
   const each = Math.max(4000, Math.floor(maxChars / members.length));
   return members.map((m, i) => {
     const t = condense(m.transcriptPath, each);
-    return `### Session ${i + 1} of ${members.length} · ${String(m.startedAt || '').slice(0, 16).replace('T', ' ')} · branch ${t.branch || 'unknown'} · ${t.userTurns} turns\n${t.text}`;
+    const branch = m.policy === 'public' ? ` · branch ${t.branch || 'unknown'}` : '';
+    return `### Session ${i + 1} of ${members.length} · ${String(m.startedAt || '').slice(0, 16).replace('T', ' ')}${branch} · ${t.userTurns} turns\n${t.text}`;
   }).join('\n\n');
 }
 
@@ -255,6 +278,7 @@ async function scanChain(g, config, opts) {
       topic, members, commits,
       reasons: members.length > 1 ? g.reasons : [],
       updates: same.map((l) => l.meta.id),
+      targets: Object.fromEntries(same.map((l) => [l.meta.id, l.meta.updated_at || l.meta.created_at || ''])),
     });
   }
   return out;
@@ -303,11 +327,17 @@ async function discover(config, o) {
     .filter((f) => f.topic.score >= (o.minScore || 1) && (!narrowed || f.topic.fit >= 1))
     .sort((a, b) => b.topic.score - a.topic.score || b.topic.fit - a.topic.fit || b.members.length - a.members.length
       || Math.max(...b.members.map((m) => t0(m.endedAt))) - Math.max(...a.members.map((m) => t0(m.endedAt))))
+    // Chains near each other see the same logs: only the best topic may update a given log.
+    .filter(((taken) => (f) => {
+      if (f.updates.some((id) => taken.has(id))) return false;
+      for (const id of f.updates) taken.add(id);
+      return true;
+    })(new Set()))
     .slice(0, o.top || 3)
     .map((f, i) => {
       const first = f.members[0];
       return {
-        rank: i + 1, score: f.topic.score, fit: f.topic.fit, topic: f.topic, reasons: f.reasons, updates: f.updates,
+        rank: i + 1, score: f.topic.score, fit: f.topic.fit, topic: f.topic, reasons: f.reasons, updates: f.updates, targets: f.targets,
         commits: f.commits,
         info: { project: first.project, repo: first.repo, policy: first.policy, root: first.root },
         members: f.members.map(memberRecord),
@@ -352,6 +382,12 @@ function pick(config, id, n) {
     if (gone.length && gone.length === t.updates.length) {
       throw new Error(`the log this topic updates is gone (${gone.join(', ')}); run discovery again`);
     }
+    // The notes were taken from the logs as they were then: a log changed since would lose its new notes.
+    const changed = t.updates.filter((uid) => {
+      const l = T.resolveLog(uid);
+      return l && t.targets && (l.meta.id !== uid || (l.meta.updated_at || l.meta.created_at || '') !== t.targets[uid]);
+    });
+    if (changed.length) throw new Error(`${changed.join(', ')} changed since the discovery ran; run discovery again`);
     const deleted = d.force ? [] : T.tombstones(sids);
     const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
     if (!topic) throw new Error('this topic was deleted since the discovery ran; run discovery again, or with --force');

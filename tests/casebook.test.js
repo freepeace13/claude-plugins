@@ -1171,3 +1171,95 @@ test('the write lock: a stale lock is reclaimed once; mark, unmark and written t
   assert.match(s.run(['unmark', id]).out, /Unmarked/);
   assert.strictEqual(s.run(['discover', '--candidates', '0']).stderr.trim(), 'casebook: --candidates must be a positive whole number, got "0"');
 });
+
+// ---------------------------------------------------------------- topics review, round 4
+
+test('unmarking a bare mark, or deleting a marked log, does not bring the mark back', () => {
+  const s = sandbox();
+  const bare = { type: 'user', sessionId: 'bm', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args></command-args>' } };
+  const tp = s.transcript('bm', 3, [bare]);
+  const id = JSON.parse(s.run(['scout', '--session', 'bm', '--transcript', tp, '--auto', '--json']).out).logId;
+  assert.match(s.run(['show', id]).out, /marked: true/);
+  s.run(['unmark', id]);
+  const calls = s.calls().length;
+  assert.match(s.run(['scout', '--session', 'bm', '--transcript', s.transcript('bm', 4, [bare]), '--auto']).out, /not enough new activity/);
+  assert.strictEqual(s.calls().length, calls, 'no rescan for the unmarked bare mark');
+
+  const perf = { type: 'user', sessionId: 'dm', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args>perf win</command-args>' } };
+  const tp2 = s.transcript('dm', 3, [perf]);
+  const r = JSON.parse(s.run(['scout', '--session', 'dm', '--transcript', tp2, '--auto', '--json'], {
+    env: reply(topic({ title: 'Halved p99 latency', angle: 'performance', marks: true }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })),
+  }).out);
+  const [marked, other] = r.logs.map((l) => l.logId);
+  s.run(['delete', marked]);
+  const calls2 = s.calls().length;
+  assert.match(s.run(['scout', '--session', 'dm', '--transcript', s.transcript('dm', 4, [perf]), '--auto']).out, /not enough new activity/);
+  assert.strictEqual(s.calls().length, calls2);
+  assert.match(s.run(['show', other]).out, /marked: false/);
+});
+
+test('a merged ID still opens its log; delete refuses a merged ID', () => {
+  const s = sandbox();
+  const x = JSON.parse(s.run(['scout', '--session', 'mx', '--transcript', s.transcript('mx', 3), '--json'], { env: reply(topic({ title: 'Gateway rewrite' })) }).out).logId;
+  const y = JSON.parse(s.run(['scout', '--session', 'my', '--transcript', s.transcript('my', 3), '--json'], { env: reply(topic({ title: 'Unrelated', angle: 'data' })) }).out).logId;
+  s.run(['scout', '--session', 'my', '--json'], { env: reply(topic({ title: 'Gateway rewrite, all of it', same_as: [y, x] })) });
+  const survivor = logsJson(s)[0].id;
+  const merged = survivor === x ? y : x;
+  const show = s.run(['show', merged, '--path']);
+  assert.strictEqual(show.status, 0, show.stderr);
+  assert.match(show.stderr, new RegExp(`${merged} was merged into ${survivor}`));
+  assert.ok(show.out.endsWith(`${survivor}.md`));
+  assert.strictEqual(s.run(['mark', merged, 'note']).status, 0);
+  const del = s.run(['delete', merged]);
+  assert.strictEqual(del.status, 1);
+  assert.match(del.stderr, /was merged into/);
+  assert.strictEqual(logsJson(s).length, 1);
+});
+
+test('discovery lists a log as updated by one topic only, and a pick refuses a log changed since', () => {
+  const s = sandbox();
+  const l = JSON.parse(s.run(['scout', '--session', 'base', '--transcript', s.transcript('base', 3), '--json'], { env: reply(topic({ title: 'Reconnect storms' })) }).out).logId;
+  for (const [sid, br] of [['ca', 'feat/a'], ['cb', 'feat/a'], ['da', 'feat/b'], ['db', 'feat/b']]) s.transcript(sid, 3, onBranch(sid, br));
+  const r = s.run(['discover', '--exclude', 'base'], { env: reply(topic({ title: 'Reconnect storms, end to end', same_as: [l], belongs: [1, 2] })) });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual([...r.out.matchAll(new RegExp(`updates: ${l}`, 'g'))].length, 1, r.out);
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  s.run(['mark', l, 'later note']);
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, new RegExp(`${l} changed since the discovery ran`));
+  assert.match(s.run(['show', l]).out, /^# Reconnect storms$/m);
+});
+
+test('a long chain shows the model every log of its sessions', () => {
+  const s = sandbox();
+  const ids = [];
+  for (const sid of ['l1', 'l2', 'l3', 'l4']) {
+    const tp = s.transcript(sid, 3, onBranch(sid, 'feat/long'));
+    const r = JSON.parse(s.run(['scout', '--session', sid, '--transcript', tp, '--json'], {
+      env: reply(topic({ title: `${sid} lag` }), topic({ title: `${sid} schema`, angle: 'data' }), topic({ title: `${sid} tests`, angle: 'testing' })),
+    }).out);
+    ids.push(...r.logs.map((x) => x.logId));
+  }
+  assert.strictEqual(ids.length, 12);
+  s.run(['discover'], { env: reply(topic({ title: 'All of it', same_as: ids, belongs: [1, 2, 3, 4] })) });
+  const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
+  for (const id of ids) assert.ok(prompt.includes(`### ${id} ·`), `${id} is in the prompt`);
+});
+
+test('linking: "continuous" is not a continuation; reasons name no repo or branch unless public', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const now = Date.now();
+  const sess = (id, o) => ({
+    sessionId: id, project: 'p', policy: 'anonymize', branch: 'main', prUrls: [], files: ['/r/package.json'], readFiles: [],
+    opening: '', startedAt: new Date(now - (id === 'a' ? 5 : 1) * 3600000).toISOString(),
+    endedAt: new Date(now - (id === 'a' ? 4 : 0) * 3600000).toISOString(), ...o,
+  });
+  assert.strictEqual(linkSessions([sess('a'), sess('b', { opening: 'set up continuous integration' })]).length, 2);
+  assert.strictEqual(linkSessions([sess('a'), sess('b', { opening: "let's continue where we left off" })]).length, 1);
+  const pr = ['https://github.com/acme-corp/billing/pull/12'];
+  const [g] = linkSessions([sess('a', { prUrls: pr, branch: 'acme-x' }), sess('b', { prUrls: pr, branch: 'acme-x' })]);
+  assert.ok(g.reasons.length && !g.reasons.join().match(/acme/), g.reasons.join());
+  const [pg] = linkSessions([sess('a', { prUrls: pr, policy: 'public' }), sess('b', { prUrls: pr, policy: 'public' })]);
+  assert.match(pg.reasons.join(), /acme-corp\/billing\/pull\/12/);
+});

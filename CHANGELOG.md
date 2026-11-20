@@ -6,7 +6,8 @@
 - Sessions can be scanned again at any time for other angles; a deleted log's topic never comes back (`--force` lifts that), and a session left with no logs is no longer scanned automatically
 - `/casebook:mark` on a session with several logs waits for the next scan, which gives the mark to the topic it points to
 - `/casebook:discovery [note] [--score N] [--tags a,b]`: links sessions that carry one piece of work (same pull request, feature branch, handoff file, continued opening, shared files), scans each chain for topics, ranks the best 3 and logs the one you pick
-- `casebook discover [--dry-run]` and `casebook discover pick <discovery-id> <n>`
+- `casebook discover [--dry-run]` and `casebook discover pick <discovery-id> <n>`; a pick refuses a log changed since the discovery ran
+- A merged log's old ID still works in `show`, `mark`, `unmark`, `written` and the skills (it points to the surviving log); `delete` takes exact IDs only
 - `/casebook:handoff <id…>` checks logs against `handoff.md` and writes a handoff folder (`handoff.md` + `logs/`) for a writer; `casebook out-path --handoff` names the folder
 - `out-path` names files and folders with the local date instead of the UTC date
 

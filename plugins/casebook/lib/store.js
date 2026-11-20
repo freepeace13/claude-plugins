@@ -76,7 +76,9 @@ function deleteLogLocked(log) {
     const prev = getLedger(sid) || {};
     const deletedTopics = [...(prev.deletedTopics || []), { id: m.id, title: m.title, angle: m.angle || '', at: new Date().toISOString() }];
     const stillLogged = left.some((l) => (Array.isArray(l.meta.sessions) && l.meta.sessions.length ? l.meta.sessions : [l.meta.session_id]).includes(sid));
-    setLedger(sid, { deletedTopics, ...(stillLogged ? {} : { deleted: true, deletedAt: new Date().toISOString() }) });
+    // Its marks go with it: a /casebook:mark for them in the transcript must not mark another log.
+    const unmarked = withUnmarked(prev, log);
+    setLedger(sid, { deletedTopics, unmarked, ...(stillLogged ? {} : { deleted: true, deletedAt: new Date().toISOString() }) });
   }
 }
 
@@ -138,13 +140,13 @@ function addPendingMark(sid, note) {
 const clearMarks = (sid) => fs.rmSync(marksFile(sid), { force: true });
 
 /** Remove a log's marks, and remember their notes so a /casebook:mark found in a transcript is not re-added. */
+// Empty notes count too: a bare /casebook:mark is found in the transcript as ''.
+const withUnmarked = (ledger, log) =>
+  [...new Set([...(ledger.unmarked || []), ...(log.meta.marks || []).map((m) => m.note || '')])];
+
 function clearLogMarks(log) {
-  const notes = (log.meta.marks || []).map((m) => m.note).filter(Boolean);
   const sessions = Array.isArray(log.meta.sessions) && log.meta.sessions.length ? log.meta.sessions : [log.meta.session_id].filter(Boolean);
-  for (const sid of sessions) {
-    const prev = getLedger(sid) || {};
-    setLedger(sid, { unmarked: [...new Set([...(prev.unmarked || []), ...notes])] });
-  }
+  for (const sid of sessions) setLedger(sid, { unmarked: withUnmarked(getLedger(sid) || {}, log) });
   log.meta.marked = false;
   log.meta.marks = [];
   return saveLog(log);

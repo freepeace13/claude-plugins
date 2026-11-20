@@ -26,7 +26,7 @@ function buildPrompt(t, info, marks, commits, existing = 'None yet.', maxTopics 
     POLICY: info.policy,
     POLICY_RULES: POLICY_RULES[info.policy] || POLICY_RULES.anonymize,
     PROJECT: info.policy === 'public' ? `${info.project}${info.repo ? ` (${info.repo})` : ''}` : '[anonymized]',
-    BRANCH: t.branch || 'unknown',
+    BRANCH: info.policy === 'public' ? t.branch || 'unknown' : '[anonymized]',
     MARKS: notes.length ? notes.map((n) => `"${n}"`).join('; ') : marks.length ? '(marked, no note)' : 'none',
     COMMITS: commits.length ? commits.map((c) => `- ${c}`).join('\n') : '- none',
     FILES: t.files.length ? t.files.slice(0, 40).map((f) => `- ${info.root ? path.relative(info.root, f) || f : f}`).join('\n') : '- none',

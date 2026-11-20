@@ -35,6 +35,12 @@ function parseArgs(argv) {
 
 const out = (s = '') => process.stdout.write(s + '\n');
 const fail = (msg) => { process.stderr.write(`casebook: ${msg}\n`); process.exit(1); };
+// A log merged into another one by a scan lives on under the surviving ID.
+function findLog(id) {
+  const l = id && U.ID_RE.test(id) ? T.resolveLog(id) : null;
+  if (l && l.meta.id !== id) process.stderr.write(`casebook: ${id} was merged into ${l.meta.id}\n`);
+  return l;
+}
 
 function readStdinJson() {
   try {
@@ -275,7 +281,7 @@ const commands = {
   },
 
   show({ pos, opt }) {
-    const log = store.findLog(pos[0] || '');
+    const log = findLog(pos[0] || '');
     if (!log) fail(`no log with id "${pos[0] || ''}"`);
     out(opt.path ? log.file : fs.readFileSync(log.file, 'utf8'));
   },
@@ -285,7 +291,7 @@ const commands = {
     if (pos[0] && U.ID_RE.test(pos[0])) {
       // Logs are shared between sessions: read and save under the write lock so a scan cannot undo the change.
       const log = store.withWriteLock(() => {
-        const l = store.findLog(pos[0]);
+        const l = findLog(pos[0]);
         return l && store.applyMark(l, pos.slice(1).join(' '));
       });
       if (!log) fail(`no log with id "${pos[0]}"`);
@@ -305,7 +311,7 @@ const commands = {
 
   unmark({ pos }) {
     U.loadConfig();
-    const log = store.withWriteLock(() => { const l = store.findLog(pos[0] || ''); return l && store.clearLogMarks(l); });
+    const log = store.withWriteLock(() => { const l = findLog(pos[0] || ''); return l && store.clearLogMarks(l); });
     if (!log) fail(`no log with id "${pos[0] || ''}"`);
     out(`Unmarked ${log.meta.id}`);
   },
@@ -314,7 +320,7 @@ const commands = {
     if (!opt.file) fail('written needs --file <path>');
     for (const id of pos) {
       const log = store.withWriteLock(() => {
-        const l = store.findLog(id);
+        const l = findLog(id);
         if (!l) return null;
         const list = new Set(l.meta.written_to || []);
         list.add(path.resolve(U.expandHome(opt.file)));
@@ -349,7 +355,11 @@ const commands = {
     U.loadConfig();
     let logs;
     if (pos.length) {
-      logs = pos.map((id) => store.findLog(id) || fail(`no log with id "${id}"`));
+      // Exact IDs only: deleting a merged ID must not delete the log it was merged into.
+      logs = pos.map((id) => store.findLog(id) || fail((() => {
+        const into = U.ID_RE.test(id) && T.resolveLog(id);
+        return into ? `${id} was merged into ${into.meta.id}; delete ${into.meta.id} if you mean that log` : `no log with id "${id}"`;
+      })()));
     } else {
       try { logs = F.filterLogs(opt); } catch (err) { fail(err.message); }
     }

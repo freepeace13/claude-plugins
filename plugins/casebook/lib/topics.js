@@ -9,7 +9,7 @@ const { paths, ID_RE } = require('./util');
 const store = require('./store');
 
 const NEAR_DAYS = 14;     // logs of the same project this close in time are shown to the model
-const MAX_CONTEXT = 8;    // existing logs shown to the model
+const MAX_CONTEXT = 8;    // nearby logs of other sessions shown to the model (logs of the scanned sessions always are)
 
 const t0 = (iso) => (iso ? new Date(iso).getTime() : 0);
 const normTitle = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -27,8 +27,9 @@ function logsForSessions(sids, logs = store.allLogs()) {
 }
 
 /**
- * The logs a scan of these sessions must know about: every log drawing on them first, then the project's
- * logs from around the same time (a continued session may carry on a topic logged from another one).
+ * The logs a scan of these sessions must know about: every log drawing on them (all of them, so duplicates
+ * can be merged), then the project's logs from around the same time (a continued session may carry on a
+ * topic logged from another one), up to MAX_CONTEXT in all but at least 2 of them.
  */
 function contextLogs(project, sids, startedAt, endedAt) {
   const all = store.allLogs();
@@ -40,7 +41,7 @@ function contextLogs(project, sids, startedAt, endedAt) {
     .filter((l) => !seen.has(l.meta.id) && l.meta.project === project)
     .filter((l) => t0(l.meta.ended_at || l.meta.started_at) >= from && t0(l.meta.started_at) <= to)
     .sort((a, b) => Math.abs(t0(a.meta.ended_at) - t0(startedAt)) - Math.abs(t0(b.meta.ended_at) - t0(startedAt)));
-  return [...overlap, ...near].slice(0, MAX_CONTEXT);
+  return [...overlap, ...near.slice(0, Math.max(2, MAX_CONTEXT - overlap.length))];
 }
 
 /** Topics the developer deleted from these sessions; a scan must not log them again. */
