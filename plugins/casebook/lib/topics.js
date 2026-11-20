@@ -193,7 +193,8 @@ function uniqMarks(marks) {
  * logs, they were duplicates: they merge into one (a written-up log survives, so its ID stays valid).
  *
  * ctx: { members: [{ sessionId, startedAt, endedAt, userTurns, branch, files }], info: { project, repo, policy, root },
- *        marks, partial, mode, note?, commits }
+ *        marks, partial, mode, note?, commits, claimed?, noTwins? }
+ * noTwins: write exactly the targets in same_as (or a new log), never a title match the caller did not check.
  * Call with the store lock held.
  */
 function applyTopic(topic, ctx) {
@@ -202,7 +203,7 @@ function applyTopic(topic, ctx) {
   // A log another topic of this scan already wrote (even through a title match) is not this topic's.
   let targets = [...new Map(topic.same_as.map(resolveLog).filter(Boolean).map((l) => [l.meta.id, l])).values()]
     .filter((l) => !claimed.has(l.meta.id));
-  if (!targets.length) {
+  if (!targets.length && !ctx.noTwins) {
     // Never log the same story twice for the same sessions, even if the model reworded the title and did not
     // say so. A log another topic of this scan already wrote is a different angle, not a twin.
     const mine = logsForSessions(sids).filter((l) => !claimed.has(l.meta.id));

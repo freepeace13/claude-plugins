@@ -1348,3 +1348,45 @@ test('a later session naming package.json is not a handoff', () => {
   assert.strictEqual(linkSessions([sess('a', { files: ['/r/package.json'] }), sess('b', { opening: 'why does package.json pin node 18?' })]).length, 2);
   assert.strictEqual(linkSessions([sess('a', { files: ['/r/docs/handoff.md'] }), sess('b', { opening: 'read handoff.md and carry on' })]).length, 1);
 });
+
+// ---------------------------------------------------------------- topics review, round 6
+
+test('one session\'s auto scout does not finish a log another running session feeds', () => {
+  const s = sandbox();
+  const a = s.transcript('pa6', 3, onBranch('pa6', 'feat/six'));
+  s.transcript('pb6', 3, onBranch('pb6', 'feat/six'));
+  const la = JSON.parse(s.run(['scout', '--session', 'pa6', '--transcript', a, '--json']).out).logId;
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Both halves', same_as: [la], belongs: [1, 2] })) }).out)[1];
+  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`^Updated ${la}`));
+  s.run(['scout', '--session', 'pa6', '--transcript', a, '--auto']);
+  assert.match(s.run(['show', la]).out, /partial: true/, 'pb6 may still be running');
+});
+
+test('picking a topic never overwrites a title match the discovery did not list', () => {
+  const s = sandbox();
+  s.transcript('ta6', 3, onBranch('ta6', 'feat/tw'));
+  s.transcript('tb6', 3, onBranch('tb6', 'feat/tw'));
+  const r = s.run(['discover'], { env: reply(topic({ title: 'Redis stream backpressure fix', belongs: [1, 2] }), topic({ title: 'Redis stream backpressure fix load testing', angle: 'testing', belongs: [1, 2], score: 3 })) });
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  const one = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
+  const two = s.run(['discover', 'pick', did, '2']);
+  assert.match(two.out, /^Created cb-/, two.out);
+  assert.match(s.run(['show', one]).out, /^# Redis stream backpressure fix$/m);
+});
+
+test('a pending mark reopens a session whose logs were deleted; note words lose trailing dots', () => {
+  const s = sandbox();
+  const tp = s.transcript('dl6', 3);
+  const id = JSON.parse(s.run(['scout', '--session', 'dl6', '--transcript', tp, '--auto', '--json']).out).logId;
+  s.run(['delete', id]);
+  const calls = s.calls().length;
+  s.run(['scout', '--session', 'dl6', '--transcript', tp, '--auto']);
+  assert.strictEqual(s.calls().length, calls, 'closed after the delete');
+  s.run(['mark', '--session', 'dl6', 'the real story is the cache fix']);
+  s.run(['scout', '--session', 'dl6', '--transcript', tp, '--auto'], { env: reply(topic({ title: 'Cache fix', angle: 'performance' })) });
+  assert.strictEqual(s.calls().length, calls + 1, 'the mark is placed by the next auto scan');
+  assert.ok(logsJson(s).some((l) => l.marked));
+
+  const { keywords } = require('../plugins/casebook/lib/discover');
+  assert.deepStrictEqual(keywords('webhook retries. Also redis.'), ['webhook', 'retries', 'redis']);
+});

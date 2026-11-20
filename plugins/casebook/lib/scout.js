@@ -188,8 +188,9 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const st = fs.statSync(tp);
   const size = st.size;
   const ledger = store.getLedger(sessionId) || {};
-  // Every log from this session was deleted: hooks and catch-ups leave it alone. A manual scout may look again.
-  if (ledger.deleted && !manual) return { status: 'skipped', reason: "this session's logs were deleted" };
+  // Every log from this session was deleted: hooks and catch-ups leave it alone, unless the developer marked
+  // it since. A manual scout may look again.
+  if (ledger.deleted && !manual && !store.getMarks(sessionId).length) return { status: 'skipped', reason: "this session's logs were deleted" };
   // Deleted before topics existed: nothing says which topic it was, so the whole session stays closed.
   if (T.legacyDeleted(ledger) && !force) return { status: 'skipped', reason: "this session's log was deleted (use --force to scout it again)" };
 
@@ -219,7 +220,8 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
       // The session is over (hook) or settled and nothing was added since the partial scout:
       // the notes are already complete, so finish the logs without another model call.
       // Read each log again under the lock: another session's scan may have updated it since.
-      const done = mine.filter((l) => l.meta.partial === true).map((l) => l.meta.id);
+      // Only logs of this session alone: another session of a log may still be running.
+      const done = mine.filter((l) => l.meta.partial === true && T.sessionsOf(l).every((sid) => sid === sessionId)).map((l) => l.meta.id);
       store.withWriteLock(() => {
         for (const id of done) { const l = store.findLog(id); if (l && l.meta.partial === true) { l.meta.partial = false; store.saveLog(l); } }
       });
@@ -370,7 +372,7 @@ function candidateTranscripts({ since, exclude, settleMinutes = 0 }) {
       if (since && st.mtimeMs < since.getTime()) continue;
       if (st.mtimeMs > settled) continue;
       const ledger = store.getLedger(sessionId);
-      if (ledger && (ledger.deleted || ledger.skipped === 'policy' || ledger.size === st.size)) continue;
+      if (ledger && ((ledger.deleted && !store.getMarks(sid).length) || ledger.skipped === 'policy' || ledger.size === st.size)) continue;
       out.push({ sessionId, transcriptPath: file, mtimeMs: st.mtimeMs });
     }
   }

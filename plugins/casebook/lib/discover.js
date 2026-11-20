@@ -180,7 +180,7 @@ function linkSessions(sessions) {
 // ---------- shortlist ----------
 
 const norm = (s) => String(s || '').toLowerCase().replace(/[-_/]+/g, ' ');
-const keywords = (note) => [...new Set(norm(note).split(/[^a-z0-9.+#]+/).filter((w) => w.length >= 3 && !STOP.has(w) && !/^\d+$/.test(w)))];
+const keywords = (note) => [...new Set(norm(note).split(/[^a-z0-9.+#]+/).map((w) => w.replace(/^\.+|\.+$/g, '')).filter((w) => w.length >= 3 && !STOP.has(w) && !/^\d+$/.test(w)))];
 // Whole words only, and any character in a tag or file name is taken literally.
 const hasWord = (text, w) => new RegExp(`(^|[^a-z0-9])${w.replace(/[.*+?^${}()|[\]\\#/-]/g, '\\$&')}(?![a-z0-9])`, 'i').test(text);
 
@@ -276,7 +276,9 @@ async function scanChain(g, config, opts) {
   for (const topic of T.screenTopics(found, deleted, context)) {
     const idx = [...new Set(topic.belongs.filter((i) => i >= 1 && i <= g.members.length))].sort((a, b) => a - b);
     const members = idx.length ? idx.map((i) => g.members[i - 1]) : g.members;
-    const same = topic.same_as.map((id) => byId.get(id) || T.resolveLog(id)).filter(Boolean);  // screened: shown logs only
+    // A shown log merged into another one during the call resolves to a log the model never saw: drop the topic.
+    if (topic.same_as.some((id) => !byId.has(id))) continue;
+    const same = topic.same_as.map((id) => byId.get(id));
     // Already logged with these very sessions and nothing to merge: not a discovery.
     if (same.length === 1 && members.every((m) => T.sessionsOf(same[0]).includes(m.sessionId))) continue;
     out.push({
@@ -383,27 +385,28 @@ function pick(config, id, n) {
       if (!release) throw new Error(`a scout of session ${sid.slice(0, 8)} is running; try again in a minute`);
       releases.push(release);
     }
-    const gone = t.updates.filter((uid) => !T.resolveLog(uid));
-    if (gone.length && gone.length === t.updates.length) {
-      throw new Error(`the log this topic updates is gone (${gone.join(', ')}); run discovery again`);
-    }
-    // The notes were taken from the logs as they were then: a log changed since would lose its new notes.
-    const changed = t.updates.filter((uid) => {
-      const l = T.resolveLog(uid);
-      return l && t.targets && (l.meta.id !== uid || (l.meta.updated_at || l.meta.created_at || '') !== t.targets[uid]);
-    });
-    if (changed.length) throw new Error(`${changed.join(', ')} changed since the discovery ran; run discovery again`);
-    const deleted = d.force ? [] : T.tombstones(sids);
-    const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
-    if (!topic) throw new Error('this topic was deleted since the discovery ran; run discovery again, or with --force');
-
     // Partial as of now, not as of the discovery: a session that has since settled is finished.
     const settled = Date.now() - (config.sweep.settleMinutes || 0) * 60000;
     const partial = sids.some((sid) => { const f = findTranscript(sid); try { return f && fs.statSync(f).mtimeMs > settled; } catch { return false; } });
+    // Every check runs under the write lock, so no scan can change a target between the check and the write.
     const r = store.withWriteLock(() => {
+      const gone = t.updates.filter((uid) => !T.resolveLog(uid));
+      if (gone.length && gone.length === t.updates.length) {
+        throw new Error(`the log this topic updates is gone (${gone.join(', ')}); run discovery again`);
+      }
+      // The notes were taken from the logs as they were then: a log changed since would lose its new notes.
+      const changed = t.updates.filter((uid) => {
+        const l = T.resolveLog(uid);
+        return l && t.targets && (l.meta.id !== uid || (l.meta.updated_at || l.meta.created_at || '') !== t.targets[uid]);
+      });
+      if (changed.length) throw new Error(`${changed.join(', ')} changed since the discovery ran; run discovery again`);
+      const deleted = d.force ? [] : T.tombstones(sids);
+      const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
+      if (!topic) throw new Error('this topic was deleted since the discovery ran; run discovery again, or with --force');
       const bySession = topic.marks ? sids.map((sid) => [sid, store.getMarks(sid)]) : [];
+      // Exactly the logs the discovery listed: a title match it did not show is never overwritten.
       const res = T.applyTopic(topic, {
-        members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), partial, mode: 'discovery', note: d.note, commits: t.commits,
+        members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), partial, mode: 'discovery', note: d.note, commits: t.commits, noTwins: true,
       });
       for (const [sid, m] of bySession) store.consumeMarks(sid, m);
       return res;

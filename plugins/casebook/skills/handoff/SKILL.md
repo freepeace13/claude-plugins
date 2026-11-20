@@ -39,7 +39,7 @@ The **intake** is the source logs (and, under `public`, the repository they came
    `casebook out-path --handoff --project "<project, or 'anonymized' under anonymize>" --title "<title>"`
    and add `--dir <dir>` when `--out` was given. It prints a path that does not exist yet; create it by writing the files below into it.
 8. **Write the files.**
-   - `logs/<id>.md` for each log: the log as `casebook show <id>` prints it. Under `anonymize`, set `project` to `anonymized`, and drop `repo`, `branch`, `session_id`, `sessions`, `session_turns`, `commits`, `files`, `written_to`, `written_at` and `discovery_note` from the frontmatter, and anything in the body that names what must not be named.
+   - `logs/<id>.md` for each log: the log as `casebook show <id>` prints it. Under `anonymize`, set `project` to `anonymized`, and drop `repo`, `branch`, `profile`, `session_id`, `sessions`, `session_turns`, `merged_from`, `commits`, `files`, `written_to`, `written_at` and `discovery_note` from the frontmatter, rewrite each `marks` note the same way as the body, and remove anything else, in the frontmatter or the body, that names what must not be named.
    - `handoff.md` in the format below.
 9. **Report** in 3 to 6 lines: the folder path, the topic, the verdict, the open Unknowns, and that the folder is ready for a writer. Do not run `casebook written`: a handoff is not a write-up.
 
