@@ -21,7 +21,7 @@ Start from `casebook discover --exclude ${CLAUDE_SESSION_ID}` and add:
 
 ## 2. Run it
 
-Run the command with the Bash tool's `timeout` set to `600000` ms. A candidate can take two model runs (a retry with fewer flags on older Claude Code), and reading the sessions comes first.
+Run the command with the Bash tool's `timeout` set to `600000` ms. A candidate can take two model runs (a retry with fewer flags on older Claude Code), and reading the sessions comes first. If the command is cut off by that timeout, say so and suggest running it again with a shorter `--since` (or without `--all`).
 
 - If it prints `Nothing to discover` or `No topic matched`, relay that line (and any `failed` line) in a code block and stop. When a `--min-score` or tags were given, add one line suggesting a lower score or fewer tags.
 - If it failed, show the error line and stop.

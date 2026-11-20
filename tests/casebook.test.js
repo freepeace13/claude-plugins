@@ -1610,3 +1610,34 @@ test('a note with only a score threshold does not filter by fit; a pick counts i
   assert.strictEqual(ledger.userTurns, 3);
   assert.ok(ledger.size > 0);
 });
+
+// ---------------------------------------------------------------- topics review, round 12
+
+test('the final scan settles every log the session fed, also those no topic names', () => {
+  const s = sandbox();
+  const tp = s.transcript('fz', 3);
+  const r = JSON.parse(s.run(['scout', '--session', 'fz', '--transcript', tp, '--live', '--json'], {
+    env: reply(topic({ title: 'Halved p99 latency', angle: 'performance' }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })),
+  }).out);
+  const [a, b] = r.logs.map((l) => l.logId);
+  s.run(['scout', '--session', 'fz', '--transcript', s.transcript('fz', 12), '--auto'], { env: reply(topic({ title: 'Halved p99 latency', angle: 'performance', same_as: [a] })) });
+  assert.match(s.run(['show', a]).out, /partial: false/);
+  assert.match(s.run(['show', b]).out, /partial: false/);
+});
+
+test('discovery updates a same-title log of its own sessions; a gone folder outside a worktree borrows no repo', () => {
+  const s = sandbox();
+  const tp = s.transcript('tt1', 3, onBranch('tt1', 'feat/t'));
+  s.transcript('tt2', 3, onBranch('tt2', 'feat/t'));
+  const id = JSON.parse(s.run(['scout', '--session', 'tt1', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fix Redis retry storm' })) }).out).logId;
+  const r = s.run(['discover'], { env: reply(topic({ title: 'Fixing Redis retry storms', belongs: [1, 2] })) });
+  assert.match(r.out, new RegExp(`updates: ${id}`), r.out);
+
+  const clone = path.join(s.repo, 'tmp', 'client-api');
+  const tc = s.transcript('cl12', 3);
+  fs.writeFileSync(tc, fs.readFileSync(tc, 'utf8').split(s.repo).join(clone));
+  const l = JSON.parse(s.run(['scout', '--session', 'cl12', '--transcript', tc, '--json']).out).logId;
+  const doc = s.run(['show', l]).out;
+  assert.match(doc, /project: "client-api"/);
+  assert.match(doc, /policy: "anonymize"/);
+});

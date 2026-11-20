@@ -290,7 +290,11 @@ function applyTopic(topic, ctx) {
   // A scan that sees only some of a log's sessions must not lower its score, or call it finished while a
   // session it did not see may still be running.
   const unseen = prior.some((l) => sessionsOf(l).some((sid) => !sids.includes(sid)));
-  if (unseen) meta.score = Math.max(meta.score, ...prior.map((l) => l.meta.score || 0));
+  if (unseen) {
+    meta.score = Math.max(meta.score, ...prior.map((l) => l.meta.score || 0));
+    // Nor make public what another session of the log keeps private.
+    if (meta.policy === 'public' && prior.some((l) => l.meta.policy && l.meta.policy !== 'public')) meta.policy = 'anonymize';
+  }
   // Partial per session: this scan settles its own sessions; the others stay as they were.
   const nowPartial = ctx.partialSessions || (ctx.partial ? sids : []);
   meta.partial_sessions = uniq([...prior.flatMap(partialSessionsOf).filter((sid) => !sids.includes(sid)), ...nowPartial]);

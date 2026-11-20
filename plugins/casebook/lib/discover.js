@@ -295,7 +295,13 @@ async function scanChain(g, config, opts) {
     const members = idx.length ? idx.map((i) => g.members[i - 1]) : g.members;
     // A shown log merged into another one during the call resolves to a log the model never saw: drop the topic.
     if (topic.same_as.some((id) => !byId.has(id))) continue;
-    const same = topic.same_as.map((id) => byId.get(id));
+    let same = topic.same_as.map((id) => byId.get(id));
+    // Same title and angle as a log of its own sessions, though the model did not say so: that log.
+    if (!same.length) {
+      const own = context.filter((l) => T.sessionsOf(l).some((sid) => members.some((m) => m.sessionId === sid)));
+      const twin = own.find((l) => T.sameTitle(l.meta.title, topic.title) && T.sameAngle(l.meta.angle, topic.angle));
+      if (twin) { same = [twin]; topic.same_as = [twin.meta.id]; }
+    }
     // Already logged with these very sessions and nothing to merge: not a discovery.
     if (same.length === 1 && members.every((m) => T.sessionsOf(same[0]).includes(m.sessionId))) continue;
     // Only what concerns this topic's own sessions: their commits, and the links between them.
@@ -439,6 +445,8 @@ function pick(config, id, n) {
       const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
       if (!topic) throw userError('this topic was deleted since the discovery ran; run discovery again, or with --force');
       const bySession = topic.marks ? sids.map((sid) => [sid, store.getMarks(sid)]) : [];
+      // Sessions that have ended are settled in every log they fed.
+      for (const sid of sids) if (!partialSessions.includes(sid)) T.finishSession(sid);
       // Exactly the logs the discovery listed: a title match it did not show is never overwritten.
       const res = T.applyTopic(topic, {
         members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), partial, partialSessions, mode: 'discovery', note: d.note, commits: t.commits, noTwins: true,

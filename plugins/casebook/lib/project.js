@@ -36,16 +36,17 @@ function resolveProject(cwd, config) {
   // or an old client session would take on the project and policy of wherever casebook runs.
   const dir = cwd || process.cwd();
   if (!fs.existsSync(dir)) {
-    // A removed worktree inside its repo (…/repo/.claude/worktrees/x) still belongs to that repo.
-    let up = path.dirname(dir);
-    while (up !== path.dirname(up) && !fs.existsSync(up)) up = path.dirname(up);
-    if (fs.existsSync(up) && git(up, ['rev-parse', '--show-toplevel'])) return resolveProject(up, config);
+    // A removed worktree at a known worktree place inside its repo (…/repo/.claude/worktrees/x) still belongs
+    // to that repo. Any other folder that is gone may have been a separate clone: never borrow an ancestor's.
+    const wt = /^(.*?)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+/.exec(dir);
+    if (wt && fs.existsSync(wt[1]) && git(wt[1], ['rev-parse', '--show-toplevel'])) return resolveProject(wt[1], config);
     const project = slugify(path.basename(dir), 50);
     let policy = null;
     for (const rule of config.projects || []) {
       if ([dir, project].some((v) => globMatch(rule.match, v)) && POLICIES.includes(rule.policy)) { policy = rule.policy; break; }
     }
-    return { project, repo: '', root: null, cwd: dir, policy: policy || config.defaultPolicy || 'anonymize' };
+    // Nothing says which repo it was, so a repo rule cannot apply: anonymize unless a rule names this folder.
+    return { project, repo: '', root: null, cwd: dir, policy: policy || 'anonymize' };
   }
   const root = git(dir, ['rev-parse', '--show-toplevel']) || '';
   const repo = root ? normalizeRemote(git(root, ['remote', 'get-url', 'origin'])) : '';

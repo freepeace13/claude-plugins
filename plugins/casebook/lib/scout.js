@@ -126,6 +126,8 @@ const pidAlive = (pid) => {
 };
 
 /** Dead holder, expired lock, or a lock file a crashed scout left empty/garbled (given 10s of grace). */
+const SCAN_ATTEMPTS = 3;  // a scan runs again when a log it would write changed meanwhile
+
 function lockIsStale(file, staleMs) {
   let holder = null;
   let ageMs = 0;
@@ -149,8 +151,9 @@ function lockIsStale(file, staleMs) {
 function acquireSessionLock(sessionId, { wait, timeoutMs }) {
   const file = path.join(paths.locks(), `${sessionKey(sessionId)}.lock`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  // A scout can take up to two model runs (the flag-fallback retry), so a live holder is not stale before that.
-  const staleMs = 2 * timeoutMs + 60000;
+  // A scout makes up to SCAN_ATTEMPTS scans of up to two model runs each (the flag-fallback retry), so a live
+  // holder is not stale before that.
+  const staleMs = SCAN_ATTEMPTS * 2 * timeoutMs + 60000;
   const deadline = Date.now() + staleMs;
   const mine = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
   for (;;) {
@@ -264,7 +267,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   // notes are then written only if nothing it saw changed; otherwise the scan runs again on the new notes.
   let logs = null;
   for (let attempt = 1; !logs; attempt++) {
-    if (attempt > 3) throw new Error('the logs of this session kept changing during the scan; try again');
+    if (attempt > SCAN_ATTEMPTS) throw new Error('the logs of this session kept changing during the scan; try again');
     // Stamped before the logs are read: a log created while they are read counts as new.
     const takenAt = new Date().toISOString();
     const context = T.contextLogs(info.project, [sessionId], t.startedAt, t.endedAt);
@@ -309,7 +312,9 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
       const watch = [...new Set([...context.filter((l) => T.sessionsOf(l).includes(sessionId)).map((l) => l.meta.id), ...keep.flatMap((x) => x.same_as)])];
       // A log of this project another scan created meanwhile may be this same topic: look again with it
       // shown. On the last attempt only the logs this scan writes count, so a busy project still gets its log.
-      if (T.changedSince(versions, [sessionId], watch, attempt < 3 ? { project: info.project, takenAt } : null)) return null;
+      if (T.changedSince(versions, [sessionId], watch, attempt < SCAN_ATTEMPTS ? { project: info.project, takenAt } : null)) return null;
+      // The final scan settles this session in every log it fed, also those no topic names this time.
+      if (!partial) T.finishSession(sessionId);
       const written = keep.map((topic) => T.applyTopic(topic, {
         members: [member], info, marks: markTargets.includes(topic) ? pending : [], partial, mode, commits, claimed, reserved,
       }));

@@ -115,7 +115,7 @@ function scoutPending(config, opt) {
   if (locked) return out('A catch-up is already running. Check /casebook:list in a minute.');
   if (opt.json) return out(JSON.stringify(results.map(({ sessionId, status, logId, reason, score, title, partial, logs }) => ({ sessionId, status, logId, reason, score, title, partial, logs }))));
   if (!results.length) return out('No sessions to catch up on.');
-  for (const r of results) out(`${id8(r)}  ${describe(r)}`);
+  for (const r of results) for (const line of describe(r).split('\n')) out(`${id8(r)}  ${line}`);
 }
 
 // ------------------------------------------------------------------ commands
