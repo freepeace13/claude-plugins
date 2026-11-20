@@ -60,6 +60,9 @@ function condense(file, maxChars = 60000) {
   const opening = [];
   let aiTitle = null;
   let userTurns = 0;
+  // Inside a casebook command, up to the next turn of the user: its output (topic listings, other logs shown)
+  // is about other work, so it is never read as part of this session.
+  let inCasebook = false;
   let startedAt = null;
   let endedAt = null;
   let cwd = null;
@@ -86,18 +89,21 @@ function condense(file, maxChars = 60000) {
         if (b.type !== 'text' || !b.text) continue;
         const cmd = parseCommand(b.text);
         if (cmd) {
-          out.push(`USER: ${cmd.name} ${clip(cmd.args, 400)}`.trim());
           // Casebook's own commands are not work: a discovery must not count itself as news for the session.
-          if (!/^\/?casebook:/.test(cmd.name)) userTurns++;
+          inCasebook = /^\/?casebook:/.test(cmd.name);
+          if (inCasebook) continue;
+          out.push(`USER: ${cmd.name} ${clip(cmd.args, 400)}`.trim());
+          userTurns++;
           continue;
         }
         const t = stripNoise(b.text);
         if (!t || t.startsWith('Caveat:')) continue;
+        inCasebook = false;
         out.push(`USER: ${clip(t)}`);
         if (opening.length < 2) opening.push(clip(t, 1000));
         userTurns++;
       }
-    } else if (e.type === 'assistant') {
+    } else if (e.type === 'assistant' && !inCasebook) {
       for (const b of blocksOf(e.message.content)) {
         if (b.type === 'text' && b.text && b.text.trim()) out.push(`CLAUDE: ${clip(stripNoise(b.text))}`);
         else if (b.type === 'tool_use') {

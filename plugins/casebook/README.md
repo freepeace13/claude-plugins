@@ -58,7 +58,7 @@ cb-p3x8aa  2026-11-12  5     📌  Magic-link chat resume without visitor accoun
                                       ranked topics ─► you pick one ─► ~/.casebook/logs/<project>/<id>.md
 ```
 
-- **Nothing runs in the background.** Casebook spends model calls only when you run a discovery. Its one hook, at startup, only links the `casebook` CLI and never prints anything.
+- **Nothing runs in the background.** Casebook spends model calls only when you run a discovery. Its one hook, at startup, links the `casebook` CLI (and, once after upgrading from 0.2, merges the old per-profile stores; see Profiles) and never prints anything.
 - **No recursion.** A scan runs with `CASEBOOK_SCAN=1`, `--restricted` (no user settings, so no plugins) and `--no-session-persistence` (no transcript of its own).
 - **Deleted topics stay deleted.** No later discovery logs them again, unless you pass `--force`.
 - **Cost.** At most 5 candidates are scanned per discovery (`--candidates`), plus one call to check the topics found for duplicates when there are two or more. A single session with fewer than `scan.minTurns` user turns is not a candidate. Transcripts are condensed (tool output dropped, the middle elided past `scan.maxChars`) before each Haiku call.

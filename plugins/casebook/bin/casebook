@@ -86,9 +86,9 @@ const commands = {
     if (process.env.CASEBOOK_SCAN) return;
     try {
       if (pos[0] !== 'session-start') return;
-      // Apart, so a failed merge never keeps the CLI link from being refreshed.
-      try { U.migrateProfiles(); } catch (err) { U.logError('merging old profile stores failed', err); }
+      // Link first: a slow or failed merge never keeps the CLI link from being refreshed.
       L.linkBin();
+      try { U.migrateProfiles(); } catch (err) { U.logError('merging old profile stores failed', err); }
     } catch (err) {
       U.logError(`hook ${pos[0]} failed`, err);
     }
@@ -185,7 +185,7 @@ const commands = {
   },
 
   show({ pos, opt }) {
-    U.migrateProfiles();
+    U.loadConfig();
     const log = findLog(pos[0] || '');
     if (!log) fail(`no log with id "${pos[0] || ''}"`);
     out(opt.path ? log.file : fs.readFileSync(log.file, 'utf8'));

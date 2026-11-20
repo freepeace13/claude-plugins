@@ -116,9 +116,15 @@ const stricter = (a, b) => ((STRICT[b] || 0) > (STRICT[a] || 0) ? b : a);
  *  exception under a stricter, broader rule is lost that way: stricter is the safe side. */
 function mergeConfigs(into, from) {
   const a = readStrict(into); const b = readStrict(from);
+  const scanOf = (c) => JSON.stringify(c.scan || c.scout || {});
+  const scanDropped = scanOf(b) !== '{}' && scanOf(b) !== scanOf(a);
+  // An untouched config (the defaults, the placeholder rule) holds no privacy choice: nothing to fold in.
+  const placeholder = (r) => r && /YOUR-GITHUB-HANDLE/.test(String(r.match));
+  const own = (b.projects || []).filter((r) => !placeholder(r));
+  if (!own.length && (b.defaultPolicy || DEFAULT_CONFIG.defaultPolicy) === DEFAULT_CONFIG.defaultPolicy) return { added: 0, scanDropped };
   const rules = new Map();
   let added = 0;
-  for (const [r, mine] of [...(a.projects || []).map((x) => [x, true]), ...(b.projects || []).map((x) => [x, false])]) {
+  for (const [r, mine] of [...(a.projects || []).map((x) => [x, true]), ...own.map((x) => [x, false])]) {
     if (!r || !r.match) continue;
     const had = rules.get(r.match);
     if (!had && !mine) added++;
@@ -127,8 +133,7 @@ function mergeConfigs(into, from) {
   a.projects = [...rules.values()].sort((x, y) => (STRICT[y.policy] || 0) - (STRICT[x.policy] || 0));
   if (b.defaultPolicy) a.defaultPolicy = stricter(a.defaultPolicy || 'anonymize', b.defaultPolicy);
   writeJsonAtomic(into, a);
-  const scanOf = (c) => JSON.stringify(c.scan || c.scout || {});
-  return { added, scanDropped: scanOf(b) !== '{}' && scanOf(b) !== scanOf(a) };
+  return { added, scanDropped };
 }
 
 /** Old stores are folders of the store holding a profile.json. Merged ones keep it as profile.migrated.json. */

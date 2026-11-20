@@ -519,7 +519,7 @@ function pick(config, id, n) {
     }
     const bySession = topic.marks ? sids.map((sid) => [sid, store.getMarks(sid)]) : [];
     const res = T.applyTopic(topic, {
-      members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), note: d.note, commits: t.commits,
+      members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), note: d.note, commits: t.commits, scannedAt: d.created_at,
     });
     for (const [sid, m] of bySession) store.consumeMarks(sid, m);
     return res;

@@ -457,6 +457,23 @@ test('a discovery rewrites a log of the same sessions only when they have new ma
   assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${la}`), 'new turns are news');
 });
 
+test('a mark made between a discovery and its pick stays news', () => {
+  const s = sandbox();
+  s.transcript('mp', 3);
+  const la = seedLog(s, { sessions: ['mp'], scanned_at: new Date(Date.now() - 60000).toISOString() });
+  s.run(['mark', la, 'first']);
+  const same = reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [la], belongs: [1] }));
+  const r = s.run(['discover'], { env: same });
+  s.run(['mark', la, 'made before the pick']);
+  // The mark changed the log: the pick refuses and asks for a new discovery, which sees the mark.
+  assert.match(s.run(['discover', 'pick', didOf(r.out), '1']).stderr, /changed since the discovery ran/);
+  const again = s.run(['discover'], { env: same });
+  assert.match(again.out, new RegExp(`updates: ${la}`));
+  assert.strictEqual(s.run(['discover', 'pick', didOf(again.out), '1']).status, 0);
+  const created = JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'state', 'discoveries', `${didOf(again.out)}.json`), 'utf8')).created_at;
+  assert.strictEqual(logsJson(s).find((l) => l.id === la).scanned_at, created, 'scanned as of the discovery, not the pick');
+});
+
 test('older logs and marks a scan already saw are not news', () => {
   const s = sandbox();
   s.transcript('v1', 3);
@@ -1097,6 +1114,17 @@ test('discovery skill: scans this session too, and passes --force on', () => {
   assert.strictEqual(logSummary('# T\n\n\n## Problem\np'), '', 'an empty summary is not the Problem section');
 });
 
+test('an untouched config of another profile changes nothing', () => {
+  const p = profileSandbox();
+  const put = (name, cfg) => { const d = path.join(p.cb, name); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify(cfg)); fs.writeFileSync(path.join(d, 'profile.json'), '{}'); };
+  const mine = { defaultPolicy: 'public', projects: [{ match: 'github.com/me/oss', policy: 'public' }, { match: 'github.com/me/*', policy: 'anonymize' }] };
+  put('default', mine);
+  put('personal', require('../plugins/casebook/lib/util').DEFAULT_CONFIG);
+  assert.strictEqual(p.run(['list']).status, 0);
+  const c = JSON.parse(fs.readFileSync(path.join(p.cb, 'config.json'), 'utf8'));
+  assert.deepStrictEqual({ defaultPolicy: c.defaultPolicy, projects: c.projects }, mine);
+});
+
 test('merging configs never loosens a rule: one rule per pattern, the strictest, skip first', () => {
   const p = profileSandbox();
   const put = (name, cfg) => { const d = path.join(p.cb, name); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify(cfg)); fs.writeFileSync(path.join(d, 'profile.json'), '{}'); };
@@ -1111,10 +1139,15 @@ test('merging configs never loosens a rule: one rule per pattern, the strictest,
 test('casebook\'s own commands are not turns of the session', () => {
   const { condense } = require('../plugins/casebook/lib/transcript');
   const line = (text) => JSON.stringify({ type: 'user', sessionId: 'c', timestamp: '2026-11-01T00:00:00Z', message: { role: 'user', content: text } });
-  const raw = [line('fix the bug'), line('<command-name>/casebook:discovery</command-name><command-args></command-args>'), line('<command-name>/review</command-name>')].join('\n');
+  const said = (text) => JSON.stringify({ type: 'assistant', sessionId: 'c', timestamp: '2026-11-01T00:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text }] } });
+  const raw = [line('fix the bug'), said('fixed it'), line('<command-name>/casebook:show</command-name><command-args>cb-aaaaaa</command-args>'),
+    said('Other session story'), line('<command-name>/review</command-name>'), said('reviewed'), line('now the tests'), said('tests added')].join('\n');
   const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cbt-')), 'c.jsonl');
   fs.writeFileSync(f, raw);
-  assert.strictEqual(condense(f).userTurns, 2);
+  const c = condense(f);
+  assert.strictEqual(c.userTurns, 3);
+  assert.doesNotMatch(c.text, /Other session story|casebook:show/, 'what a casebook command printed is not this session\'s work');
+  assert.match(c.text, /fixed it[\s\S]*reviewed[\s\S]*tests added/);
 });
 
 test('marketplace is named kinbasco-plugins', () => {

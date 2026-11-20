@@ -1,7 +1,7 @@
 # Changelog
 
 ## Unreleased
-- casebook 0.3.0: `/casebook:discovery` is now the only way logs are made. The scout is gone: no SessionEnd hook, no startup sweep, no `/casebook:scout`, `casebook scout`, `backfill` or `maintenance`. Casebook spends model calls only when you run a discovery; the SessionStart hook only links the CLI
+- casebook 0.3.0: `/casebook:discovery` is now the only way logs are made. The scout is gone: no SessionEnd hook, no startup sweep, no `/casebook:scout`, `casebook scout`, `backfill` or `maintenance`. Casebook spends model calls only when you run a discovery; the SessionStart hook only links the CLI (and merges pre-0.3 profile stores once)
 - casebook: the write feature is gone (`/casebook:write`, the `case-study-writer` agent, case-study paths from `out-path`). Casebook ends at `/casebook:handoff`; `out-path` always names a handoff folder
 - casebook: written-up tracking is gone (`casebook written`, the WRT column, `--written`/`--unwritten` on `list` and `delete`). Old `written_to` fields stay in logs as they were, and a merge keeps the first log it names
 - casebook: partial logs are gone, since nothing finishes them any more. An update drops `partial`, `partial_sessions`, `scouted_at` and `scout_mode`; logs now get `scanned_at`

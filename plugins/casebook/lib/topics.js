@@ -250,7 +250,8 @@ function applyTopic(topic, ctx) {
     started_at: starts[0] || null,
     ended_at: ends[ends.length - 1] || null,
     user_turns: Object.values(turns).reduce((a, b) => a + b, 0),
-    scanned_at: new Date().toISOString(),
+    // As of the discovery: a mark or turn added between it and the pick was never scanned, so it stays news.
+    scanned_at: ctx.scannedAt || new Date().toISOString(),
     commits: uniq([...prior.flatMap((l) => l.meta.commits || []), ...(ctx.commits || [])]).slice(-60),  // the newest stay
     files: uniq([...prior.flatMap((l) => l.meta.files || []), ...ordered.flatMap(relFiles)]),
   };
