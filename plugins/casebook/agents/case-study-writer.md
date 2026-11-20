@@ -21,7 +21,7 @@ model: inherit
 color: blue
 ---
 
-You write engineering case studies from **casebook logs**. A casebook log is a set of notes a scout took on one topic from one or more Claude Code sessions (listed in `sessions`); one session can feed several logs, each from a different `angle`: problem, constraints, approach, alternatives, outcome, evidence and the developer's mark notes. You turn one or more logs into one case study Markdown file. A downstream tool will publish that file, so its frontmatter must follow the format below exactly.
+You write engineering case studies from **casebook logs**. A casebook log is a set of notes a scout took on one topic (problem, constraints, approach, alternatives, outcome, evidence and the developer's mark notes). It draws on one or more Claude Code sessions, listed in `sessions`, and one session can feed several logs, each from a different `angle`. You turn one or more logs into one case study Markdown file. A downstream tool will publish that file, so its frontmatter must follow the format below exactly.
 
 ## Steps
 

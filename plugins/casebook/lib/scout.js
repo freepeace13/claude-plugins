@@ -207,24 +207,22 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
   const recent = Date.now() - st.mtimeMs < settleMs;
   const partial = live || ((manual || partialIfRecent) && recent);
 
-  const mine = T.logsForSessions([sessionId]);
+  let mine = T.logsForSessions([sessionId]);
   // Notes the developer unmarked: a /casebook:mark for them in the transcript is not a mark any more.
   const unmarked = new Set(ledger.unmarked || []);
   const scanned = Boolean(ledger.scoutedAt || ledger.logId || mine.length);
   if (!manual && scanned) {
     // An auto scout finishes partial logs if the transcript grew at all; otherwise the regrow threshold applies.
-    const wasPartial = mine.some((l) => l.meta.partial === true) || ledger.partial === true;
+    const wasPartial = mine.some((l) => T.partialSessionsOf(l).includes(sessionId)) || ledger.partial === true;
     // New marks count as new content: the session has to be scanned again to pick them up.
     const grew = t.userTurns > (ledger.userTurns || 0) || size !== ledger.size || store.getMarks(sessionId).length > 0;
     if (wasPartial && !grew && !live && !(partialIfRecent && recent)) {
       // The session is over (hook) or settled and nothing was added since the partial scout:
       // the notes are already complete, so finish the logs without another model call.
-      // Read each log again under the lock: another session's scan may have updated it since.
-      // Only logs of this session alone: another session of a log may still be running.
-      const done = mine.filter((l) => l.meta.partial === true && T.sessionsOf(l).every((sid) => sid === sessionId)).map((l) => l.meta.id);
-      store.withWriteLock(() => {
-        for (const id of done) { const l = store.findLog(id); if (l && l.meta.partial === true) { l.meta.partial = false; store.saveLog(l); } }
-      });
+      // Each log is read again under the lock: another session's scan may have updated it since.
+      // Only for this session: a log another running session feeds stays partial for that one.
+      store.withWriteLock(() => T.finishSession(sessionId));
+      mine = T.logsForSessions([sessionId]);
       store.setLedger(sessionId, { partial: false, size });
       const best = [...mine].sort((a, b) => (b.meta.score || 0) - (a.meta.score || 0))[0];
       if (!best) return { status: 'skipped', reason: 'nothing new since the last scan' };
@@ -285,11 +283,7 @@ function scoutSessionLocked({ sessionId, transcriptPath, cwd, mode, live = false
       // A final scan that adds nothing still finishes this session's partial logs: the model saw their notes
       // and had nothing to add, so they would otherwise be rescanned every time the transcript grows.
       if (!partial) {
-        store.withWriteLock(() => {
-          for (const l of T.logsForSessions([sessionId])) {
-            if (l.meta.partial === true && T.sessionsOf(l).every((sid) => sid === sessionId)) { l.meta.partial = false; store.saveLog(l); }
-          }
-        });
+        store.withWriteLock(() => T.finishSession(sessionId));
       }
       const prev = store.getLedger(sessionId) || {};
       store.setLedger(sessionId, {
@@ -372,7 +366,8 @@ function candidateTranscripts({ since, exclude, settleMinutes = 0 }) {
       if (since && st.mtimeMs < since.getTime()) continue;
       if (st.mtimeMs > settled) continue;
       const ledger = store.getLedger(sessionId);
-      if (ledger && ((ledger.deleted && !store.getMarks(sid).length) || ledger.skipped === 'policy' || ledger.size === st.size)) continue;
+      // A session deleted before topics stays closed whatever its marks; scouting it would only skip again.
+      if (ledger && (T.legacyDeleted(ledger) || (ledger.deleted && !store.getMarks(sessionId).length) || ledger.skipped === 'policy' || ledger.size === st.size)) continue;
       out.push({ sessionId, transcriptPath: file, mtimeMs: st.mtimeMs });
     }
   }

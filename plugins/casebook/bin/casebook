@@ -371,8 +371,14 @@ const commands = {
       for (const l of logs) out(row(l));
       return;
     }
-    for (const l of logs) store.deleteLog(l);
-    out(`Deleted ${logs.length} log(s): ${logs.map((l) => l.meta.id).join(', ')}`);
+    // A log merged into another one (or deleted) since it was listed is reported, not counted.
+    const done = logs.filter((l) => store.deleteLog(l)).map((l) => l.meta.id);
+    const missed = logs.map((l) => l.meta.id).filter((id) => !done.includes(id));
+    if (done.length) out(`Deleted ${done.length} log(s): ${done.join(', ')}`);
+    for (const id of missed) {
+      const into = T.resolveLog(id);
+      out(into ? `Not deleted: ${id} was merged into ${into.meta.id} since it was listed` : `Not deleted: ${id} is already gone`);
+    }
   },
 
   backfill({ opt }) {

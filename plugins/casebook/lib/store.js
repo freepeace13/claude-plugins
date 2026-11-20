@@ -62,7 +62,7 @@ function createLogFile(project, meta, body) {
 
 function deleteLog(log) {
   // Read it again under the lock: a scan may have added sessions to it since it was listed.
-  withWriteLock(() => { const fresh = findLog(log.meta.id); if (fresh) deleteLogLocked(fresh); });
+  return withWriteLock(() => { const fresh = findLog(log.meta.id); if (fresh) deleteLogLocked(fresh); return Boolean(fresh); });
 }
 
 function deleteLogLocked(log) {

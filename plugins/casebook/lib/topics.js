@@ -21,6 +21,26 @@ function sessionsOf(log) {
   return m.session_id ? [m.session_id] : [];
 }
 
+/**
+ * The sessions a log is still partial for: scouted while they may have been running. A log is partial
+ * until each of them has had its final scan. Logs from before this list count all their sessions.
+ */
+function partialSessionsOf(log) {
+  if (Array.isArray(log.meta.partial_sessions)) return log.meta.partial_sessions;
+  return log.meta.partial === true ? sessionsOf(log) : [];
+}
+
+/** Every log of this session that waits for its final scan, marked done for it. Call under the lock. */
+function finishSession(sid) {
+  for (const l of logsForSessions([sid])) {
+    const was = partialSessionsOf(l);
+    if (!was.includes(sid)) continue;
+    l.meta.partial_sessions = was.filter((x) => x !== sid);
+    l.meta.partial = l.meta.partial_sessions.length > 0;
+    store.saveLog(l);
+  }
+}
+
 function logsForSessions(sids, logs = store.allLogs()) {
   const want = new Set(sids);
   return logs.filter((l) => sessionsOf(l).some((s) => want.has(s)));
@@ -100,7 +120,8 @@ function parseTopics(text, max) {
   const end = s.lastIndexOf('}');
   if (start < 0 || end <= start) throw new Error(`scout returned no JSON: ${s.slice(0, 200)}`);
   const raw = JSON.parse(s.slice(start, end + 1));
-  const list = Array.isArray(raw.topics) ? raw.topics : [raw];
+  // One bare topic is accepted too, but only if it looks like one: {} or {"topics": null} is no topic.
+  const list = Array.isArray(raw.topics) ? raw.topics : raw && (raw.title || raw.score) ? [raw] : [];
   return list.filter((x) => x && typeof x === 'object').map(normalizeTopic)
     .sort((a, b) => b.score - a.score).slice(0, max || 3);
 }
@@ -193,7 +214,7 @@ function uniqMarks(marks) {
  * logs, they were duplicates: they merge into one (a written-up log survives, so its ID stays valid).
  *
  * ctx: { members: [{ sessionId, startedAt, endedAt, userTurns, branch, files }], info: { project, repo, policy, root },
- *        marks, partial, mode, note?, commits, claimed?, noTwins? }
+ *        marks, partial, partialSessions?, mode, note?, commits, claimed?, noTwins? }
  * noTwins: write exactly the targets in same_as (or a new log), never a title match the caller did not check.
  * Call with the store lock held.
  */
@@ -241,7 +262,7 @@ function applyTopic(topic, ctx) {
     started_at: starts[0] || null,
     ended_at: ends[ends.length - 1] || null,
     user_turns: Object.values(turns).reduce((a, b) => a + b, 0),
-    partial: ctx.partial,
+    partial: false,
     scouted_at: new Date().toISOString(),
     scout_mode: ctx.mode,
     commits: uniq([...prior.flatMap((l) => l.meta.commits || []), ...(ctx.commits || [])]).slice(0, 60),
@@ -253,10 +274,11 @@ function applyTopic(topic, ctx) {
   // A scan that sees only some of a log's sessions must not lower its score, or call it finished while a
   // session it did not see may still be running.
   const unseen = prior.some((l) => sessionsOf(l).some((sid) => !sids.includes(sid)));
-  if (unseen) {
-    meta.score = Math.max(meta.score, ...prior.map((l) => l.meta.score || 0));
-    meta.partial = ctx.partial || prior.some((l) => l.meta.partial === true);
-  }
+  if (unseen) meta.score = Math.max(meta.score, ...prior.map((l) => l.meta.score || 0));
+  // Partial per session: this scan settles its own sessions; the others stay as they were.
+  const nowPartial = ctx.partialSessions || (ctx.partial ? sids : []);
+  meta.partial_sessions = uniq([...prior.flatMap(partialSessionsOf).filter((sid) => !sids.includes(sid)), ...nowPartial]);
+  meta.partial = meta.partial_sessions.length > 0;
   const body = renderBody(topic);
 
   // A session whose logs were all deleted has one again: hooks and catch-ups may scan it again.
@@ -288,5 +310,5 @@ function applyTopic(topic, ctx) {
 
 module.exports = {
   sessionsOf, logsForSessions, contextLogs, tombstones, renderExisting, parseTopics, normalizeTopic,
-  isTombstoned, sameTitle, renderBody, applyTopic, normTitle, resolveLog, legacyDeleted, screenTopics, versionsOf, changedSince,
+  isTombstoned, sameTitle, renderBody, applyTopic, normTitle, resolveLog, legacyDeleted, screenTopics, versionsOf, changedSince, partialSessionsOf, finishSession,
 };

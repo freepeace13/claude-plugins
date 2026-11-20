@@ -1390,3 +1390,49 @@ test('a pending mark reopens a session whose logs were deleted; note words lose 
   const { keywords } = require('../plugins/casebook/lib/discover');
   assert.deepStrictEqual(keywords('webhook retries. Also redis.'), ['webhook', 'retries', 'redis']);
 });
+
+// ---------------------------------------------------------------- topics review, round 7
+
+test('the catch-up sweep passes over sessions whose logs were deleted, without crashing', () => {
+  const s = sandbox();
+  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
+  fs.mkdirSync(path.dirname(meta), { recursive: true });
+  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
+  const id = JSON.parse(s.run(['scout', '--session', 'sw7', '--transcript', s.transcript('sw7', 3), '--auto', '--json']).out).logId;
+  s.run(['delete', id]);
+  s.transcript('sw7', 4);
+  s.transcript('other7', 3);
+  const dry = s.run(['scout', '--pending', '--dry-run', '--json']);
+  assert.strictEqual(dry.status, 0, dry.stderr);
+  assert.deepStrictEqual(JSON.parse(dry.out).map((d) => d.sessionId), ['other7']);
+  s.run(['mark', '--session', 'sw7', 'cache fix']);
+  assert.deepStrictEqual(JSON.parse(s.run(['scout', '--pending', '--dry-run', '--json']).out).map((d) => d.sessionId).sort(), ['other7', 'sw7']);
+});
+
+test('a log is partial per session: the final scan of the session that made it partial finishes it', () => {
+  const s = sandbox();
+  const l = JSON.parse(s.run(['scout', '--session', 'f1', '--transcript', s.transcript('f1', 3), '--auto', '--json']).out).logId;
+  const tp2 = s.transcript('f2', 3);
+  const r = JSON.parse(s.run(['scout', '--session', 'f2', '--transcript', tp2, '--json'], { env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [l] })) }).out);
+  assert.strictEqual(r.logId, l);
+  assert.match(s.run(['show', l]).out, /partial: true/);
+  s.run(['scout', '--session', 'f2', '--transcript', tp2, '--auto']);
+  assert.match(s.run(['show', l]).out, /partial: false/, 'f1 was finished already, f2 is now');
+});
+
+test('a pick refuses when its sessions were logged again since; a reply with no topics logs nothing', () => {
+  const s = sandbox();
+  s.transcript('g1', 3, onBranch('g1', 'feat/g'));
+  const tp = s.transcript('g2', 3, onBranch('g2', 'feat/g'));
+  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Gateway retries', belongs: [1, 2] })) }).out)[1];
+  const later = JSON.parse(s.run(['scout', '--session', 'g2', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Gateway retry budget' })) }).out).logId;
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, new RegExp(`logged again since the discovery ran \\(${later}\\)`));
+
+  for (const bad of ['{"topics":null}', '{}', '{"error":"overloaded"}']) {
+    const r = s.run(['scout', '--session', 'nt', '--transcript', s.transcript('nt', 3)], { env: { STUB_TOPICS: bad } });
+    assert.strictEqual(r.out, 'Skipped: the scout found no topic', bad);
+  }
+  assert.strictEqual(logsJson(s).length, 1);
+});

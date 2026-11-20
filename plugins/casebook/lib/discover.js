@@ -286,6 +286,8 @@ async function scanChain(g, config, opts) {
       reasons: members.length > 1 ? g.reasons : [],
       updates: same.map((l) => l.meta.id),
       targets: Object.fromEntries(same.map((l) => [l.meta.id, l.meta.updated_at || l.meta.created_at || ''])),
+      // The logs of these sessions the model was shown: a pick refuses if the sessions gained another one.
+      known: T.logsForSessions(members.map((m) => m.sessionId), context).map((l) => l.meta.id),
     });
   }
   return out;
@@ -345,6 +347,7 @@ async function discover(config, o) {
       const first = f.members[0];
       return {
         rank: i + 1, score: f.topic.score, fit: f.topic.fit, topic: f.topic, reasons: f.reasons, updates: f.updates, targets: f.targets,
+        known: f.known,
         commits: f.commits,
         info: { project: first.project, repo: first.repo, policy: first.policy, root: first.root },
         members: f.members.map(memberRecord),
@@ -387,7 +390,8 @@ function pick(config, id, n) {
     }
     // Partial as of now, not as of the discovery: a session that has since settled is finished.
     const settled = Date.now() - (config.sweep.settleMinutes || 0) * 60000;
-    const partial = sids.some((sid) => { const f = findTranscript(sid); try { return f && fs.statSync(f).mtimeMs > settled; } catch { return false; } });
+    const partialSessions = sids.filter((sid) => { const f = findTranscript(sid); try { return f && fs.statSync(f).mtimeMs > settled; } catch { return false; } });
+    const partial = partialSessions.length > 0;
     // Every check runs under the write lock, so no scan can change a target between the check and the write.
     const r = store.withWriteLock(() => {
       const gone = t.updates.filter((uid) => !T.resolveLog(uid));
@@ -400,13 +404,20 @@ function pick(config, id, n) {
         return l && t.targets && (l.meta.id !== uid || (l.meta.updated_at || l.meta.created_at || '') !== t.targets[uid]);
       });
       if (changed.length) throw new Error(`${changed.join(', ')} changed since the discovery ran; run discovery again`);
+      // A log these sessions gained since may already tell this story: the discovery never weighed it.
+      if (t.known) {
+        // Logs made by earlier picks of this same discovery are other topics it listed, not news.
+        const mineToo = Object.values(d.picked || {}).map((x) => T.resolveLog(x)).filter(Boolean).map((l) => l.meta.id);
+        const fresh = T.logsForSessions(sids).map((l) => l.meta.id).filter((x) => !t.known.includes(x) && !t.updates.includes(x) && !mineToo.includes(x));
+        if (fresh.length) throw new Error(`these sessions were logged again since the discovery ran (${fresh.join(', ')}); run discovery again`);
+      }
       const deleted = d.force ? [] : T.tombstones(sids);
       const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
       if (!topic) throw new Error('this topic was deleted since the discovery ran; run discovery again, or with --force');
       const bySession = topic.marks ? sids.map((sid) => [sid, store.getMarks(sid)]) : [];
       // Exactly the logs the discovery listed: a title match it did not show is never overwritten.
       const res = T.applyTopic(topic, {
-        members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), partial, mode: 'discovery', note: d.note, commits: t.commits, noTwins: true,
+        members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), partial, partialSessions, mode: 'discovery', note: d.note, commits: t.commits, noTwins: true,
       });
       for (const [sid, m] of bySession) store.consumeMarks(sid, m);
       return res;
