@@ -73,7 +73,7 @@ porch home
 
 An id may be any unique prefix of 4 or more characters. `init` copies real files and folders only. It skips `.git`, `node_modules`, symlinks, the store itself and anything it cannot read (it lists those). It stops as soon as an intake passes 2000 files or 25 MB unless you pass `--force`. A failed `init` leaves nothing in the store, and only a new store gets mode 0700.
 
-The writer agent writes `draft.md` in the store, outside your project, so Claude Code may ask before the first write. Allow `Write(~/.porch/**)` to skip the prompt.
+The writer agent writes `draft.md` in the store, outside your project, so Claude Code may ask before the first write. Allow `Write(~/.porch/**)` to skip the prompt, and `Edit(~/.porch/**)` for `/porch:draft`, which updates an older brief's paths before writing.
 
 ## Upgrading from 0.2.0
 

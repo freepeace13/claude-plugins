@@ -38,7 +38,7 @@ A brief path and an output path. On a revision round you also get a review path.
    - Never use a name in `never_name`. No filler sections.
    - Write as the author in first person. Never call the author "the owner" or "the user", and never mention an assistant or operator unless a fact requires it.
    - You may open a fact's source path only to check its wording, never to find new facts.
-4. End the file with the self-check block: one line per acceptance criterion, pass or fail, and a note for anything you could not meet. For the author's finished draft, AC-5 fails only on what you added or on a term that names the author in the third person; note every other voice difference.
+4. End the file with the self-check block: one line per acceptance criterion, pass or fail, and a note for anything you could not meet. For the author's finished draft, AC-5 fails only on what you added; note every voice difference in the body, including a third-person mention of the author, for the author to fix.
 5. On a revision round, read the review file. Fix only what it lists as failed, keep everything else as is, and say what you changed under `Revision:` in the self-check.
 
 ## Return
