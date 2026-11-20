@@ -487,7 +487,7 @@ test('a --force pick reopens a session closed by an older casebook', () => {
 test('flags removed in 0.3 fail instead of widening a batch delete', () => {
   const s = sandbox();
   const id = seedLog(s, { score: 2 });
-  for (const flag of ['--unwritten', '--written', '--pending', '--generated']) {
+  for (const flag of ['--unwritten', '--written', '--pending', '--generated', '--quiet', '--live']) {
     const r = s.run(['delete', '--below-score', '3', '--yes', flag]);
     assert.strictEqual(r.status, 1, flag);
     assert.match(r.stderr, new RegExp(`${flag} was removed in 0\\.3`));
@@ -1095,6 +1095,26 @@ test('discovery skill: scans this session too, and passes --force on', () => {
   assert.match(skill, /`--force` pass through/);
   const { logSummary } = require('../plugins/casebook/lib/util');
   assert.strictEqual(logSummary('# T\n\n\n## Problem\np'), '', 'an empty summary is not the Problem section');
+});
+
+test('merging configs never loosens a rule: one rule per pattern, the strictest, skip first', () => {
+  const p = profileSandbox();
+  const put = (name, cfg) => { const d = path.join(p.cb, name); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify(cfg)); fs.writeFileSync(path.join(d, 'profile.json'), '{}'); };
+  put('default', { projects: [{ match: 'github.com/acme/*', policy: 'skip' }, { match: 'github.com/me/*', policy: 'public' }] });
+  put('personal', { projects: [{ match: 'github.com/acme/*', policy: 'anonymize' }, { match: '*', policy: 'anonymize' }], scout: { command: '/opt/claude' } });
+  assert.strictEqual(p.run(['list']).status, 0);
+  const c = JSON.parse(fs.readFileSync(path.join(p.cb, 'config.json'), 'utf8'));
+  assert.deepStrictEqual(c.projects.map((r) => `${r.match}:${r.policy}`), ['github.com/acme/*:skip', '*:anonymize', 'github.com/me/*:public']);
+  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /its scan settings were not used/);
+});
+
+test('casebook\'s own commands are not turns of the session', () => {
+  const { condense } = require('../plugins/casebook/lib/transcript');
+  const line = (text) => JSON.stringify({ type: 'user', sessionId: 'c', timestamp: '2026-11-01T00:00:00Z', message: { role: 'user', content: text } });
+  const raw = [line('fix the bug'), line('<command-name>/casebook:discovery</command-name><command-args></command-args>'), line('<command-name>/review</command-name>')].join('\n');
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cbt-')), 'c.jsonl');
+  fs.writeFileSync(f, raw);
+  assert.strictEqual(condense(f).userTurns, 2);
 });
 
 test('marketplace is named kinbasco-plugins', () => {

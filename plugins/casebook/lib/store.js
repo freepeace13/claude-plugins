@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { paths, sessionKey, mkdirp, readJson, writeJsonAtomic, writeFileAtomic, parseDoc, renderDoc, newId, ID_RE, logSummary } = require('./util');
+const { paths, sessionKey, mkdirp, readJson, writeJsonAtomic, writeFileAtomic, parseDoc, renderDoc, newId, ID_RE, logSummary, withWriteLock } = require('./util');
 
 function listProjects() {
   try {
@@ -78,41 +78,6 @@ function deleteLogLocked(log) {
     const description = m.description || logSummary(log.body);
     setLedger(sid, { deletedTopics: [...(prev.deletedTopics || []), { id: m.id, title: m.title, angle: m.angle || '', description, at: new Date().toISOString() }] });
   }
-}
-
-/**
- * Run fn while holding the store's write lock. Logs are shared between sessions, so two writers (a pick, a mark,
- * a delete) must not update or create logs at the same moment. Held only for the writes, never during a model call.
- */
-function withWriteLock(fn) {
-  const file = path.join(paths.home(), 'state', 'write.lock');
-  mkdirp(path.dirname(file));
-  const deadline = Date.now() + 60000;
-  const mine = `${process.pid}:${Date.now()}:${Math.random()}`;
-  for (;;) {
-    try { fs.writeFileSync(file, mine, { flag: 'wx' }); break; } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-    }
-    // A holder that crashed leaves the file behind; writes take milliseconds, so 30s means it is stale.
-    // Only the holder of the reclaim gate removes it, after checking again, so two waiters cannot both
-    // reclaim (and one remove the other's fresh lock).
-    const age = () => { try { return Date.now() - fs.statSync(file).mtimeMs; } catch { return -1; } };
-    if (age() > 30000) {
-      const gate = `${file}.reclaim`;
-      try {
-        fs.writeFileSync(gate, mine, { flag: 'wx' });
-        try { if (age() > 30000) fs.rmSync(file, { force: true }); } finally { fs.rmSync(gate, { force: true }); }
-        continue;
-      } catch (err) {
-        if (err.code !== 'EEXIST') throw err;
-        try { if (Date.now() - fs.statSync(gate).mtimeMs > 10000) fs.rmSync(gate, { force: true }); } catch { /* gone */ }
-      }
-    }
-    if (Date.now() > deadline) throw new Error('timed out waiting for the casebook write lock');
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
-  // Remove the lock only while it is still ours: a waiter may have reclaimed it as stale.
-  try { return fn(); } finally { try { if (fs.readFileSync(file, 'utf8') === mine) fs.rmSync(file, { force: true }); } catch { /* gone */ } }
 }
 
 // ---------- ledger: one small file per session (the topics deleted from it) ----------

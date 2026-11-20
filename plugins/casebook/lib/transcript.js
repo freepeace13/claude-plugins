@@ -87,7 +87,8 @@ function condense(file, maxChars = 60000) {
         const cmd = parseCommand(b.text);
         if (cmd) {
           out.push(`USER: ${cmd.name} ${clip(cmd.args, 400)}`.trim());
-          userTurns++;
+          // Casebook's own commands are not work: a discovery must not count itself as news for the session.
+          if (!/^\/?casebook:/.test(cmd.name)) userTurns++;
           continue;
         }
         const t = stripNoise(b.text);

@@ -76,7 +76,7 @@ function mergeTree(from, to, merge) {
     if (fs.existsSync(dst)) {
       let merged = false;
       try { merged = Boolean(merge && merge(src, dst)); } catch { /* unreadable: leave it */ }
-      if (merged) fs.rmSync(src, { force: true }); else left++;
+      if (merged) { try { fs.rmSync(src, { force: true }); } catch { left++; } } else left++;
       continue;
     }
     try { mkdirp(to); fs.renameSync(src, dst); } catch (err) { if (err.code !== 'ENOENT') left++; }
@@ -111,15 +111,24 @@ const STRICT = { public: 1, anonymize: 2, skip: 3 };
 const stricter = (a, b) => ((STRICT[b] || 0) > (STRICT[a] || 0) ? b : a);
 
 /** Another profile's config folded into the shared one, so no privacy rule is lost: the strictest default policy,
- *  and its project rules too. Its stricter rules go first (the first match wins), its public ones last. */
+ *  and its project rules too. One rule per pattern, with the strictest policy either gave it, and the rules ordered
+ *  skip, then anonymize, then public (the first match wins), so no merged rule can loosen another. A public
+ *  exception under a stricter, broader rule is lost that way: stricter is the safe side. */
 function mergeConfigs(into, from) {
   const a = readStrict(into); const b = readStrict(from);
-  const have = new Set((a.projects || []).map((r) => `${r.match}|${r.policy}`));
-  const extra = (b.projects || []).filter((r) => r && r.match && !have.has(`${r.match}|${r.policy}`));
-  a.projects = [...extra.filter((r) => r.policy !== 'public'), ...(a.projects || []), ...extra.filter((r) => r.policy === 'public')];
+  const rules = new Map();
+  let added = 0;
+  for (const [r, mine] of [...(a.projects || []).map((x) => [x, true]), ...(b.projects || []).map((x) => [x, false])]) {
+    if (!r || !r.match) continue;
+    const had = rules.get(r.match);
+    if (!had && !mine) added++;
+    rules.set(r.match, had ? { ...had, policy: stricter(had.policy, r.policy) } : { ...r });
+  }
+  a.projects = [...rules.values()].sort((x, y) => (STRICT[y.policy] || 0) - (STRICT[x.policy] || 0));
   if (b.defaultPolicy) a.defaultPolicy = stricter(a.defaultPolicy || 'anonymize', b.defaultPolicy);
   writeJsonAtomic(into, a);
-  return extra.length;
+  const scanOf = (c) => JSON.stringify(c.scan || c.scout || {});
+  return { added, scanDropped: scanOf(b) !== '{}' && scanOf(b) !== scanOf(a) };
 }
 
 /** Old stores are folders of the store holding a profile.json. Merged ones keep it as profile.migrated.json. */
@@ -134,8 +143,14 @@ function oldStores() {
   }
 }
 
-/** Merge old per-profile stores into the one store. Safe to run again after a crash. */
+/** Merge old per-profile stores into the one store, under the write lock so two processes never merge at once.
+ *  Safe to run again after a crash. */
 function migrateProfiles() {
+  if (!oldStores().length) return;
+  withWriteLock(migrateLocked);
+}
+
+function migrateLocked() {
   for (const name of oldStores()) {
     const dir = path.join(home(), name);
     let left = 0;
@@ -146,9 +161,9 @@ function migrateProfiles() {
       try { fs.renameSync(old, paths.config()); config = '; its config.json is the shared one'; } catch { /* none, or another process won */ }
     } else if (fs.existsSync(old)) {
       try {
-        const n = mergeConfigs(paths.config(), old);
+        const { added, scanDropped } = mergeConfigs(paths.config(), old);
         fs.renameSync(old, path.join(dir, 'config.migrated.json'));
-        config = `; its default policy and ${n} project rule(s) were merged into ${paths.config()}`;
+        config = `; its default policy and ${added} project rule(s) were merged into ${paths.config()}${scanDropped ? '; its scan settings were not used (see config.migrated.json)' : ''}`;
       } catch (err) { config = `; its config.json could not be merged (${err.message}), see ${dir}`; }
     }
     try { fs.renameSync(path.join(dir, 'profile.json'), path.join(dir, 'profile.migrated.json')); } catch { continue; }
@@ -209,13 +224,49 @@ function deepMerge(base, over) {
 
 /** Load config, creating the default file on first use. */
 function loadConfig() {
-  migrateProfiles();
+  // A merge that fails is logged, never in the way of the command.
+  try { migrateProfiles(); } catch (err) { logError('merging old profile stores failed', err); }
   const file = paths.config();
   if (!fs.existsSync(file)) writeJsonAtomic(file, DEFAULT_CONFIG);
   const raw = readJson(file, {});
   // Before 0.3 the model settings were under "scout".
   if (raw.scout && !raw.scan) raw.scan = raw.scout;
   return deepMerge(DEFAULT_CONFIG, raw);
+}
+
+/**
+ * Run fn while holding the store's write lock. Logs are shared between sessions, so two writers (a pick, a mark,
+ * a delete) must not update or create logs at the same moment. Held only for the writes, never during a model call.
+ */
+function withWriteLock(fn) {
+  const file = path.join(paths.home(), 'state', 'write.lock');
+  mkdirp(path.dirname(file));
+  const deadline = Date.now() + 60000;
+  const mine = `${process.pid}:${Date.now()}:${Math.random()}`;
+  for (;;) {
+    try { fs.writeFileSync(file, mine, { flag: 'wx' }); break; } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+    // A holder that crashed leaves the file behind; writes take milliseconds, so 30s means it is stale.
+    // Only the holder of the reclaim gate removes it, after checking again, so two waiters cannot both
+    // reclaim (and one remove the other's fresh lock).
+    const age = () => { try { return Date.now() - fs.statSync(file).mtimeMs; } catch { return -1; } };
+    if (age() > 30000) {
+      const gate = `${file}.reclaim`;
+      try {
+        fs.writeFileSync(gate, mine, { flag: 'wx' });
+        try { if (age() > 30000) fs.rmSync(file, { force: true }); } finally { fs.rmSync(gate, { force: true }); }
+        continue;
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err;
+        try { if (Date.now() - fs.statSync(gate).mtimeMs > 10000) fs.rmSync(gate, { force: true }); } catch { /* gone */ }
+      }
+    }
+    if (Date.now() > deadline) throw new Error('timed out waiting for the casebook write lock');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  // Remove the lock only while it is still ours: a waiter may have reclaimed it as stale.
+  try { return fn(); } finally { try { if (fs.readFileSync(file, 'utf8') === mine) fs.rmSync(file, { force: true }); } catch { /* gone */ } }
 }
 
 function logError(msg, err) {
@@ -317,5 +368,5 @@ function globMatch(pattern, value) {
 
 module.exports = {
   PLUGIN_ROOT, paths, DEFAULT_CONFIG, loadConfig, migrateProfiles, mkdirp, readJson, writeJsonAtomic, writeFileAtomic,
-  normNote, logError, normalizeDir, profileNameFor, parseDoc, renderDoc, logSummary, newId, ID_RE, sessionKey, slugify, parseAge, daysSince, globMatch, expandHome,
+  normNote, logError, withWriteLock, normalizeDir, profileNameFor, parseDoc, renderDoc, logSummary, newId, ID_RE, sessionKey, slugify, parseAge, daysSince, globMatch, expandHome,
 };

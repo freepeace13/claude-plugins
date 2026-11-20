@@ -19,6 +19,10 @@ const REMOVED = {
   unwritten: 'casebook no longer tracks write-ups',
   pending: 'the scout is gone; /casebook:discovery makes every log',
   generated: 'marks are always yours now',
+  live: 'the scout is gone; /casebook:discovery makes every log',
+  background: 'the scout is gone; /casebook:discovery makes every log',
+  auto: 'the scout is gone; /casebook:discovery makes every log',
+  quiet: 'the scout is gone; /casebook:discovery makes every log',
 };
 
 function parseArgs(argv) {
@@ -210,7 +214,7 @@ const commands = {
     // A session closed since 0.1 (its log deleted before topics) is left out of discovery unless --force.
     const closed = T.legacyDeleted(store.getLedger(opt.session));
     out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). ${closed
-      ? 'Its log was deleted in an older casebook, so discovery leaves it out: run /casebook:discovery --force to place the mark.'
+      ? 'Its log was deleted in an older casebook, so discovery leaves it out: run /casebook:discovery --force to place the mark (--force also offers topics you deleted again).'
       : 'It goes to the topic it points to when /casebook:discovery logs a topic from this session.'}`);
   },
 
