@@ -14,8 +14,7 @@ Run exactly one command:
   `casebook mark <log-id> -- "<rest of the arguments as the note>"`
 - Otherwise mark the current session:
   `casebook mark --session ${CLAUDE_SESSION_ID} -- "<note>"`
-  The note is the arguments. If there are none, write a note of at most 15 words naming the most significant problem solved or decision made so far in this session, and add `--generated` before the `--`:
-  `casebook mark --session ${CLAUDE_SESSION_ID} --generated -- "<note>"`
+  The note is the arguments. If there are none, write a note of at most 15 words naming the most significant problem solved or decision made so far in this session.
 
 Quote the note safely for the shell.
 

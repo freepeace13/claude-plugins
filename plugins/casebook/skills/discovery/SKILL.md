@@ -36,6 +36,6 @@ If the user picks none of them (types something else), do what they say: rerun d
 
 ## 4. Log the chosen topic
 
-Run `casebook discover pick <discovery-id> <rank>` and relay its output in a code block. `Created` is a new log; `Updated` means the topic was already logged and that log now covers it. If it lists logs merged into it, they were duplicates of this topic (often one log per session): their marks and written files moved into the surviving log.
+Run `casebook discover pick <discovery-id> <rank>` and relay its output in a code block. `Created` is a new log; `Updated` means the topic was already logged and that log now covers it. If it lists logs merged into it, they were duplicates of this topic (often one log per session): their marks moved into the surviving log.
 
-End with one line: `/casebook:show <id>` to read it, `/casebook:write <id>` to write the case study.
+End with one line: `/casebook:show <id>` to read it, `/casebook:handoff <id>` to prepare it for a writer.

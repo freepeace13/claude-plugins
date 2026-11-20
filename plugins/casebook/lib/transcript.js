@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { paths, ID_RE, normNote } = require('./util');
+const { paths } = require('./util');
 
 const MAX_MSG = 2000;
 
@@ -57,7 +57,6 @@ function condense(file, maxChars = 60000) {
   const files = new Set();
   const readFiles = new Set();
   const prUrls = new Set();
-  const commandMarks = [];
   const opening = [];
   let aiTitle = null;
   let userTurns = 0;
@@ -87,10 +86,6 @@ function condense(file, maxChars = 60000) {
         if (b.type !== 'text' || !b.text) continue;
         const cmd = parseCommand(b.text);
         if (cmd) {
-          // A mark of another log by its ID is not a mark of this session (the same test as `casebook mark`).
-          // Typed as the user typed it: drop surrounding quotes the shell would have removed, so it matches the stored note.
-          const markNote = normNote(cmd.args);
-          if (/casebook:mark$/.test(cmd.name) && !ID_RE.test(markNote.split(' ')[0])) commandMarks.push(markNote);
           out.push(`USER: ${cmd.name} ${clip(cmd.args, 400)}`.trim());
           userTurns++;
           continue;
@@ -121,7 +116,7 @@ function condense(file, maxChars = 60000) {
     text = `${text.slice(0, head)}\n\n[… ${text.length - maxChars} chars omitted from the middle …]\n\n${text.slice(-tail)}`;
   }
   return {
-    text, userTurns, startedAt, endedAt, cwd, branch, sessionId, files: [...files], commandMarks,
+    text, userTurns, startedAt, endedAt, cwd, branch, sessionId, files: [...files],
     readFiles: [...readFiles], prUrls: [...prUrls], aiTitle, opening: opening.join('\n'),
   };
 }

@@ -13,7 +13,7 @@ function expandHome(p) {
   return p === '~' || p.startsWith('~/') ? path.join(os.homedir(), p.slice(1)) : p;
 }
 
-// ---------- profiles: one fully separate store per Claude Code config dir ----------
+// ---------- one store; the profile is the Claude Code config dir `claude` runs under ----------
 
 const DEFAULT_CLAUDE_DIR = '~/.claude';
 
@@ -23,6 +23,10 @@ function normalizeDir(p) {
   return d.length > 1 ? d.replace(/\/+$/, '') : d;
 }
 
+const realDir = (d) => { try { return fs.realpathSync(d); } catch { return d; } };
+const sameDir = (a, b) => a === b || realDir(a) === realDir(b);
+
+/** A short name for a config dir, recorded on each log: ~/.claude → default, ~/.claude_personal → personal. */
 function profileNameFor(configDir) {
   if (sameDir(configDir, normalizeDir(DEFAULT_CLAUDE_DIR))) return 'default';
   const base = path.basename(configDir);
@@ -33,165 +37,85 @@ function profileNameFor(configDir) {
   return slugify(base.replace(/^\.+/, ''));
 }
 
-const storeRoot = () => path.resolve(expandHome(process.env.CASEBOOK_ROOT || '~/.casebook'));
-const realDir = (d) => { try { return fs.realpathSync(d); } catch { return d; } };
-const sameDir = (a, b) => a === b || realDir(a) === realDir(b);
-const profileFile = (dir) => path.join(dir, 'profile.json');
-const shortHash = (configDir) => crypto.createHash('sha1').update(configDir).digest('hex').slice(0, 4);
+const home = () => path.resolve(expandHome(process.env.CASEBOOK_HOME || '~/.casebook'));
+const configDir = () => normalizeDir(process.env.CLAUDE_CONFIG_DIR || DEFAULT_CLAUDE_DIR);
 
-let cached = null;
-let override = null;
+const paths = {
+  home,
+  config: () => path.join(home(), 'config.json'),
+  logs: () => path.join(home(), 'logs'),
+  marks: () => path.join(home(), 'marks'),
+  sessions: () => path.join(home(), 'state', 'sessions'),
+  errorLog: () => path.join(home(), 'casebook.log'),
+  profileName: () => profileNameFor(configDir()),
+  claudeConfigDir: configDir,
+  // Children inherit CLAUDE_CONFIG_DIR exactly as we got it, so a scan runs (and is billed) as the
+  // account `claude` ran under. Never set it when it was unset: that could change how `claude` finds its credentials.
+  claudeConfigDirExplicit: () => Boolean(process.env.CLAUDE_CONFIG_DIR),
+  claudeProjects: () => path.join(configDir(), 'projects'),
+};
 
-function knownProfiles() {
+// ---------- migration from per-profile stores (~/.casebook/<profile>/) ----------
+
+// What moves from an old profile store into the shared one. Everything is one file per log, session or
+// discovery, so moving files merges the stores. Case studies and handoffs stay where they are, so the
+// `written_to` paths in logs keep working.
+const MOVED = ['logs', 'marks', path.join('state', 'sessions'), path.join('state', 'discoveries')];
+
+/** Move every file under `from` into `to` that `to` does not have yet. Returns the files left behind. */
+function mergeTree(from, to) {
+  let left = 0;
+  let entries = [];
+  try { entries = fs.readdirSync(from, { withFileTypes: true }); } catch { return 0; }
+  for (const e of entries) {
+    const src = path.join(from, e.name);
+    const dst = path.join(to, e.name);
+    if (e.isDirectory()) { left += mergeTree(src, dst); continue; }
+    if (fs.existsSync(dst)) { left++; continue; }
+    try { mkdirp(to); fs.renameSync(src, dst); } catch (err) { if (err.code !== 'ENOENT') left++; }
+  }
+  try { fs.rmdirSync(from); } catch { /* not empty */ }
+  return left;
+}
+
+/** Old stores are folders of the store holding a profile.json. Merged ones keep it as profile.migrated.json. */
+function oldStores() {
   try {
-    return fs.readdirSync(storeRoot(), { withFileTypes: true })
-      .filter((d) => d.isDirectory() && fs.existsSync(profileFile(path.join(storeRoot(), d.name))))
+    return fs.readdirSync(home(), { withFileTypes: true })
+      .filter((d) => d.isDirectory() && !['logs', 'marks', 'state'].includes(d.name) && fs.existsSync(path.join(home(), d.name, 'profile.json')))
       .map((d) => d.name)
-      .sort();
+      .sort((a, b) => (a === 'default' ? -1 : b === 'default' ? 1 : a.localeCompare(b)));
   } catch {
     return [];
   }
 }
 
-/** Pure: works out { name, configDir, home, collided } without touching the disk. */
-function computeProfile() {
-  const envDir = process.env.CLAUDE_CONFIG_DIR ? normalizeDir(process.env.CLAUDE_CONFIG_DIR) : null;
-  const root = storeRoot();
-
-  if (process.env.CASEBOOK_HOME) {
-    const configDir = envDir || normalizeDir(DEFAULT_CLAUDE_DIR);
-    return { name: process.env.CASEBOOK_PROFILE || profileNameFor(configDir), configDir, home: path.resolve(expandHome(process.env.CASEBOOK_HOME)), collided: false };
-  }
-
-  if (process.env.CASEBOOK_PROFILE && !override) validateProfileName(process.env.CASEBOOK_PROFILE, 'CASEBOOK_PROFILE');
-  const wanted = override || process.env.CASEBOOK_PROFILE || null;
-  if (override) {
-    const rec = readJson(profileFile(path.join(root, override)), null);
-    if (!rec) throw new Error(`no profile "${override}". Known: ${knownProfiles().join(', ') || '(none)'}`);
-    if (!rec.claudeConfigDir) throw new Error(`profile "${override}" has no claudeConfigDir in its profile.json`);
-    return { name: override, configDir: normalizeDir(rec.claudeConfigDir), home: path.join(root, override), collided: false };
-  }
-  if (wanted) {
-    const rec = readJson(profileFile(path.join(root, wanted)), null);
-    if (rec && rec.claudeConfigDir && (!envDir || sameDir(normalizeDir(rec.claudeConfigDir), envDir))) {
-      return { name: wanted, configDir: normalizeDir(rec.claudeConfigDir), home: path.join(root, wanted), collided: false };
+/** Merge old per-profile stores into the one store. Safe to run from several processes at once, and again after a crash. */
+function migrateProfiles() {
+  for (const name of oldStores()) {
+    const dir = path.join(home(), name);
+    let left = 0;
+    for (const sub of MOVED) left += mergeTree(path.join(dir, sub), path.join(home(), sub));
+    let config = 'kept';
+    if (!fs.existsSync(paths.config())) {
+      try { fs.renameSync(path.join(dir, 'config.json'), paths.config()); config = 'moved'; } catch { /* none, or another process won */ }
     }
+    try { fs.renameSync(path.join(dir, 'profile.json'), path.join(dir, 'profile.migrated.json')); } catch { continue; }
+    logError(`merged profile store "${name}" into ${home()}${config === 'kept' && fs.existsSync(path.join(dir, 'config.json')) ? `; its config.json was not used (see ${dir})` : ''}${left ? `; ${left} file(s) already present were left in ${dir}` : ''}`);
   }
-
-  const configDir = envDir || normalizeDir(DEFAULT_CLAUDE_DIR);
-  if (!wanted) {
-    // A store that already records this config dir wins, so a hash-suffixed store stays stable
-    // even if the store that first claimed the plain name goes away.
-    for (const n of knownProfiles()) {
-      const rec = readJson(profileFile(path.join(root, n)), null);
-      if (rec && rec.claudeConfigDir && sameDir(normalizeDir(rec.claudeConfigDir), configDir)) {
-        return { name: n, configDir, home: path.join(root, n), collided: false };
-      }
-    }
-  }
-  let name = wanted || profileNameFor(configDir);
-  let collided = false;
-  const rec = readJson(profileFile(path.join(root, name)), null);
-  if (rec && rec.claudeConfigDir && !sameDir(normalizeDir(rec.claudeConfigDir), configDir)) {
-    name = `${name}-${shortHash(configDir)}`;
-    collided = true;
-  }
-  return { name, configDir, home: path.join(root, name), collided };
 }
-
-const profile = () => (cached = cached || computeProfile());
-
-/** Point this process at a named store (the CLI's global --profile flag). Throws if unknown. */
-function validateProfileName(name, what = '--profile') {
-  if (typeof name !== 'string' || !name) throw new Error(`${what} needs a profile name`);
-  if (/[\\/]/.test(name) || name.startsWith('.')) throw new Error(`invalid profile name "${name}"`);
-}
-
-function useProfile(name) {
-  validateProfileName(name);
-  if (process.env.CASEBOOK_HOME) throw new Error('--profile cannot be used while CASEBOOK_HOME is set (it points straight at one store)');
-  override = name;
-  cached = null;
-  return profile();
-}
-
-/** Write profile.json the first time a store is used. */
-function ensureProfileFile() {
-  const p = profile();
-  if (fs.existsSync(profileFile(p.home))) return;
-  writeJsonAtomic(profileFile(p.home), { name: p.name, claudeConfigDir: p.configDir, createdAt: new Date().toISOString() });
-  if (p.collided) logError(`profile name collision: "${p.name}" is a second config dir whose name matches another store; using a hash suffix for ${p.configDir}`);
-}
-
-function countLogs(dir) {
-  let count = 0;
-  let last = '';
-  let projects = [];
-  try { projects = fs.readdirSync(path.join(dir, 'logs'), { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { return { count, last }; }
-  for (const d of projects) {
-    let names = [];
-    try { names = fs.readdirSync(path.join(dir, 'logs', d.name)); } catch { continue; }
-    for (const n of names) {
-      if (!/^cb-[a-z0-9]{6}\.md$/.test(n)) continue;
-      count++;
-      try {
-        const t = fs.statSync(path.join(dir, 'logs', d.name, n)).mtime.toISOString().slice(0, 10);
-        if (t > last) last = t;
-      } catch { /* ignore */ }
-    }
-  }
-  return { count, last };
-}
-
-/** Every store under CASEBOOK_ROOT (or just the current one under CASEBOOK_HOME). */
-function listProfiles() {
-  const cur = profile();
-  const dirs = process.env.CASEBOOK_HOME ? [cur.home] : knownProfiles().map((n) => path.join(storeRoot(), n));
-  // The current store may not have been used yet (no profile.json): still show it.
-  if (!dirs.some((d) => path.resolve(d) === path.resolve(cur.home))) dirs.push(cur.home);
-  return dirs.map((dir) => {
-    const isCurrent = path.resolve(dir) === path.resolve(cur.home);
-    const rec = readJson(profileFile(dir), isCurrent ? { name: cur.name, claudeConfigDir: cur.configDir } : {});
-    const { count, last } = countLogs(dir);
-    return { name: rec.name || path.basename(dir), claudeConfigDir: rec.claudeConfigDir || null, logs: count, lastLog: last || null, current: isCurrent };
-  });
-}
-
-const home = () => profile().home;
-
-const paths = {
-  home,
-  root: storeRoot,
-  config: () => path.join(home(), 'config.json'),
-  logs: () => path.join(home(), 'logs'),
-  marks: () => path.join(home(), 'marks'),
-  sessions: () => path.join(home(), 'state', 'sessions'),
-  locks: () => path.join(home(), 'state', 'locks'),
-  meta: () => path.join(home(), 'state', 'meta.json'),
-  lock: () => path.join(home(), 'state', 'sweep.lock'),
-  errorLog: () => path.join(home(), 'casebook.log'),
-  profileName: () => profile().name,
-  claudeConfigDir: () => profile().configDir,
-  // Pass CLAUDE_CONFIG_DIR to children only when it matters: it was already set, or the profile is not the
-  // default ~/.claude. Setting it for a default-profile user could change how `claude` finds its credentials.
-  claudeConfigDirExplicit: () => Boolean(process.env.CLAUDE_CONFIG_DIR) || !sameDir(profile().configDir, normalizeDir(DEFAULT_CLAUDE_DIR)),
-  claudeProjects: () => path.join(profile().configDir, 'projects'),
-};
 
 const DEFAULT_CONFIG = {
   defaultPolicy: 'anonymize',
   projects: [{ match: 'github.com/YOUR-GITHUB-HANDLE/*', policy: 'public' }],
-  scout: {
+  scan: {
     command: 'claude',
     model: 'haiku',
     minTurns: 4,
-    keepMinScore: 2,
     maxTopics: 3,
     maxChars: 60000,
     timeoutSec: 240,
   },
-  sweep: { enabled: true, maxPerRun: 3, settleMinutes: 15, regrowTurns: 8 },
-  output: { dir: null },
 };
 
 function mkdirp(d) {
@@ -232,14 +156,15 @@ function deepMerge(base, over) {
   return out;
 }
 
-/** Load config, creating the default file (and install timestamp) on first use. */
+/** Load config, creating the default file on first use. */
 function loadConfig() {
-  ensureProfileFile();
+  migrateProfiles();
   const file = paths.config();
   if (!fs.existsSync(file)) writeJsonAtomic(file, DEFAULT_CONFIG);
-  const meta = readJson(paths.meta(), {});
-  if (!meta.installedAt) writeJsonAtomic(paths.meta(), { ...meta, installedAt: new Date().toISOString() });
-  return deepMerge(DEFAULT_CONFIG, readJson(file, {}));
+  const raw = readJson(file, {});
+  // Before 0.3 the model settings were under "scout".
+  if (raw.scout && !raw.scan) raw.scan = raw.scout;
+  return deepMerge(DEFAULT_CONFIG, raw);
 }
 
 function logError(msg, err) {
@@ -271,6 +196,11 @@ function renderDoc(meta, body) {
     .filter(([, v]) => v !== undefined)
     .map(([k, v]) => `${k}: ${JSON.stringify(v)}`);
   return `---\n${lines.join('\n')}\n---\n\n${body.replace(/^\n+/, '')}`;
+}
+
+/** A log's summary: the paragraph between its title and its first section. */
+function logSummary(body) {
+  return String(body || '').replace(/^\s*# .*\n+/, '').split(/\n## /)[0].trim();
 }
 
 // ---------- misc ----------
@@ -336,5 +266,5 @@ function globMatch(pattern, value) {
 
 module.exports = {
   PLUGIN_ROOT, paths, DEFAULT_CONFIG, loadConfig, mkdirp, readJson, writeJsonAtomic, writeFileAtomic,
-  normNote, logError, profile, useProfile, listProfiles, normalizeDir, profileNameFor, parseDoc, renderDoc, newId, ID_RE, sessionKey, slugify, parseAge, daysSince, globMatch, expandHome,
+  normNote, logError, normalizeDir, profileNameFor, parseDoc, renderDoc, logSummary, newId, ID_RE, sessionKey, slugify, parseAge, daysSince, globMatch, expandHome,
 };
