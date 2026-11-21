@@ -89,7 +89,10 @@ function mergeTree(from, to, merge, failed = [], park = null) {
       try { fs.renameSync(src, dst); } catch (err) {
         // Another volume (a store symlinked to a synced folder): copy, then remove.
         if (err.code !== 'EXDEV') throw err;
-        fs.copyFileSync(src, dst, fs.constants.COPYFILE_EXCL);
+        // Through a temp name, so a copy cut off midway is never taken for the file.
+        const tmp = `${dst}.${process.pid}.part`;
+        fs.copyFileSync(src, tmp);
+        fs.renameSync(tmp, dst);
         fs.rmSync(src, { force: true });
       }
     } catch (err) { if (err.code !== 'ENOENT') { left++; failed.push(`${src}: ${err.code || err.message}`); } }
@@ -156,7 +159,9 @@ const hasFiles = (dir) => { try { return fs.readdirSync(dir, { withFileTypes: tr
 function oldStores() {
   try {
     return fs.readdirSync(home(), { withFileTypes: true })
-      .filter((d) => d.isDirectory() && !['logs', 'marks', 'state'].includes(d.name) && (fs.existsSync(path.join(home(), d.name, 'profile.json'))
+      // A store may be a link to a folder elsewhere (a synced folder): follow it.
+      .filter((d) => (d.isDirectory() || (d.isSymbolicLink() && (() => { try { return fs.statSync(path.join(home(), d.name)).isDirectory(); } catch { return false; } })()))
+        && !['logs', 'marks', 'state'].includes(d.name) && (fs.existsSync(path.join(home(), d.name, 'profile.json'))
         // Merged already, but a 0.2 process still running saved to it since.
         || (fs.existsSync(path.join(home(), d.name, 'profile.migrated.json')) && MOVED.some((sub) => hasFiles(path.join(home(), d.name, sub))))))
       .map((d) => d.name)
@@ -193,7 +198,11 @@ function migrateLocked() {
       try {
         const { added, scanDropped } = mergeConfigs(paths.config(), old);
         config = `; its default policy and ${added} project rule(s) were merged into ${paths.config()}${scanDropped ? `; its scan settings were not used (see ${old})` : ''}`;
-      } catch (err) { config = `; its config.json could not be merged (${err.message}), see ${dir}`; }
+      } catch (err) {
+        // Its privacy rules must not be lost: tried again on the next run, the store not marked merged.
+        logError(`merging profile store "${name}": its config.json could not be merged (${err.message}); tried again next run`);
+        continue;
+      }
     }
     try { if (fs.existsSync(old)) fs.copyFileSync(old, stamp); } catch { /* merged again next time: harmless once */ }
     // A file that could not be moved (not one already there): the store is tried again on the next run.

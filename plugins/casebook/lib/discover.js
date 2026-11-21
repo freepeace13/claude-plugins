@@ -77,7 +77,7 @@ function collectSessions(config, { project, since, exclude, force }) {
       out.push({
         sessionId, transcriptPath: file, mtimeMs: st.mtimeMs, size: st.size,
         project: info.project, repo: info.repo || null, root: info.root, policy: info.policy,
-        branch: t.branch, startedAt: t.startedAt, endedAt: t.endedAt, userTurns: t.userTurns,
+        branch: t.branch, startedAt: t.startedAt, endedAt: t.endedAt, workAt: t.workAt, userTurns: t.userTurns,
         files: t.files, readFiles: t.readFiles, prUrls: t.prUrls, aiTitle: t.aiTitle, opening: t.opening,
         text: t.text,
         logs: logs.map((l) => ({ id: l.meta.id, score: l.meta.score, title: l.meta.title, tags: l.meta.tags || [] })),
@@ -293,8 +293,9 @@ function hasNews(log, members, topic) {
   if (topic && topic.marks && pending.some((p) => p.length)) return true;
   // Older logs: 0.2 has scouted_at, 0.1 only created_at. A pending mark a scan saw and left unplaced is news once.
   const since = m.scanned_at || m.scouted_at || m.created_at || '';
-  // A log from before 0.3 counted casebook's own commands as turns: compare when its sessions last changed instead.
-  const grew = (x) => (m.scanned_at ? (x.userTurns || 0) > (turns[x.sessionId] || 0) : String(x.endedAt || '') > (m.scouted_at || m.updated_at || since));
+  // A log from before 0.3 counted casebook's own commands as turns: compare when its sessions last saw work instead
+  // (casebook's own entries left out).
+  const grew = (x) => (m.scanned_at ? (x.userTurns || 0) > (turns[x.sessionId] || 0) : String(x.workAt || x.endedAt || '') > (m.scouted_at || m.updated_at || since));
   return members.some((x, i) => pending[i].some((k) => !k.seen && String(k.at || '') > since) || grew(x));
 }
 

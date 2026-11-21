@@ -38,7 +38,8 @@ function isCasebookTool(b) {
   const i = b.input || {};
   if (b.name === 'Skill') return /^casebook:/.test(String(i.skill || i.name || ''));
   // `casebook` as a command word anywhere in the line: after `cd x &&`, a pipe or VAR=value prefixes.
-  if (b.name === 'Bash') return /(^|[;&|(]\s*)(\w+=\S*\s+)*casebook(\s|$)/.test(String(i.command || '').split('\n')[0]);
+  // Also by path (`node …/bin/casebook`, `~/.local/bin/casebook`), quoted or not.
+  if (b.name === 'Bash') return /(^\s*|[;&|(]\s*)(\w+=\S*\s+)*(node\s+)?["']?(\S*\/)?casebook["']?(\s|$)/.test(String(i.command || '').split('\n')[0]);
   const fp = i.file_path || i.path || '';
   return Boolean(fp) && path.resolve(String(fp)).startsWith(paths.home() + path.sep);
 }
@@ -80,6 +81,7 @@ function condense(file, maxChars = 60000) {
   const turn = (t) => { out.push(`USER: ${clip(t)}`); if (opening.length < 2) opening.push(clip(t, 1000)); userTurns++; };
   let startedAt = null;
   let endedAt = null;
+  let workAt = null;
   let cwd = null;
   let branch = null;
   let sessionId = null;
@@ -98,6 +100,8 @@ function condense(file, maxChars = 60000) {
     if (e.type === 'pr-link' && e.prUrl) prUrls.add(String(e.prUrl));
     if (e.type === 'ai-title' && e.aiTitle) aiTitle = String(e.aiTitle);
     if (e.isSidechain || e.isMeta || !e.message) continue;
+    // The last entry that was the session's own work, not casebook's: when the session last changed.
+    const before = out.length;
 
     if (e.type === 'user') {
       for (const b of blocksOf(e.message.content)) {
@@ -141,6 +145,7 @@ function condense(file, maxChars = 60000) {
         }
       }
     }
+    if (out.length > before && e.timestamp) workAt = e.timestamp;
   }
 
   let text = out.join('\n');
@@ -150,7 +155,7 @@ function condense(file, maxChars = 60000) {
     text = `${text.slice(0, head)}\n\n[… ${text.length - maxChars} chars omitted from the middle …]\n\n${text.slice(-tail)}`;
   }
   return {
-    text, userTurns, startedAt, endedAt, cwd, branch, sessionId, files: [...files],
+    text, userTurns, startedAt, endedAt, workAt, cwd, branch, sessionId, files: [...files],
     readFiles: [...readFiles], prUrls: [...prUrls], aiTitle, opening: opening.join('\n'),
   };
 }

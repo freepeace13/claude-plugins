@@ -508,7 +508,10 @@ test('older logs and marks a scan already saw are not news', () => {
   fs.writeFileSync(marks, JSON.stringify([{ at: new Date(Date.now() - 86400000).toISOString(), note: 'seen', session: 'v1' }]));
   assert.match(s.run(['discover'], { env: same }).out, /No topic matched/);
   // Its turn count may include casebook's own commands: a session that changed since the log is news.
-  s.transcript('v1', 3, [{ type: 'system', sessionId: 'v1', timestamp: new Date(Date.now() + 1000).toISOString() }]);
+  const later = new Date(Date.now() + 1000).toISOString();
+  s.transcript('v1', 3, [{ type: 'user', sessionId: 'v1', cwd: s.repo, timestamp: later, message: { role: 'user', content: '<command-name>/casebook:list</command-name>' } }]);
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'only casebook ran since: not news');
+  s.transcript('v1', 3, [{ type: 'user', sessionId: 'v1', cwd: s.repo, timestamp: later, message: { role: 'user', content: 'one more fix' } }]);
   assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${old}`), 'changed since the log: news');
 });
 
@@ -1169,6 +1172,27 @@ test('a store a 0.2 process recreates is merged again, but its config only once'
   assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).projects.find((r) => r.match === 'github.com/me/*').policy, 'public', 'the user\'s edit stays');
 });
 
+test('a store linked from elsewhere is merged; a config that fails to merge keeps its store for the next run', () => {
+  const p = profileSandbox();
+  p.seedStore();
+  const far = path.join(p.root, 'synced', 'personal');
+  seedLog({ env: { CASEBOOK_HOME: far } }, { id: 'cb-link01' });
+  fs.writeFileSync(path.join(far, 'profile.json'), '{}');
+  fs.symlinkSync(far, path.join(p.cb, 'personal'));
+  assert.ok(JSON.parse(p.run(['list', '--json']).out).some((l) => l.id === 'cb-link01'));
+
+  const d = path.join(p.cb, 'work');
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'config.json'), '{ "projects": [ { "match": "*/client/*", "policy": "skip" }, ] }');
+  fs.writeFileSync(path.join(d, 'profile.json'), '{}');
+  assert.strictEqual(p.run(['list']).status, 0);
+  assert.ok(fs.existsSync(path.join(d, 'profile.json')), 'not marked merged');
+  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /"work": its config\.json could not be merged/);
+  fs.writeFileSync(path.join(d, 'config.json'), '{ "projects": [ { "match": "*/client/*", "policy": "skip" } ] }');
+  assert.strictEqual(p.run(['list']).status, 0);
+  assert.ok(JSON.parse(fs.readFileSync(path.join(p.cb, 'config.json'), 'utf8')).projects.some((r) => r.match === '*/client/*' && r.policy === 'skip'));
+});
+
 test('merging configs never loosens a rule: one rule per pattern, the strictest, skip first', () => {
   const p = profileSandbox();
   const put = (name, cfg) => { const d = path.join(p.cb, name); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify(cfg)); fs.writeFileSync(path.join(d, 'profile.json'), '{}'); };
@@ -1204,6 +1228,8 @@ test('casebook\'s own commands are not turns of the session', () => {
   assert.doesNotMatch(c2.text, /casebook list|casebook:show|handoffs|another session story/);
   fs.writeFileSync(f, tools(use('Bash', { command: 'cd ~/proj && CASEBOOK_HOME=/x casebook list --all' }), use('Bash', { command: 'casebook-lint .' }), use('Bash', { command: 'grep -rn casebook lib' })));
   assert.deepStrictEqual(condense(f).text.split('\n'), ['  [Bash] casebook-lint .', '  [Bash] grep -rn casebook lib']);
+  fs.writeFileSync(f, tools(use('Bash', { command: 'node "$CLAUDE_PLUGIN_ROOT/bin/casebook" list' }), use('Bash', { command: ' ~/.local/bin/casebook show cb-x' })));
+  assert.strictEqual(condense(f).text, '');
   // A topic number typed in answer to a discovery is not a turn; a mark's reply is still work.
   fs.writeFileSync(f, [line('<command-name>/casebook:discovery</command-name>'), said('1. topic'), line('1'), said('Created cb-x'),
     line('<command-name>/casebook:mark</command-name>'), said('marked, carrying on with the fix')].join('\n'));
