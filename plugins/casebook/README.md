@@ -6,7 +6,7 @@ Casebook finds the case studies hiding in your Claude Code sessions and hands th
 - **Lets you flag the good ones.** Run `/casebook:mark "the queue redesign"` at the moment it matters. The next discovery that covers that session focuses on what you marked.
 - **Logs topics, not sessions.** A session can feed several logs, and a log can draw on several sessions. Every scan sees the logs already near it, so a topic is updated rather than logged twice: each log is unique.
 - **Lists them per project** with IDs, scores and marks. `--marked` shows only what you flagged.
-- **Hands off, doesn't write.** `/casebook:handoff cb-7k2m9q cb-p3x8aa` checks the logs against `handoff.md` and writes a handoff folder with the facts, their sources and the open questions. Writing the piece is up to you or your own tools.
+- **Hands off, doesn't write.** `/casebook:handoff cb-7k2m9q cb-p3x8aa` checks the logs against `handoff.md` and writes a handoff folder with the facts and their sources. Open questions are settled from the repository or by you before the folder is written. Writing the piece is up to you or your own tools.
 - **Cleans up.** You can delete one log, or delete a filtered batch.
 - **Privacy first.** Each project is `public`, `anonymize` (the default) or `skip`. Under `anonymize`, client and company names never reach the notes or the handoff.
 
@@ -34,7 +34,7 @@ casebook config      # prints the path, ~/.casebook/config.json
 | `/casebook:mark <id> [note]` | Mark an existing log. |
 | `/casebook:list [--marked] [--all \| --project P] [--min-score N] [--since 30d]` | List logs. Defaults to the current repository's project. |
 | `/casebook:show <id>` | Read one log. |
-| `/casebook:handoff <id…> [--out dir] [instructions]` | Gather and check what a writer needs from the logs against `handoff.md`, asking at most 3 questions. Writes a handoff folder: `handoff.md` (checks, facts with sources, unknowns) and `logs/`. Writes nothing when the logs are too thin. |
+| `/casebook:handoff <id…> [--out dir] [instructions]` | Gather and check what a writer needs from the logs against `handoff.md` as a case study, in one message: at most 3 questions, whether numbers may be published, and every open item (open threads, release status, missing numbers) to confirm or correct. Writes a handoff folder a writer needs nothing else for: `handoff.md` (checks, facts with sources, settled open items) and `logs/`. Writes nothing when the logs are too thin. |
 | `/casebook:delete <id…>` | Delete specific logs. |
 | `/casebook:delete --below-score 3 --older-than 30d --unmarked` | Delete a batch. It runs as a dry run first and asks before deleting. |
 

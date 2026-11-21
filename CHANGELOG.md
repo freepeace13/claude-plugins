@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- casebook: `/casebook:handoff` settles open items before writing (log open threads on the topic, statuses that can change such as release, missing numbers, a missing key decision): from the repository when you are in it (also under `anonymize`, writing only what may be named), else in the same one message, as a numbered list to confirm or correct. Each becomes a dated fact; `## Unknowns` keeps only what you left unanswered. Open threads off the topic are dropped. `handoff.md` checks case studies (C-1 to C-5) instead of articles (A-1 to A-3), and a handoff's `type` is `case-study`, no longer `article`
+- casebook: every log a discovery writes or updates has `type: case-study`; a log without one is a case study too
 - casebook 0.3.0: `/casebook:discovery` is now the only way logs are made. The scout is gone: no SessionEnd hook, no startup sweep, no `/casebook:scout`, `casebook scout`, `backfill` or `maintenance`. Casebook spends model calls only when you run a discovery; the SessionStart hook only links the CLI (and merges pre-0.3 profile stores once)
 - casebook: the write feature is gone (`/casebook:write`, the `case-study-writer` agent, case-study paths from `out-path`). Casebook ends at `/casebook:handoff`; `out-path` always names a handoff folder
 - casebook: written-up tracking is gone (`casebook written`, the WRT column, `--written`/`--unwritten` on `list` and `delete`). Old `written_to` fields stay in logs as they were, and a merge keeps the first log it names
