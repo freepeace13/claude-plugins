@@ -61,7 +61,7 @@ To move the store, set `PORCH_HOME` to an absolute path (or one starting with `~
 
 On your `PATH` inside Claude Code while the plugin is enabled. The skills use it for every change to the store, so you and the agent see the same thing.
 
-For your terminal, the plugin symlinks `~/.local/bin/porch` to itself at every Claude Code startup, so the link follows updates; make sure `~/.local/bin` is on your PATH. An existing link to an older porch (or a broken one) is replaced; a regular file, a link to anything else, or a link to an equal or newer porch is left alone. Run `porch link` to do it now. Set `PORCH_BIN_DIR` to link into another folder, or to `off` to stop linking. Uninstalling the plugin does not remove the link.
+For your terminal, the plugin writes `~/.local/bin/porch`, a small launcher that finds the newest porch installed in any Claude Code profile (`$CLAUDE_CONFIG_DIR` and every `~/.claude*` folder) each time it runs. Claude Code has no install or update hook, so this is what keeps the command current: an install or update needs no relink, not even a restart. Make sure `~/.local/bin` is on your PATH. The launcher is written at every session start (new, resumed, cleared or compacted) and by `porch link`. It replaces a symlink to any porch (how 0.3.1 and earlier linked it), a broken link or an older launcher; a newer launcher, a link to anything else and any other file are left alone. Set `PORCH_BIN_DIR` to put it in another folder, or to `off` to stop. Uninstalling the plugin does not remove the launcher; with no porch installed anywhere it says so and exits.
 
 ```text
 porch init <path> --type article|case-study --topic text [--note text] [--force] [--json]

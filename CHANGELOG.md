@@ -1,10 +1,10 @@
 # Changelog
 
 ## Unreleased
-- porch 0.3.1: a new SessionStart hook symlinks `~/.local/bin/porch` the same way; `porch link [--json]`; `PORCH_BIN_DIR`
-- porch: the CLI's logic moves into `lib/` (`store`, `intake`, `legacy`, `link`, `util`), the same layout as casebook; `bin/porch` only parses arguments and prints
-- porch 0.3.0: `/porch:voice [--from <file>]` asks 16 multiple-choice questions (each option previews a passage in that style) on rhythm, presence, delivery and audience, approves a sample paragraph and writes `$PORCH_HOME/voice.md`; reruns can redo one area, keeping the previous file as `voice.md.bak` (a replaced hand-written file as `voice.handwritten.md`, never overwritten)
-- porch: `$PORCH_HOME/voice.md` now extends the base voice instead of replacing it. `references/voice.md` splits into Fixed rules (always apply) and Defaults (your voice overrides them); briefs name the base as `voice` and your file as `voice_user`
+
+## casebook 0.3.2, porch 0.3.2 — 2026-11-22
+- `~/.local/bin/casebook` and `~/.local/bin/porch` are now small launchers, not symlinks to one installed version. Each run finds the newest copy installed in any Claude Code profile (`$CLAUDE_CONFIG_DIR` and every `~/.claude*` folder, from `plugins/installed_plugins.json`, or any cached copy for a profile without one), so an install or update needs no relink. Claude Code has no install or update hook to do it then. With no copy installed anywhere, the launcher says so and exits 127
+- The SessionStart hook runs on every session start (new, resumed, cleared or compacted), not only a fresh startup. It replaces a symlink to any copy of the plugin, a broken link or an older launcher; a newer launcher, a link to anything else and any other file are left alone
 
 ## casebook 0.3.1 — 2026-11-22
 - `/casebook:handoff` settles open items before writing (log open threads on the topic, statuses that can change such as release, missing numbers, a missing key decision): from the repository when you are in it (also under `anonymize`, writing only what may be named), else in the same one message, as a numbered list to confirm or correct. Each becomes a dated fact; `## Unknowns` keeps only what you left unanswered. Open threads off the topic are dropped. `handoff.md` checks case studies (C-1 to C-5) instead of articles (A-1 to A-3), and a handoff's `type` is `case-study`, no longer `article`
@@ -24,8 +24,16 @@
 - `/casebook:discovery` scans the current session too (a later discovery picks up its new turns; casebook's own commands are not counted as turns) and passes `--force` on
 - A discovery rewrites a log from exactly the same sessions only when they have new turns since its last scan, or pending marks the scan places on it (a mark of a log by ID is in the log already; a pending mark an open scan saw and placed nowhere counts once). A session with a pending mark is a candidate however short; the duplicate check gets a 90s timeout of its own
 
+## porch 0.3.1 — 2026-11-21
+- A new SessionStart hook symlinks `~/.local/bin/porch` to the installed plugin, as casebook 0.2.1 does; `porch link [--json]`; `PORCH_BIN_DIR`
+- The CLI's logic moves into `lib/` (`store`, `intake`, `legacy`, `link`, `util`), the same layout as casebook; `bin/porch` only parses arguments and prints
+
 ## casebook 0.2.1 — 2026-11-21
 - At every startup the SessionStart hook symlinks `~/.local/bin/casebook` to the installed plugin, so `casebook` runs from any terminal; `casebook link [--json]` does it on demand; `CASEBOOK_BIN_DIR` moves the link or turns it `off`
+
+## porch 0.3.0 — 2026-11-20
+- `/porch:voice [--from <file>]` asks 16 multiple-choice questions (each option previews a passage in that style) on rhythm, presence, delivery and audience, approves a sample paragraph and writes `$PORCH_HOME/voice.md`; reruns can redo one area, keeping the previous file as `voice.md.bak` (a replaced hand-written file as `voice.handwritten.md`, never overwritten)
+- `$PORCH_HOME/voice.md` now extends the base voice instead of replacing it. `references/voice.md` splits into Fixed rules (always apply) and Defaults (your voice overrides them); briefs name the base as `voice` and your file as `voice_user`
 
 ## casebook 0.2.0 — 2026-11-20
 - Logs are topics, not sessions: one scan returns up to `scout.maxTopics` (3) topics, each with an `angle`; a log lists the `sessions` it draws on (with `session_turns`)

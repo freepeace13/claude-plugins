@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // porch CLI: manages work folders in the Porch store (see lib/store.js). On PATH inside Claude Code while
-// the plugin is enabled, and from any terminal through ~/.local/bin/porch (see lib/link.js).
+// the plugin is enabled, and from any terminal through the ~/.local/bin/porch launcher (see lib/link.js).
 
 const fs = require('fs');
 const path = require('path');
@@ -179,7 +179,7 @@ const help = () => `porch: manage Porch work folders in ${store.home()}  (set PO
       status: ${store.STATUSES.join(' | ')}   tags: comma-separated
   porch delete <id>… [--yes]     without --yes it only shows what it would delete
   porch home                     print the store path
-  porch link [--json]            symlink ~/.local/bin/porch to this plugin (done at every startup)
+  porch link [--json]            write ~/.local/bin/porch, a launcher for the newest install (done at every session start)
 
 An <id> may be any unique prefix of at least 4 characters.`;
 

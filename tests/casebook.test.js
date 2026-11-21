@@ -1278,54 +1278,96 @@ test('handoff skill: reads handoff.md, thin writes nothing, stays inside caseboo
 function linkSandbox() {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'casebook-link-')));
   const dir = path.join(root, 'bin');
-  const env = { ...process.env, CASEBOOK_BIN_DIR: dir, CASEBOOK_HOME: path.join(root, 'store'), CLAUDE_CONFIG_DIR: path.join(root, 'claude') };
+  const home = path.join(root, 'home');
+  const profile = path.join(home, '.claude');
+  const env = { ...process.env, CASEBOOK_BIN_DIR: dir, CASEBOOK_HOME: path.join(root, 'store'), HOME: home, CLAUDE_CONFIG_DIR: profile };
   const run = (args, input = '') => spawnSync(process.execPath, [BIN, ...args], { encoding: 'utf8', env, input });
-  // A fake install of this plugin at some version, to point the link at.
+  // A fake install of a plugin at some version; its bin prints which one ran.
   const fakePlugin = (name, version) => {
-    const p = path.join(root, `${name}-${version}`);
+    const p = path.join(root, 'installs', `${name}-${version}`);
     fs.mkdirSync(path.join(p, '.claude-plugin'), { recursive: true });
     fs.mkdirSync(path.join(p, 'bin'));
     fs.writeFileSync(path.join(p, '.claude-plugin', 'plugin.json'), JSON.stringify({ name, version }));
-    fs.writeFileSync(path.join(p, 'bin', 'casebook'), '#!/bin/sh\n');
-    return path.join(p, 'bin', 'casebook');
+    fs.writeFileSync(path.join(p, 'bin', name), `console.log('fake ${name} ${version} ' + process.argv.slice(2).join(' '));\n`);
+    return p;
   };
-  return { root, dir, dest: path.join(dir, 'casebook'), env, run, fakePlugin, target: fs.realpathSync(BIN) };
+  // What a profile's Claude Code has installed: plugins/installed_plugins.json.
+  const install = (dirOfProfile, ...roots) => {
+    fs.mkdirSync(path.join(dirOfProfile, 'plugins'), { recursive: true });
+    fs.writeFileSync(path.join(dirOfProfile, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ version: 2, plugins: { 'casebook@kinbasco-plugins': roots.map((installPath) => ({ scope: 'user', installPath })) } }));
+  };
+  install(profile, PLUGIN_ROOT);
+  const launch = (args = []) => spawnSync(path.join(dir, 'casebook'), args, { encoding: 'utf8', env });
+  return { root, dir, home, profile, dest: path.join(dir, 'casebook'), env, run, fakePlugin, install, launch, target: fs.realpathSync(BIN) };
 }
+const PLUGIN_ROOT = path.resolve(__dirname, '../plugins/casebook');
 
-test('casebook link creates the bin folder and the link, then reports it current', () => {
+test('casebook link writes a launcher, reports it current, and the CLI runs through it', () => {
   const s = linkSandbox();
   const r = JSON.parse(s.run(['link', '--json']).stdout);
   assert.strictEqual(r.status, 'linked');
-  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+  assert.strictEqual(r.target, s.target, 'it reports the bin the launcher runs');
+  assert.ok(!fs.lstatSync(s.dest).isSymbolicLink(), 'a launcher, not a symlink to one version');
+  assert.match(fs.readFileSync(s.dest, 'utf8'), /^\/\/ casebook-launcher \d+/m);
+  assert.ok(fs.statSync(s.dest).mode & 0o111, 'executable');
   assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'current');
-  const help = spawnSync(s.dest, ['help'], { encoding: 'utf8', env: s.env });
-  assert.strictEqual(help.status, 0, 'the CLI runs through the link');
+  const help = s.launch(['help']);
+  assert.strictEqual(help.status, 0, 'the CLI runs through the launcher');
   assert.match(help.stdout, /casebook/);
 });
 
-test('casebook link replaces a broken link and a link to an older casebook, and keeps a newer one', () => {
+test('the casebook launcher runs the newest install in any profile, with no relink after an update', () => {
+  const s = linkSandbox();
+  s.run(['link', '--json']);
+  // An update in another profile: the launcher picks it up without being written again.
+  s.install(path.join(s.home, '.claude_personal'), s.fakePlugin('casebook', '99.0.0'));
+  const before = fs.readFileSync(s.dest, 'utf8');
+  assert.strictEqual(s.launch(['list', '--x']).stdout, 'fake casebook 99.0.0 list --x\n', 'arguments pass through');
+  assert.strictEqual(fs.readFileSync(s.dest, 'utf8'), before);
+  // A copy that is only cached, or that is not this plugin, is not an install.
+  s.install(path.join(s.home, '.claude_personal'), s.fakePlugin('not-casebook', '100.0.0'));
+  assert.match(s.launch(['help']).stdout, /casebook/);
+  assert.doesNotMatch(s.launch(['help']).stdout, /fake/);
+  // A profile with no record of its installs: any cached copy counts.
+  const cached = path.join(s.home, '.claude_work', 'plugins', 'cache', 'm', 'casebook', '98.0.0');
+  fs.cpSync(s.fakePlugin('casebook', '98.0.0'), cached, { recursive: true });
+  assert.strictEqual(s.launch([]).stdout, 'fake casebook 98.0.0 \n');
+  // Uninstalled everywhere: it says so instead of running a stale copy.
+  s.install(s.profile);
+  s.install(path.join(s.home, '.claude_personal'));
+  fs.rmSync(path.join(s.home, '.claude_work'), { recursive: true });
+  const none = s.launch(['help']);
+  assert.strictEqual(none.status, 127);
+  assert.match(none.stderr, /no installed casebook plugin/);
+});
+
+test('casebook link replaces an old symlink or launcher, and keeps a newer launcher', () => {
   const s = linkSandbox();
   fs.mkdirSync(s.dir);
   fs.symlinkSync(path.join(s.root, 'gone', 'bin', 'casebook'), s.dest);
-  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated');
-  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated', 'a broken link');
+  assert.ok(!fs.lstatSync(s.dest).isSymbolicLink());
 
-  fs.unlinkSync(s.dest);
-  fs.symlinkSync(s.fakePlugin('casebook', '0.0.1'), s.dest);
-  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated');
-  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+  for (const v of ['0.0.1', '99.0.0']) {
+    fs.unlinkSync(s.dest);
+    fs.symlinkSync(path.join(s.fakePlugin('casebook', v), 'bin', 'casebook'), s.dest);
+    assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated', `a symlink to casebook ${v}`);
+    assert.ok(!fs.lstatSync(s.dest).isSymbolicLink());
+  }
 
-  const newer = s.fakePlugin('casebook', '99.0.0');
-  fs.unlinkSync(s.dest);
-  fs.symlinkSync(newer, s.dest);
+  fs.writeFileSync(s.dest, '#!/usr/bin/env node\n// casebook-launcher 0: old\n');
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated', 'an older launcher');
+  const newer = '#!/usr/bin/env node\n// casebook-launcher 999: from a later casebook\n';
+  fs.writeFileSync(s.dest, newer);
   assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'skipped');
-  assert.strictEqual(fs.readlinkSync(s.dest), newer);
+  assert.strictEqual(fs.readFileSync(s.dest, 'utf8'), newer);
 });
 
 test('casebook link leaves a regular file, a link to something else, and "off" alone', () => {
   const s = linkSandbox();
   fs.mkdirSync(s.dir);
-  const other = s.fakePlugin('not-casebook', '9.0.0');
+  const other = path.join(s.fakePlugin('not-casebook', '9.0.0'), 'bin', 'not-casebook');
   fs.symlinkSync(other, s.dest);
   assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'skipped');
   assert.strictEqual(fs.readlinkSync(s.dest), other);
@@ -1339,14 +1381,18 @@ test('casebook link leaves a regular file, a link to something else, and "off" a
   assert.strictEqual(JSON.parse(off.stdout).status, 'skipped');
 });
 
-test('casebook SessionStart hook links silently and never fails', () => {
+test('casebook SessionStart hook runs on every session source, links silently and never fails', () => {
+  const hooks = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks.SessionStart;
+  assert.ok(hooks.every((h) => h.matcher === undefined), 'no matcher: startup, resume, clear and compact all run it');
+  for (const source of ['startup', 'resume', 'clear', 'compact']) {
+    const s = linkSandbox();
+    const r = s.run(['hook', 'session-start'], JSON.stringify({ session_id: 's', source }));
+    assert.strictEqual(r.status, 0);
+    assert.strictEqual(r.stdout, '', 'SessionStart must not inject context');
+    assert.match(fs.readFileSync(s.dest, 'utf8'), /casebook-launcher/, source);
+  }
   const s = linkSandbox();
-  const r = s.run(['hook', 'session-start'], JSON.stringify({ session_id: 's', source: 'startup' }));
-  assert.strictEqual(r.status, 0);
-  assert.strictEqual(r.stdout, '', 'SessionStart must not inject context');
-  assert.strictEqual(fs.realpathSync(s.dest), s.target);
-
-  const bad = spawnSync(process.execPath, [BIN, ...['hook', 'session-start']], { encoding: 'utf8', env: { ...s.env, CASEBOOK_BIN_DIR: 'relative/bin' }, input: JSON.stringify({ session_id: 's', source: 'startup' }) });
+  const bad = spawnSync(process.execPath, [BIN, ...['hook', 'session-start']], { encoding: 'utf8', env: { ...s.env, CASEBOOK_BIN_DIR: 'relative/bin' }, input: '{}' });
   assert.strictEqual(bad.status, 0);
   assert.strictEqual(bad.stdout, '');
 });
