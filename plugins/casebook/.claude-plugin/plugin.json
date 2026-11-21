@@ -1,7 +1,7 @@
 {
   "name": "casebook",
   "displayName": "Casebook",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Finds potential case studies across your Claude Code sessions on demand, lets you mark and list them, and hands them off to a writer as a checked folder of facts.",
   "author": {
     "name": "Kin Basco",
