@@ -320,7 +320,7 @@ const commands = {
   discover [--note "…"] [--min-score N] [--tags a,b] [--project P | --all] [--since 90d] [--candidates 5] [--dry-run]
                                                    find topics across linked sessions, ranked (top 3)
   discover pick <discovery-id> <n>                 log topic n of a discovery as one log
-  link [--json]                                    symlink ~/.local/bin/casebook to this plugin (done at every startup)
+  link [--json]                                    write ~/.local/bin/casebook, a launcher for the newest install (done at every session start)
   out-path --project P --title T [--dir D]         where a new handoff folder should go
   config | doctor | help`);
   },

@@ -1,7 +1,7 @@
 {
   "name": "porch",
   "displayName": "Porch",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Turn a notes file, folder or draft into a reviewed article or case study and save it to Porch as a draft. You publish it in the Porch admin; the plugin never does.",
   "author": {
     "name": "Kin Basco",

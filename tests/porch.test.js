@@ -674,54 +674,96 @@ test('skills pass values in single quotes, allow spaced paths, and keep drafts p
 function linkSandbox() {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'porch-link-')));
   const dir = path.join(root, 'bin');
-  const env = { ...process.env, PORCH_BIN_DIR: dir, PORCH_HOME: path.join(root, 'store') };
+  const home = path.join(root, 'home');
+  const profile = path.join(home, '.claude');
+  const env = { ...process.env, PORCH_BIN_DIR: dir, PORCH_HOME: path.join(root, 'store'), HOME: home, CLAUDE_CONFIG_DIR: profile };
   const run = (args, input = '') => spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env, input });
-  // A fake install of this plugin at some version, to point the link at.
+  // A fake install of a plugin at some version; its bin prints which one ran.
   const fakePlugin = (name, version) => {
-    const p = path.join(root, `${name}-${version}`);
+    const p = path.join(root, 'installs', `${name}-${version}`);
     fs.mkdirSync(path.join(p, '.claude-plugin'), { recursive: true });
     fs.mkdirSync(path.join(p, 'bin'));
     fs.writeFileSync(path.join(p, '.claude-plugin', 'plugin.json'), JSON.stringify({ name, version }));
-    fs.writeFileSync(path.join(p, 'bin', 'porch'), '#!/bin/sh\n');
-    return path.join(p, 'bin', 'porch');
+    fs.writeFileSync(path.join(p, 'bin', name), `console.log('fake ${name} ${version} ' + process.argv.slice(2).join(' '));\n`);
+    return p;
   };
-  return { root, dir, dest: path.join(dir, 'porch'), env, run, fakePlugin, target: fs.realpathSync(CLI) };
+  // What a profile's Claude Code has installed: plugins/installed_plugins.json.
+  const install = (dirOfProfile, ...roots) => {
+    fs.mkdirSync(path.join(dirOfProfile, 'plugins'), { recursive: true });
+    fs.writeFileSync(path.join(dirOfProfile, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ version: 2, plugins: { 'porch@kinbasco-plugins': roots.map((installPath) => ({ scope: 'user', installPath })) } }));
+  };
+  install(profile, PLUGIN_ROOT);
+  const launch = (args = []) => spawnSync(path.join(dir, 'porch'), args, { encoding: 'utf8', env });
+  return { root, dir, home, profile, dest: path.join(dir, 'porch'), env, run, fakePlugin, install, launch, target: fs.realpathSync(CLI) };
 }
+const PLUGIN_ROOT = path.resolve(__dirname, '../plugins/porch');
 
-test('porch link creates the bin folder and the link, then reports it current', () => {
+test('porch link writes a launcher, reports it current, and the CLI runs through it', () => {
   const s = linkSandbox();
   const r = JSON.parse(s.run(['link', '--json']).stdout);
   assert.strictEqual(r.status, 'linked');
-  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+  assert.strictEqual(r.target, s.target, 'it reports the bin the launcher runs');
+  assert.ok(!fs.lstatSync(s.dest).isSymbolicLink(), 'a launcher, not a symlink to one version');
+  assert.match(fs.readFileSync(s.dest, 'utf8'), /^\/\/ porch-launcher \d+/m);
+  assert.ok(fs.statSync(s.dest).mode & 0o111, 'executable');
   assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'current');
-  const help = spawnSync(s.dest, ['help'], { encoding: 'utf8', env: s.env });
-  assert.strictEqual(help.status, 0, 'the CLI runs through the link');
+  const help = s.launch(['help']);
+  assert.strictEqual(help.status, 0, 'the CLI runs through the launcher');
   assert.match(help.stdout, /porch/);
 });
 
-test('porch link replaces a broken link and a link to an older porch, and keeps a newer one', () => {
+test('the porch launcher runs the newest install in any profile, with no relink after an update', () => {
+  const s = linkSandbox();
+  s.run(['link', '--json']);
+  // An update in another profile: the launcher picks it up without being written again.
+  s.install(path.join(s.home, '.claude_personal'), s.fakePlugin('porch', '99.0.0'));
+  const before = fs.readFileSync(s.dest, 'utf8');
+  assert.strictEqual(s.launch(['list', '--x']).stdout, 'fake porch 99.0.0 list --x\n', 'arguments pass through');
+  assert.strictEqual(fs.readFileSync(s.dest, 'utf8'), before);
+  // A copy that is only cached, or that is not this plugin, is not an install.
+  s.install(path.join(s.home, '.claude_personal'), s.fakePlugin('not-porch', '100.0.0'));
+  assert.match(s.launch(['help']).stdout, /porch/);
+  assert.doesNotMatch(s.launch(['help']).stdout, /fake/);
+  // A profile with no record of its installs: any cached copy counts.
+  const cached = path.join(s.home, '.claude_work', 'plugins', 'cache', 'm', 'porch', '98.0.0');
+  fs.cpSync(s.fakePlugin('porch', '98.0.0'), cached, { recursive: true });
+  assert.strictEqual(s.launch([]).stdout, 'fake porch 98.0.0 \n');
+  // Uninstalled everywhere: it says so instead of running a stale copy.
+  s.install(s.profile);
+  s.install(path.join(s.home, '.claude_personal'));
+  fs.rmSync(path.join(s.home, '.claude_work'), { recursive: true });
+  const none = s.launch(['help']);
+  assert.strictEqual(none.status, 127);
+  assert.match(none.stderr, /no installed porch plugin/);
+});
+
+test('porch link replaces an old symlink or launcher, and keeps a newer launcher', () => {
   const s = linkSandbox();
   fs.mkdirSync(s.dir);
   fs.symlinkSync(path.join(s.root, 'gone', 'bin', 'porch'), s.dest);
-  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated');
-  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated', 'a broken link');
+  assert.ok(!fs.lstatSync(s.dest).isSymbolicLink());
 
-  fs.unlinkSync(s.dest);
-  fs.symlinkSync(s.fakePlugin('porch', '0.0.1'), s.dest);
-  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated');
-  assert.strictEqual(fs.realpathSync(s.dest), s.target);
+  for (const v of ['0.0.1', '99.0.0']) {
+    fs.unlinkSync(s.dest);
+    fs.symlinkSync(path.join(s.fakePlugin('porch', v), 'bin', 'porch'), s.dest);
+    assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated', `a symlink to porch ${v}`);
+    assert.ok(!fs.lstatSync(s.dest).isSymbolicLink());
+  }
 
-  const newer = s.fakePlugin('porch', '99.0.0');
-  fs.unlinkSync(s.dest);
-  fs.symlinkSync(newer, s.dest);
+  fs.writeFileSync(s.dest, '#!/usr/bin/env node\n// porch-launcher 0: old\n');
+  assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'updated', 'an older launcher');
+  const newer = '#!/usr/bin/env node\n// porch-launcher 999: from a later porch\n';
+  fs.writeFileSync(s.dest, newer);
   assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'skipped');
-  assert.strictEqual(fs.readlinkSync(s.dest), newer);
+  assert.strictEqual(fs.readFileSync(s.dest, 'utf8'), newer);
 });
 
 test('porch link leaves a regular file, a link to something else, and "off" alone', () => {
   const s = linkSandbox();
   fs.mkdirSync(s.dir);
-  const other = s.fakePlugin('not-porch', '9.0.0');
+  const other = path.join(s.fakePlugin('not-porch', '9.0.0'), 'bin', 'not-porch');
   fs.symlinkSync(other, s.dest);
   assert.strictEqual(JSON.parse(s.run(['link', '--json']).stdout).status, 'skipped');
   assert.strictEqual(fs.readlinkSync(s.dest), other);
@@ -735,13 +777,17 @@ test('porch link leaves a regular file, a link to something else, and "off" alon
   assert.strictEqual(JSON.parse(off.stdout).status, 'skipped');
 });
 
-test('porch SessionStart hook links silently and never fails', () => {
+test('porch SessionStart hook runs on every session source, links silently and never fails', () => {
+  const hooks = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks.SessionStart;
+  assert.ok(hooks.every((h) => h.matcher === undefined), 'no matcher: startup, resume, clear and compact all run it');
+  for (const source of ['startup', 'resume', 'clear', 'compact']) {
+    const s = linkSandbox();
+    const r = s.run(['link', '--hook'], JSON.stringify({ session_id: 's', source }));
+    assert.strictEqual(r.status, 0);
+    assert.strictEqual(r.stdout, '', 'SessionStart must not inject context');
+    assert.match(fs.readFileSync(s.dest, 'utf8'), /porch-launcher/, source);
+  }
   const s = linkSandbox();
-  const r = s.run(['link', '--hook'], '{}');
-  assert.strictEqual(r.status, 0);
-  assert.strictEqual(r.stdout, '', 'SessionStart must not inject context');
-  assert.strictEqual(fs.realpathSync(s.dest), s.target);
-
   const bad = spawnSync(process.execPath, [CLI, ...['link', '--hook']], { encoding: 'utf8', env: { ...s.env, PORCH_BIN_DIR: 'relative/bin' }, input: '{}' });
   assert.strictEqual(bad.status, 0);
   assert.strictEqual(bad.stdout, '');

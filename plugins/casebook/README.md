@@ -38,7 +38,7 @@ casebook config      # prints the path, ~/.casebook/config.json
 | `/casebook:delete <id…>` | Delete specific logs. |
 | `/casebook:delete --below-score 3 --older-than 30d --unmarked` | Delete a batch. It runs as a dry run first and asks before deleting. |
 
-The same commands work from any shell through the `casebook` CLI. Inside Claude Code the plugin's `bin/` is on PATH. For your terminal, the plugin symlinks `~/.local/bin/casebook` to itself at every Claude Code startup, so the link follows updates; make sure `~/.local/bin` is on your PATH. An existing link to an older casebook (or a broken one) is replaced; a regular file, a link to anything else, or a link to an equal or newer casebook is left alone. Run `casebook link` to do it now. Set `CASEBOOK_BIN_DIR` to link into another folder, or to `off` to stop linking. Uninstalling the plugin does not remove the link. Run `casebook help` for the full list, including `doctor`.
+The same commands work from any shell through the `casebook` CLI. Inside Claude Code the plugin's `bin/` is on PATH. For your terminal, the plugin writes `~/.local/bin/casebook`, a small launcher that finds the newest casebook installed in any Claude Code profile (`$CLAUDE_CONFIG_DIR` and every `~/.claude*` folder) each time it runs. Claude Code has no install or update hook, so this is what keeps the command current: an install or update needs no relink, not even a restart. Make sure `~/.local/bin` is on your PATH. The launcher is written at every session start (new, resumed, cleared or compacted) and by `casebook link`. It replaces a symlink to any casebook (how 0.3.1 and earlier linked it), a broken link or an older launcher; a newer launcher, a link to anything else and any other file are left alone. Set `CASEBOOK_BIN_DIR` to put it in another folder, or to `off` to stop. Uninstalling the plugin does not remove the launcher; with no casebook installed anywhere it says so and exits. Run `casebook help` for the full list, including `doctor`.
 
 ```text
 $ casebook list --marked
@@ -58,7 +58,7 @@ cb-p3x8aa  2026-11-12  5     📌  Magic-link chat resume without visitor accoun
                                       ranked topics ─► you pick one ─► ~/.casebook/logs/<project>/<id>.md
 ```
 
-- **Nothing runs in the background.** Casebook spends model calls only when you run a discovery. Its one hook, at startup, links the `casebook` CLI (and, once after upgrading from 0.2, merges the old per-profile stores; see Profiles) and never prints anything.
+- **Nothing runs in the background.** Casebook spends model calls only when you run a discovery. Its one hook, at every session start, writes the `casebook` launcher (and, once after upgrading from 0.2, merges the old per-profile stores; see Profiles) and never prints anything.
 - **No recursion.** A scan runs with `CASEBOOK_SCAN=1`, `--restricted` (no user settings, so no plugins) and `--no-session-persistence` (no transcript of its own).
 - **Deleted topics stay deleted.** No later discovery logs them again, unless you pass `--force`.
 - **Cost.** At most 5 candidates are scanned per discovery (`--candidates`), plus one call to check the topics found for duplicates when there are two or more. A single session with fewer than `scan.minTurns` user turns is not a candidate, unless it has a pending mark (one no scan has seen yet also ranks it higher). Casebook's own commands, and what they print, are not read as a session's work. Transcripts are condensed (tool output dropped, the middle elided past `scan.maxChars`) before each Haiku call.
