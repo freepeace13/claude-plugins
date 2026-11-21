@@ -232,6 +232,8 @@ function applyTopic(topic, ctx) {
 
   const meta = {
     title: topic.title,
+    // What a log is a potential piece of. Casebook finds case studies only, for now.
+    type: 'case-study',
     angle: topic.angle || (survivor && survivor.meta.angle) || '',
     description: topic.description || (survivor && survivor.meta.description) || '',
     project: ctx.info.project,

@@ -147,6 +147,7 @@ test('discovery logs a public topic with the session\'s pending mark; list and s
   assert.match(doc, /tags: \["laravel","reverb"\]/);
   assert.match(doc, /"note":"the reconnect fix"/);
   assert.match(doc, /scanned_at: "/);
+  assert.match(doc, /^type: "case-study"$/m, 'a log says what it is a potential piece of');
   assert.doesNotMatch(doc, /partial|scout_mode|written_to/);
   assert.match(doc, /## Problem\np/);
   assert.ok(!fs.existsSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'sess-1.json')), 'pending mark consumed');
@@ -1263,8 +1264,10 @@ test('handoff skill: reads handoff.md, thin writes nothing, stays inside caseboo
   assert.match(hint(skill), /^"<log-id> \[<log-id>…\] \[--out <dir>\]/);
   assert.match(skill, /\$\{CLAUDE_PLUGIN_ROOT\}\/handoff\.md/);
   assert.ok(fs.existsSync(path.join(root, 'handoff.md')), 'the checks it reads ship with the plugin');
-  for (const id of ['E-1', 'E-2', 'E-3', 'E-4', 'A-1', 'A-2', 'A-3']) assert.match(read('handoff.md'), new RegExp(`\\| ${id} \\|`));
+  for (const id of ['E-1', 'E-2', 'E-3', 'E-4', 'C-1', 'C-2', 'C-3', 'C-4', 'C-5']) assert.match(read('handoff.md'), new RegExp(`\\| ${id} \\|`));
   assert.match(skill, /Nothing was written/);
+  assert.match(skill, /type: case-study/);
+  assert.doesNotMatch(read('handoff.md'), /\| A-\d \|/, 'no article checks: casebook hands off case studies');
   assert.match(skill, /casebook out-path --project/);
   assert.doesNotMatch(skill, /casebook written|\/casebook:write|\/casebook:scout/);
   assert.doesNotMatch(skill, /\/porch:|mcp__plugin_porch/, 'a plugin never points at another plugin');

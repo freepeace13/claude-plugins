@@ -1,4 +1,6 @@
-The intake must carry one topic: one specific subject, told first-hand, with enough facts to write it. Every intake is checked against the core elements, and then against the elements for its type.
+The intake must carry one topic: one specific subject, told first-hand, with enough facts to write it. Casebook hands off case studies. Every intake is checked against the core elements, then the case study elements.
+
+A handoff is complete: a writer can write from it without asking anyone or checking anything. Every element and every open item is settled before the handoff is written.
 
 Every element is either found in the intake (cite the path and the line or section), inferred where the table allows it, answered by the author, or missing.
 
@@ -7,7 +9,7 @@ Every element is either found in the intake (cite the path and the line or secti
 - **reject:** the intake is `thin`. Asking cannot fill it.
 - **ask:** it goes into the one message of questions.
 - **infer:** derive it from the intake and record it as inferred; ask only if it cannot be derived.
-- **unknown:** it goes to the handoff's Unknowns and never blocks.
+- **unknown:** it becomes an open item (below).
 
 ## Core elements
 
@@ -18,12 +20,41 @@ Every element is either found in the intake (cite the path and the line or secti
 | E-3 | Concrete facts | At least 3 specifics from the intake itself: numbers, error messages, names, steps, code, dates, before and after. Opinions and general advice do not count. The note and answers do not count toward the 3. | reject |
 | E-4 | Reader | Who it is for, and what they already know. | infer from how technical the intake is, else ask |
 
-## Article elements
+## Case study elements
 
-An article argues one point and backs it with what happened.
+A case study tells one piece of work: the problem, what the author did, the result. Its thesis is the problem and the result in one sentence, so it needs no separate point.
 
 | # | Element | Passes when | If missing |
 |---|---|---|---|
-| A-1 | Point | A thesis the whole piece can defend: what was learned, why X over Y, what changed. The note may supply it. | ask |
-| A-2 | Reasoning | Why the point holds: the cause found, the trade-off weighed, or an option ruled out and why. A claim with no reason fails. | ask |
-| A-3 | Takeaway | Something the reader can reuse: a rule, a check, a config, a pattern. | infer from the facts, else ask |
+| C-1 | Problem | The situation before, and why it mattered to the client or the project. | ask |
+| C-2 | Role and actions | What the author personally did, not what the team did. Stricter than E-2: at least 2 actions the author owns. | reject |
+| C-3 | Result | An outcome that rests on a fact: a number, a shipped change, a before and after. | ask once; still missing after the answer: reject |
+| C-4 | Client | A client name, or that it is the author's own project, or that it is anonymized. | infer from the policy and the logs, else ask |
+| C-5 | Period, stack, URL | Period and stack from the logs. URL: the public link, or "none". | infer, else open item |
+
+## Open items
+
+An open item is anything a writer would otherwise have to hedge, guess or mark for checking:
+
+- a log's "Open threads" item that touches the topic (one that does not is dropped, not kept);
+- a status that can change after the session: released or not, still open or fixed, still in use;
+- a number, size or result the story needs that the logs do not give;
+- a fact a log flags as "not independently re-checked";
+- a missing key decision in the author's own words, when the story turns on a decision;
+- an element above whose **If missing** leads here.
+
+Settle each one before the handoff is written:
+
+1. **From the repository,** when the current directory is the logs' repository: read only, and under `anonymize` write only what may be named. A settled status is dated: "As of 2026-11-21, the change is merged but not released."
+2. **From the author,** in the one message of questions. List each item with what the logs say now, so the author can confirm it, correct it, or say it is not known.
+
+Every settled item becomes a fact. "Not known" or "leave it out" also becomes a fact, written as what the writer may say: "The size of the migration was not recorded: give no count." The handoff's Unknowns hold only what the author chose to leave unanswered.
+
+## Rules
+
+- **Reject** elements cannot be filled by asking. The facts must come from the intake, not from a conversation.
+- **Ask** elements share one message of at most 3 questions. If more than 3 are missing, the intake is `thin`.
+- Whether numbers may be published is one question for all numbers. It does not count toward the 3.
+- Open items go in the same message, as a numbered list after the questions. They have no limit and never make the intake `thin`.
+- An answer can fill an ask element, and becomes a fact with source `answer`. If an answer leaves an element empty, the intake is `thin`.
+- Never fill an element by guessing, and never count a fact twice.
