@@ -4,3 +4,4 @@ node_modules/
 .casebook/
 .claude/settings.local.json
 .porch/
+.claude
