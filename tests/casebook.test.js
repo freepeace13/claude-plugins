@@ -213,9 +213,9 @@ test('the scout, backfill and written-up tracking are gone', () => {
   const s = sandbox();
   for (const cmd of ['scout', 'backfill', 'written', 'maintenance', 'profiles']) {
     const r = s.run([cmd, '--yes']);
-    assert.strictEqual(r.status, 0);
-    assert.match(r.out, /^casebook — find potential case studies/, `${cmd} just prints the help`);
-    assert.doesNotMatch(r.out, new RegExp(`^ {2}${cmd}\\b`, 'm'));
+    assert.strictEqual(r.status, 1, `${cmd} fails`);
+    assert.match(r.stderr, new RegExp(`${cmd} was removed in 0\\.3`));
+    assert.doesNotMatch(s.run(['help']).out, new RegExp(`^ {2}${cmd}\\b`, 'm'));
   }
   const root = path.resolve(__dirname, '../plugins/casebook');
   for (const gone of ['skills/scout', 'skills/write', 'agents', 'lib/scout.js', 'prompts/scout.md']) assert.ok(!fs.existsSync(path.join(root, gone)), gone);
@@ -1122,8 +1122,11 @@ test('a session in two stores keeps the marks and deleted topics of both; a log 
   assert.deepStrictEqual(read('state/sessions/dup.json').deletedTopics.map((t) => t.id), ['cb-bbbbbb', 'cb-aaaaaa']);
   assert.ok(!fs.existsSync(path.join(store, 'marks', 'dup.json')));
   assert.strictEqual(fs.readFileSync(path.join(p.cb, 'logs/acme-api/cb-same01.md'), 'utf8'), 'new', 'never overwritten');
-  assert.strictEqual(fs.readFileSync(path.join(store, 'logs/acme-api/cb-same01.md'), 'utf8'), 'old');
-  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /1 file\(s\) already present .* were left in/);
+  assert.strictEqual(fs.readFileSync(path.join(store, 'left-behind/logs/acme-api/cb-same01.md'), 'utf8'), 'old', 'set aside');
+  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /1 file\(s\) already present .* were set aside in/);
+  // A 0.2 process still running saves into the merged store: the next run merges that too.
+  seedLog({ env: { CASEBOOK_HOME: store } }, { id: 'cb-late02' });
+  assert.ok(JSON.parse(p.run(['list', '--json']).out).some((l) => l.id === 'cb-late02'));
   assert.ok(fs.existsSync(path.join(store, 'profile.migrated.json')));
 });
 
@@ -1206,13 +1209,16 @@ test('casebook\'s own commands are not turns of the session', () => {
     line('<command-name>/casebook:mark</command-name>'), said('marked, carrying on with the fix')].join('\n'));
   assert.strictEqual(condense(f).userTurns, 0);
   assert.deepStrictEqual(condense(f).text.split('\n'), ['CLAUDE: marked, carrying on with the fix']);
-  // Answers typed into a handoff are casebook's; the next request that leads to work is the session's again.
-  fs.writeFileSync(f, [line('<command-name>/casebook:handoff</command-name><command-args>cb-x</command-args>'), said('What were the numbers?'),
-    line('retries dropped from 40/min to 2/min'), tools(use('Bash', { command: 'casebook out-path --project p' })), said('Handoff written'),
-    line('now fix the lint errors'), tools(use('Edit', { file_path: '/repo/a.js' }), { type: 'text', text: 'lint fixed' })].join('\n'));
+  // A discovery's pick (AskUserQuestion) and what it prints stay casebook's; the next typed turn is the session's,
+  // even with no tool call after it.
+  const ask = (q) => tools(use('AskUserQuestion', { questions: [{ question: q }] }));
+  fs.writeFileSync(f, [line('<command-name>/casebook:discovery</command-name>'), tools(use('Bash', { command: 'casebook discover' })), ask('Which topic?'),
+    tools(use('Bash', { command: 'casebook discover pick d-aaaaaa 1' })), said('Created cb-aaaaaa: OTHER PROJECT STORY'),
+    line('shard by tenant or region? 40k tenants'), said('By tenant: p99 stays flat')].join('\n'));
   const h = condense(f);
   assert.strictEqual(h.userTurns, 1);
-  assert.deepStrictEqual(h.text.split('\n'), ['USER: now fix the lint errors', '  [Edit] /repo/a.js', 'CLAUDE: lint fixed']);
+  assert.deepStrictEqual(h.text.split('\n'), ['USER: shard by tenant or region? 40k tenants', 'CLAUDE: By tenant: p99 stays flat']);
+
   assert.match(c2.text, /fixing retries/);
   assert.deepStrictEqual(c2.files, ['/repo/retry.js']);
 });

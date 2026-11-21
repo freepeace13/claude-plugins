@@ -65,7 +65,7 @@ const MOVED = ['logs', 'marks', path.join('state', 'sessions'), path.join('state
 
 /** Move every file under `from` into `to`. A file `to` already has is merged into it by `merge(src, dst)` when it
  *  can be (true when merged), else left behind. Returns the number of files left behind. */
-function mergeTree(from, to, merge, failed = []) {
+function mergeTree(from, to, merge, failed = [], park = null) {
   let left = 0;
   let entries = [];
   try { entries = fs.readdirSync(from, { withFileTypes: true }); } catch { return 0; }
@@ -73,11 +73,15 @@ function mergeTree(from, to, merge, failed = []) {
     touchLock();
     const src = path.join(from, e.name);
     const dst = path.join(to, e.name);
-    if (e.isDirectory()) { left += mergeTree(src, dst, merge, failed); continue; }
+    if (e.isDirectory()) { left += mergeTree(src, dst, merge, failed, park && path.join(park, e.name)); continue; }
     if (fs.existsSync(dst)) {
       let merged = false;
       try { merged = Boolean(merge && merge(src, dst)); } catch { /* unreadable: leave it */ }
-      if (merged) { try { fs.rmSync(src, { force: true }); } catch { left++; } } else left++;
+      if (merged) { try { fs.rmSync(src, { force: true }); } catch { left++; } } else {
+        left++;
+        // Set aside, so the store is not taken for one with files still to merge.
+        if (park) { try { mkdirp(park); fs.renameSync(src, path.join(park, e.name)); } catch { /* stays where it is */ } }
+      }
       continue;
     }
     try {
@@ -146,11 +150,15 @@ function mergeConfigs(into, from) {
   return { added, scanDropped };
 }
 
+const hasFiles = (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }).some((e) => e.isFile() || hasFiles(path.join(dir, e.name))); } catch { return false; } };
+
 /** Old stores are folders of the store holding a profile.json. Merged ones keep it as profile.migrated.json. */
 function oldStores() {
   try {
     return fs.readdirSync(home(), { withFileTypes: true })
-      .filter((d) => d.isDirectory() && !['logs', 'marks', 'state'].includes(d.name) && fs.existsSync(path.join(home(), d.name, 'profile.json')))
+      .filter((d) => d.isDirectory() && !['logs', 'marks', 'state'].includes(d.name) && (fs.existsSync(path.join(home(), d.name, 'profile.json'))
+        // Merged already, but a 0.2 process still running saved to it since.
+        || (fs.existsSync(path.join(home(), d.name, 'profile.migrated.json')) && MOVED.some((sub) => hasFiles(path.join(home(), d.name, sub))))))
       .map((d) => d.name)
       .sort((a, b) => (a === 'default' ? -1 : b === 'default' ? 1 : a.localeCompare(b)));
   } catch {
@@ -170,7 +178,7 @@ function migrateLocked() {
     const dir = path.join(home(), name);
     let left = 0;
     const failed = [];
-    for (const sub of MOVED) left += mergeTree(path.join(dir, sub), path.join(home(), sub), MERGERS[sub], failed);
+    for (const sub of MOVED) left += mergeTree(path.join(dir, sub), path.join(home(), sub), MERGERS[sub], failed, path.join(dir, 'left-behind', sub));
     const old = path.join(dir, 'config.json');
     // The config as it was merged: a 0.2 process recreating this store must not merge the same config again.
     const stamp = path.join(dir, 'config.merged.json');
@@ -190,8 +198,8 @@ function migrateLocked() {
     try { if (fs.existsSync(old)) fs.copyFileSync(old, stamp); } catch { /* merged again next time: harmless once */ }
     // A file that could not be moved (not one already there): the store is tried again on the next run.
     if (failed.length) { logError(`merging profile store "${name}" left ${failed.length} file(s) to retry: ${failed.slice(0, 3).join('; ')}`); continue; }
-    try { fs.renameSync(path.join(dir, 'profile.json'), path.join(dir, 'profile.migrated.json')); } catch { continue; }
-    logError(`merged profile store "${name}" into ${home()}${config}${left ? `; ${left} file(s) already present (logs or discoveries with the same ID) were left in ${dir}` : ''}`);
+    try { fs.renameSync(path.join(dir, 'profile.json'), path.join(dir, 'profile.migrated.json')); } catch (err) { if (!fs.existsSync(path.join(dir, 'profile.migrated.json'))) continue; }
+    logError(`merged profile store "${name}" into ${home()}${config}${left ? `; ${left} file(s) already present (logs or discoveries with the same ID) were set aside in ${path.join(dir, 'left-behind')}` : ''}`);
   }
 }
 

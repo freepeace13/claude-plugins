@@ -83,7 +83,8 @@ function parseLimit(v, fallback, flag = '--limit') {
 const commands = {
   // Hooks. Must stay fast and must never print to stdout (SessionStart stdout becomes context).
   hook({ pos }) {
-    if (process.env.CASEBOOK_SCAN) return;
+    // A scan's own `claude -p`, or a casebook 0.2 scout's (still running across the update): never merge mid-scan.
+    if (process.env.CASEBOOK_SCAN || process.env.CASEBOOK_SCOUT) return;
     try {
       if (pos[0] !== 'session-start') return;
       // Apart, and the link first: a slow or failed merge never keeps the link from being refreshed, nor the other way.
@@ -331,6 +332,11 @@ const fn = commands[name];
 if ('profile' in opt && fn && !opt.help && name !== 'help') {
   fail('--profile is gone: every profile shares one store. To read another profile\'s sessions, set CLAUDE_CONFIG_DIR.');
 }
+// Commands removed in 0.3 fail, so a script calling one does not take the help text for success.
+const GONE = { scout: 'the scout is gone; run /casebook:discovery', backfill: 'the scout is gone; run /casebook:discovery',
+  maintenance: 'the scout is gone; run /casebook:discovery', written: 'casebook no longer tracks write-ups',
+  profiles: 'every profile shares one store now; set CLAUDE_CONFIG_DIR to pick the account' };
+if (!fn && Object.hasOwn(GONE, name)) fail(`${name} was removed in 0.3: ${GONE[name]}`);
 if (!fn || opt.help) commands.help();
 else {
   const onError = (err) => {

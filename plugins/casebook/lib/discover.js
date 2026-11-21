@@ -346,7 +346,7 @@ async function scanChain(g, config, opts) {
   // Pending marks this scan saw and tied to no topic stay pending, but are no longer news for these sessions' logs.
   // Bookkeeping only: a busy lock must not throw away a scan that worked.
   // Only an open scan: one narrowed by a note or tags looks for something else, and may rightly place nothing.
-  if (!opts.narrowed && !out.some((f) => f.topic.marks)) {
+  if (!opts.narrowed && !found.some((t) => t.marks)) {
     try { store.withWriteLock(() => { for (const sid of sids) store.markSeen(sid, startedScan); }, { waitMs: 5000 }); } catch (err) { logError('could not record the marks a scan saw', err); }
   }
   return out;
@@ -525,21 +525,6 @@ function pick(config, id, n) {
       const fresh = T.logsForSessions(sids).map((l) => l.meta.id).filter((x) => !t.known.includes(x) && !t.updates.includes(x) && !mineToo.includes(x));
       if (fresh.length) throw userError(`these sessions were logged again since the discovery ran (${fresh.join(', ')}); run discovery again`);
     }
-    // A new topic that retells what an earlier pick of this discovery already logged is that log.
-    if (!t.updates.length) {
-      const twin = pickedNow.find((l) => l.meta.project === t.info.project && T.sameTopic(l, t.topic));
-      if (twin) {
-        // The marks the model tied to this topic go to the log that tells it.
-        if (t.topic.marks) {
-          for (const sid of sids) {
-            const m = scannedMarks(sid, d);
-            for (const k of m) store.applyMark(twin, k.note, sid);
-            store.consumeMarks(sid, m);
-          }
-        }
-        return { status: 'exists', logId: twin.meta.id, title: twin.meta.title };
-      }
-    }
     const deleted = d.force ? [] : T.tombstones(sids);
     const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
     if (!topic) throw userError('this topic was deleted since the discovery ran; run discovery again, or with --force');
@@ -548,6 +533,21 @@ function pick(config, id, n) {
     if (t.info.root && now.policy === 'skip') throw userError(`${t.info.project} is now set to skip; nothing was logged`);
     if (t.info.root && t.info.policy === 'public' && now.policy !== 'public') {
       throw userError(`${t.info.project} is no longer public; run discovery again so the notes follow its policy`);
+    }
+    // A new topic that retells what an earlier pick of this discovery already logged is that log.
+    if (!t.updates.length) {
+      const twin = pickedNow.find((l) => l.meta.project === t.info.project && T.sameTopic(l, topic));
+      if (twin) {
+        // The marks the model tied to this topic go to the log that tells it.
+        if (topic.marks) {
+          for (const sid of sids) {
+            const m = scannedMarks(sid, d);
+            for (const k of m) store.applyMark(twin, k.note, sid);
+            store.consumeMarks(sid, m);
+          }
+        }
+        return { status: 'exists', logId: twin.meta.id, title: twin.meta.title };
+      }
     }
     const bySession = topic.marks ? sids.map((sid) => [sid, scannedMarks(sid, d)]) : [];
     const res = T.applyTopic(topic, {
