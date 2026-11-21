@@ -1,7 +1,7 @@
 ---
 name: delete
 description: Delete casebook logs, either specific IDs or a batch selected by filters. Use only when the user explicitly asks to remove logs.
-argument-hint: "<log-id>… | [--project P] [--below-score N] [--older-than 30d] [--unmarked] [--written | --unwritten]"
+argument-hint: "<log-id>… | [--project P] [--below-score N] [--older-than 30d] [--unmarked]"
 disable-model-invocation: true
 allowed-tools: Bash(casebook:*)
 ---
@@ -12,4 +12,4 @@ Delete casebook logs. Arguments: `$ARGUMENTS`
 - **Batch by filters**: run `casebook delete <filters>` first, without `--yes`. That is a dry run. Show the list it would delete in a code block and ask the user to confirm. Run it again with `--yes` only after they say yes.
 - **No arguments**: ask whether they want to delete specific IDs (suggest `/casebook:list`) or a batch by filter. Show the filter options from the argument hint.
 
-A deleted log's topic is never logged again from its sessions. A session left with no logs is no longer scanned automatically, though `/casebook:scout <session-id>` can still look in it for other topics. Case study files that were already written are not touched.
+A deleted log's topic is never logged again from its sessions; `/casebook:discovery` can still find other topics in them. Handoff folders are not touched.

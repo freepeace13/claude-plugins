@@ -18,9 +18,8 @@ function sandbox() {
     CASEBOOK_HOME: path.join(root, 'casebook'),
     CLAUDE_CONFIG_DIR: path.join(root, 'claude'),
     CASEBOOK_BIN_DIR: path.join(root, 'bin'),
-    CASEBOOK_SCOUT: '',
   };
-  delete env.CASEBOOK_SCOUT;
+  delete env.CASEBOOK_SCAN;
 
   // A git repo standing in for a real project.
   const repo = path.join(root, 'acme-api');
@@ -33,6 +32,12 @@ function sandbox() {
   const stub = path.join(root, 'fake-claude');
   fs.writeFileSync(stub, `#!/usr/bin/env node
 const fs=require('fs');const input=fs.readFileSync(0,'utf8');
+if (input.includes('casebook duplicate checker')) {
+  fs.writeFileSync(${JSON.stringify(path.join(root, 'last-dedupe.txt'))}, input);
+  fs.appendFileSync(${JSON.stringify(path.join(root, 'dedupe-calls.log'))}, 'x\\n');
+  if (process.env.STUB_DEDUPE_FAIL) process.exit(1);
+  console.log(process.env.STUB_DEDUPE || '{"duplicates":[]}'); process.exit(0);
+}
 if (!process.argv.includes('--version')) {
   fs.writeFileSync(${JSON.stringify(path.join(root, 'last-prompt.txt'))}, input);
   fs.appendFileSync(${JSON.stringify(path.join(root, 'calls.log'))}, (process.env.CLAUDE_CONFIG_DIR||'') + '\\n');
@@ -47,7 +52,7 @@ console.log('Here you go:\\n' + JSON.stringify({score:Number(process.env.STUB_SC
   fs.writeFileSync(path.join(env.CASEBOOK_HOME, 'config.json'), JSON.stringify({
     defaultPolicy: 'anonymize',
     projects: [{ match: 'github.com/someone/*', policy: 'public' }],
-    scout: { command: stub, minTurns: 2 },
+    scan: { command: stub, minTurns: 2 },
   }));
 
   const calls = () => {
@@ -79,14 +84,51 @@ console.log('Here you go:\\n' + JSON.stringify({score:Number(process.env.STUB_SC
 
 const idsOf = (s) => [...s.matchAll(/cb-[a-z0-9]{6}/g)].map((m) => m[0]);
 
-test('scout creates a public log with marks, list filters, show', () => {
-  const s = sandbox();
-  const tp = s.transcript('sess-1', 3);
-  assert.match(s.run(['mark', '--session', 'sess-1', 'the', 'reconnect', 'fix']).out, /Marked this session: the reconnect fix/);
+// ---------- topics and discovery ----------
 
-  const r = JSON.parse(s.run(['scout', '--session', 'sess-1', '--transcript', tp, '--json']).out);
-  assert.strictEqual(r.status, 'created');
-  const id = r.logId;
+// A session on a feature branch: the branch is set by a trailing entry, as Claude Code records it.
+const onBranch = (sid, branch) => [{ type: 'system', sessionId: sid, gitBranch: branch }];
+const topic = (o) => ({ score: 4, angle: 'debugging', title: 'T', summary: 's', problem: 'p', approach: 'a', outcome: 'o', tags: ['redis'], ...o });
+const reply = (...topics) => ({ STUB_TOPICS: JSON.stringify({ topics }) });
+const logsJson = (s) => JSON.parse(s.run(['list', '--json']).out);
+const didOf = (out) => (/Discovery (d-[a-z0-9]{6})/.exec(out) || [])[1];
+
+/** Run a discovery with this model reply and pick topic n. Returns the log it created or updated. */
+function discoverPick(s, env, { args = [], n = 1 } = {}) {
+  const r = s.run(['discover', ...args], { env });
+  const did = didOf(r.out);
+  assert.ok(did, `no discovery: ${r.out}${r.stderr}`);
+  const p = s.run(['discover', 'pick', did, String(n)]);
+  assert.strictEqual(p.status, 0, p.stderr);
+  return idsOf(p.out)[0];
+}
+
+/** Write a log straight into the store, as an earlier discovery would have left it. */
+let seeded = 0;
+function seedLog(s, o = {}) {
+  const { renderDoc } = require('../plugins/casebook/lib/util');
+  const id = o.id || `cb-seed${String(seeded++).padStart(2, '0')}`;
+  const sessions = o.sessions || ['seed'];
+  const now = new Date().toISOString();
+  const { body, ...rest } = o;
+  const meta = {
+    id, title: 'Fixed websocket reconnect storms', angle: 'debugging', project: 'acme-api', repo: 'github.com/someone/acme-api',
+    policy: 'public', profile: 'default', score: 4, marked: false, marks: [], tags: ['redis'],
+    session_id: sessions[0], sessions, session_turns: Object.fromEntries(sessions.map((x) => [x, 3])), branch: 'main',
+    started_at: new Date(Date.now() - 90 * 60000).toISOString(), ended_at: now, user_turns: 3 * sessions.length,
+    created_at: now, updated_at: now, scanned_at: now, ...rest,
+  };
+  const dir = path.join(s.env.CASEBOOK_HOME, 'logs', meta.project);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${id}.md`), renderDoc(meta, body || `# ${meta.title}\n\ns\n\n## Problem\np\n`));
+  return id;
+}
+
+test('discovery logs a public topic with the session\'s pending mark; list and show', () => {
+  const s = sandbox();
+  s.transcript('sess-1', 3);
+  assert.match(s.run(['mark', '--session', 'sess-1', 'the', 'reconnect', 'fix']).out, /Marked this session: the reconnect fix \(1 mark\)\. It goes to the topic it points to when \/casebook:discovery/);
+  const id = discoverPick(s, reply(topic({ title: 'Fixed websocket reconnect storms', marks: true, tags: ['Laravel', 'reverb'] })));
 
   const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
   assert.match(prompt, /policy for this project: public/);
@@ -96,812 +138,114 @@ test('scout creates a public log with marks, list filters, show', () => {
 
   const list = s.run(['list']).out;
   assert.match(list, /acme-api {2}\(github\.com\/someone\/acme-api\)/);
+  assert.match(list, /^ID +DATE +SCORE MRK TITLE$/m, 'no WRT column');
   assert.match(list, new RegExp(`${id}.*📌.*Fixed websocket reconnect storms`));
   assert.ok(s.run(['list', '--marked']).out.includes(id));
 
   const doc = s.run(['show', id]).out;
   assert.match(doc, /^---\nid: "cb-/);
-  assert.match(doc, /"tags": \["laravel","reverb"\]|tags: \["laravel","reverb"\]/);
+  assert.match(doc, /tags: \["laravel","reverb"\]/);
+  assert.match(doc, /"note":"the reconnect fix"/);
+  assert.match(doc, /scanned_at: "/);
+  assert.doesNotMatch(doc, /partial|scout_mode|written_to/);
   assert.match(doc, /## Problem\np/);
   assert.ok(!fs.existsSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'sess-1.json')), 'pending mark consumed');
 });
 
-test('unmarked short or low-score sessions are skipped; anonymize policy applied', () => {
+test('discovery follows project policies: anonymize hides the project, skip leaves the session out', () => {
   const s = sandbox();
-  const short = s.transcript('short', 1);
-  assert.match(s.run(['scout', '--session', 'short', '--transcript', short, '--auto']).out, /only 1 turns/);
-
-  const low = s.transcript('low', 3);
-  assert.match(s.run(['scout', '--session', 'low', '--transcript', low, '--auto'], { env: { STUB_SCORE: '1' } }).out, /score 1/);
-
   fs.writeFileSync(path.join(s.repo, '.casebook.json'), JSON.stringify({ policy: 'anonymize', project: 'client-x' }));
-  const anon = s.transcript('anon', 3);
-  const r = JSON.parse(s.run(['scout', '--session', 'anon', '--transcript', anon, '--json']).out);
-  assert.strictEqual(r.status, 'created');
+  s.transcript('anon', 3);
+  const id = discoverPick(s, reply(topic({ title: 'Login flow' })), { args: ['--project', 'client-x'] });
   const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
   assert.match(prompt, /policy for this project: anonymize/);
   assert.match(prompt, /Project: \[anonymized\]/);
-  assert.ok(s.run(['list', '--project', 'client-x']).out.includes(r.logId));
+  assert.ok(s.run(['list', '--project', 'client-x']).out.includes(id));
 
   fs.writeFileSync(path.join(s.repo, '.casebook.json'), JSON.stringify({ policy: 'skip' }));
-  const sk = s.transcript('sk', 5);
-  assert.match(s.run(['scout', '--session', 'sk', '--transcript', sk]).out, /policy is skip/);
+  assert.match(s.run(['discover', '--all']).out, /Nothing to discover/);
 });
 
-test('/casebook:mark inside the transcript is honoured even without a pending mark', () => {
+test('a short single session is not a candidate; a failed scan is reported and logged', () => {
   const s = sandbox();
-  const tp = s.transcript('cmd', 1, [{ type: 'user', sessionId: 'cmd', cwd: s.repo, timestamp: new Date().toISOString(), message: { role: 'user', content: '<command-message>casebook:mark</command-message>\n<command-name>/casebook:mark</command-name>\n<command-args>queue design</command-args>' } }]);
-  const r = JSON.parse(s.run(['scout', '--session', 'cmd', '--transcript', tp, '--json'], { env: { STUB_SCORE: '1' } }).out);
-  assert.strictEqual(r.status, 'created', 'marked sessions are kept even when short and low-score');
-  assert.match(s.run(['show', r.logId]).out, /"note":"queue design"/);
+  s.transcript('short', 1);
+  assert.match(s.run(['discover']).out, /Nothing to discover .*none long enough/);
+  s.transcript('long', 3);
+  const r = s.run(['discover'], { env: { STUB_TOPICS: 'not json at all' } });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.out, /No topic matched[\s\S]*1 scan\(s\) failed: the scan returned no JSON/);
+  for (const bad of ['{"topics":null}', '{}', '{"error":"overloaded"}']) {
+    assert.match(s.run(['discover'], { env: { STUB_TOPICS: bad } }).out, /No topic matched/, bad);
+  }
+  assert.strictEqual(logsJson(s).length, 0);
 });
 
-test('mark/unmark by ID, written, out-path, delete and batch delete', () => {
+test('mark/unmark by ID, out-path, delete and batch delete', () => {
   const s = sandbox();
-  const a = JSON.parse(s.run(['scout', '--session', 'a', '--transcript', s.transcript('a', 3), '--json']).out).logId;
-  const b = JSON.parse(s.run(['scout', '--session', 'b', '--transcript', s.transcript('b', 3), '--json'], { env: { STUB_SCORE: '2' } }).out).logId;
+  const a = seedLog(s, { sessions: ['a'] });
+  const b = seedLog(s, { sessions: ['b'], score: 2, title: 'Small fix' });
 
   assert.match(s.run(['mark', a, 'good one']).out, /Marked/);
   assert.deepStrictEqual(idsOf(s.run(['list', '--marked']).out), [a]);
   s.run(['unmark', a]);
   assert.deepStrictEqual(idsOf(s.run(['list', '--marked']).out), []);
 
-  const file = s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!']).out;
+  const folder = s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!']).out;
   const local = new Date();
   const today = [local.getFullYear(), local.getMonth() + 1, local.getDate()].map((n) => String(n).padStart(2, '0')).join('-');
-  assert.ok(path.basename(file).startsWith(today + '-'), 'out-path names files with the local date');
-  assert.match(file, /case-studies\/acme-api\/\d{4}-\d{2}-\d{2}-reconnect-storms\.md$/);
-  fs.writeFileSync(file, '# x');
-  assert.match(s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!']).out, /-2\.md$/);
-  const handoff = s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!', '--handoff']).out;
-  assert.match(handoff, /handoffs\/acme-api\/\d{4}-\d{2}-\d{2}-reconnect-storms$/, 'a handoff is a folder under handoffs/');
-  assert.ok(!fs.existsSync(handoff), 'the folder itself is left for the skill to create');
-  fs.mkdirSync(handoff);
-  assert.match(s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!', '--handoff']).out, /reconnect-storms-2$/);
-  s.run(['written', a, '--file', file]);
-  assert.deepStrictEqual(idsOf(s.run(['list', '--written']).out), [a]);
-  assert.deepStrictEqual(idsOf(s.run(['list', '--unwritten']).out), [b]);
+  assert.ok(path.basename(folder).startsWith(today + '-'), 'out-path names folders with the local date');
+  assert.match(folder, /handoffs\/acme-api\/\d{4}-\d{2}-\d{2}-reconnect-storms$/, 'a handoff is a folder under handoffs/');
+  assert.ok(!fs.existsSync(folder), 'the folder itself is left for the skill to create');
+  fs.mkdirSync(folder);
+  assert.match(s.run(['out-path', '--project', 'acme-api', '--title', 'Reconnect Storms!', '--handoff']).out, /reconnect-storms-2$/, '--handoff is still accepted');
 
-  assert.match(s.run(['delete']).stderr, /needs at least one filter/);
+  assert.match(s.run(['delete']).stderr, /needs at least one filter: --project, --below-score, --older-than or --unmarked$/m);
   const dry = s.run(['delete', '--below-score', '3']);
   assert.match(dry.out, /Would delete 1/);
   assert.ok(s.run(['show', b]).status === 0, 'dry run keeps it');
   assert.match(s.run(['delete', '--below-score', '3', '--yes']).out, new RegExp(`Deleted 1 log\\(s\\): ${b}`));
   assert.notStrictEqual(s.run(['show', b]).status, 0);
-
-  // A deleted session is not scouted again.
-  assert.match(s.run(['scout', '--session', 'b']).out, /deleted/);
-
   assert.match(s.run(['delete', a]).out, /Deleted 1/);
   assert.match(s.run(['list']).out, /No casebook logs/);
 });
 
-test('hooks: session-end detaches a scout; never prints; guard stops recursion', async () => {
+test('the scout, backfill and written-up tracking are gone', () => {
   const s = sandbox();
-  const tp = s.transcript('hooked', 3);
-  const input = JSON.stringify({ session_id: 'hooked', transcript_path: tp, cwd: s.repo, hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' });
-
-  const guarded = s.run(['hook', 'session-end'], { input, env: { CASEBOOK_SCOUT: '1' } });
-  assert.strictEqual(guarded.out, '');
-  await new Promise((r) => setTimeout(r, 800));
-  assert.match(s.run(['list']).out, /No casebook logs/, 'guard prevented scouting');
-
-  const r = s.run(['hook', 'session-end'], { input });
-  assert.strictEqual(r.out, '', 'hooks print nothing');
-  assert.strictEqual(r.status, 0);
-  for (let i = 0; i < 40 && !/cb-/.test(s.run(['list']).out); i++) await new Promise((res) => setTimeout(res, 150));
-  assert.match(s.run(['list']).out, /cb-/);
-
-  const start = s.run(['hook', 'session-start'], { input: JSON.stringify({ session_id: 'new', source: 'startup' }) });
-  assert.strictEqual(start.out, '', 'SessionStart must not inject context');
-});
-
-test('sweep (maintenance) picks up sessions whose SessionEnd never fired', async () => {
-  const s = sandbox();
-  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
-  fs.mkdirSync(path.dirname(meta), { recursive: true });
-  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
-  const cfg = path.join(s.env.CASEBOOK_HOME, 'config.json');
-  fs.writeFileSync(cfg, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfg, 'utf8')), sweep: { settleMinutes: 0 } }));
-
-  s.transcript('orphan', 3);
-  s.transcript('current', 3);
-  s.run(['maintenance', '--exclude', 'current']);
-  const list = s.run(['list', '--json']).out;
-  const sessions = JSON.parse(list).map((l) => l.session_id);
-  assert.deepStrictEqual(sessions, ['orphan']);
-
-  // Unchanged transcript is not re-scouted.
-  s.run(['maintenance', '--exclude', 'current']);
-  assert.strictEqual(JSON.parse(s.run(['list', '--json']).out).length, 1);
-});
-
-// ---------------------------------------------------------------- manual scouting (spec B)
-
-test('manual scout bypasses gates and writes a partial log; SessionEnd finishes the same log', () => {
-  const s = sandbox();
-  const tp = s.transcript('m1', 1);
-  const r = JSON.parse(s.run(['scout', '--session', 'm1', '--transcript', tp, '--live', '--json'], { env: { STUB_SCORE: '1' } }).out);
-  assert.strictEqual(r.status, 'created', 'one turn and score 1 still get a log in manual mode');
-  assert.strictEqual(r.partial, true);
-  const doc = s.run(['show', r.logId]).out;
-  assert.match(doc, /partial: true/);
-  assert.match(doc, /scout_mode: "manual"/);
-  assert.match(doc, /scouted_at: "/);
-  assert.match(doc, /profile: "/);
-  assert.match(s.run(['list']).out, new RegExp(`${r.logId} .* 1…`));
-  s.run(['mark', r.logId, 'keep me']);
-
-  // The session carries on and ends: the auto scout finishes the same log.
-  const tp2 = s.transcript('m1', 2);
-  const r2 = JSON.parse(s.run(['scout', '--session', 'm1', '--transcript', tp2, '--auto', '--json']).out);
-  assert.strictEqual(r2.status, 'updated');
-  assert.strictEqual(r2.logId, r.logId);
-  const doc2 = s.run(['show', r.logId]).out;
-  assert.match(doc2, /partial: false/);
-  assert.match(doc2, /"note":"keep me"/, 'marks survive');
-  assert.strictEqual(idsOf(s.run(['list', '--all']).out).length, 1);
-});
-
-test('auto scout of a finished (non-partial) log still needs regrowTurns of new activity', () => {
-  const s = sandbox();
-  const r = JSON.parse(s.run(['scout', '--session', 'f1', '--transcript', s.transcript('f1', 3), '--auto', '--json']).out);
-  assert.strictEqual(r.status, 'created');
-  assert.match(s.run(['show', r.logId]).out, /partial: false/);
-  const again = JSON.parse(s.run(['scout', '--session', 'f1', '--transcript', s.transcript('f1', 4), '--auto', '--json']).out);
-  assert.strictEqual(again.status, 'skipped');
-  assert.match(again.reason, /not enough new activity/);
-});
-
-test('manual scout: skip policy writes nothing; a deleted topic stays deleted unless --force', () => {
-  const s = sandbox();
-  fs.writeFileSync(path.join(s.repo, '.casebook.json'), JSON.stringify({ policy: 'skip' }));
-  const sk = s.run(['scout', '--session', 'sk', '--transcript', s.transcript('sk', 3)]);
-  assert.strictEqual(sk.status, 0);
-  assert.strictEqual(sk.out, 'Skipped: project policy is skip');
-  assert.strictEqual(s.calls().length, 0);
-  assert.strictEqual(s.run(['scout', '--session', 'sk', '--force', '--transcript', s.transcript('sk', 3)]).out, 'Skipped: project policy is skip', '--force never overrides skip');
-  fs.rmSync(path.join(s.repo, '.casebook.json'));
-
-  const first = JSON.parse(s.run(['scout', '--session', 'del', '--transcript', s.transcript('del', 3), '--json']).out);
-  s.run(['delete', first.logId]);
-  // Hooks leave a session whose logs were all deleted alone; a manual scan may look again but not bring the topic back.
-  assert.match(s.run(['scout', '--session', 'del', '--auto']).out, /^Skipped: this session's logs were deleted$/);
-  const blocked = s.run(['scout', '--session', 'del']);
-  assert.match(blocked.out, /^Skipped: the only topics found were ones you deleted \(use --force to log them again\)$/);
-  assert.match(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8'), /Deleted by the developer[\s\S]*"Fixed websocket reconnect storms"/);
-  const forced = JSON.parse(s.run(['scout', '--session', 'del', '--force', '--json']).out);
-  assert.strictEqual(forced.status, 'created');
-  assert.notStrictEqual(forced.logId, first.logId);
-});
-
-test('human output', () => {
-  const s = sandbox();
-  const out = s.run(['scout', '--session', 'h', '--transcript', s.transcript('h', 3), '--live']).out;
-  assert.match(out, /^Created cb-[a-z0-9]{6} \(score 4, partial\): Fixed websocket reconnect storms$/);
-  const up = s.run(['scout', '--session', 'h', '--live']).out;
-  assert.match(up, /^Updated cb-[a-z0-9]{6} \(score 4, partial\): /);
-});
-
-test('a manual and a hook scout of one session make exactly one model call', async () => {
-  const s = sandbox();
-  const tp = s.transcript('dup', 3);
-  const env = { ...s.env, STUB_DELAY: '1200' };
-  const go = (extra) => new Promise((res) => {
-    let out = '';
-    const p = spawn(process.execPath, [BIN, 'scout', '--session', 'dup', '--transcript', tp, '--json', ...extra], { cwd: s.repo, env });
-    p.stdout.on('data', (d) => { out += d; });
-    p.on('close', (code) => res({ code, ...JSON.parse(out) }));
-  });
-  const results = await Promise.all([go([]), go(['--auto'])]);
-  assert.ok(results.every((r) => r.code === 0));
-  assert.strictEqual(results.filter((r) => r.status === 'created').length, 1);
-  assert.ok(results.some((r) => ['skipped', 'running', 'updated'].includes(r.status)), 'the other one waits, then skips, finishes the partial log, or reports running');
-  assert.strictEqual(s.calls().length, 1);
-  assert.strictEqual(idsOf(s.run(['list', '--all']).out).length, 1);
-});
-
-test('a second manual scout reports the running one and exits 0', async () => {
-  const s = sandbox();
-  const tp = s.transcript('twice', 3);
-  const env = { ...s.env, STUB_DELAY: '1500' };
-  const first = spawn(process.execPath, [BIN, 'scout', '--session', 'twice', '--transcript', tp], { cwd: s.repo, env, stdio: 'ignore' });
-  await new Promise((r) => setTimeout(r, 500));
-  const second = s.run(['scout', '--session', 'twice', '--transcript', tp]);
-  assert.strictEqual(second.status, 0);
-  assert.match(second.out, /^A scout for this session is already running\. Check \/casebook:list in a minute\.$/);
-  await new Promise((r) => first.on('close', r));
-  assert.strictEqual(s.calls().length, 1);
-});
-
-test('--pending --dry-run makes no model calls; --pending excludes the current session and honours --limit', () => {
-  const s = sandbox();
-  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
-  fs.mkdirSync(path.dirname(meta), { recursive: true });
-  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
-  for (const id of ['p1', 'p2', 'p3', 'cur']) s.transcript(id, 3);
-
-  const dry = JSON.parse(s.run(['scout', '--pending', '--dry-run', '--json', '--exclude', 'cur', '--limit', '2']).out);
-  assert.strictEqual(dry.length, 2);
-  assert.ok(dry.every((d) => d.sessionId !== 'cur' && d.userTurns === 3 && d.project === 'acme-api'));
-  assert.strictEqual(s.calls().length, 0);
-  assert.match(s.run(['scout', '--pending', '--dry-run', '--exclude', 'cur']).out, /^p1 +acme-api .* 3 turns$/m);
-
-  const real = JSON.parse(s.run(['scout', '--pending', '--json', '--exclude', 'cur', '--limit', '2']).out);
-  assert.strictEqual(real.length, 2);
-  assert.strictEqual(s.calls().length, 2);
-  const sessions = JSON.parse(s.run(['list', '--json']).out).map((l) => l.session_id);
-  assert.ok(!sessions.includes('cur'));
-  assert.strictEqual(sessions.length, 2);
-});
-
-test('--background returns at once and the log appears later', async () => {
-  const s = sandbox();
-  const tp = s.transcript('bg', 3);
-  const t0 = Date.now();
-  const r = s.run(['scout', '--session', 'bg', '--transcript', tp, '--background'], { env: { STUB_DELAY: '600' } });
-  const took = Date.now() - t0;
-  assert.strictEqual(r.out, 'Scouting in the background. Run /casebook:list in a minute.');
-  assert.ok(took < 500, `returned in ${took}ms`);
-  for (let i = 0; i < 40 && !/cb-/.test(s.run(['list']).out); i++) await new Promise((res) => setTimeout(res, 150));
-  assert.match(s.run(['list']).out, /cb-/);
-});
-
-test('scout failures exit 1 with a reason and are logged', () => {
-  const s = sandbox();
-  const cfg = path.join(s.env.CASEBOOK_HOME, 'config.json');
-  fs.writeFileSync(cfg, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfg, 'utf8')), scout: { command: '/nonexistent/claude', minTurns: 2 } }));
-  const r = s.run(['scout', '--session', 'x', '--transcript', s.transcript('x', 3)]);
-  assert.strictEqual(r.status, 1);
-  assert.match(r.stderr, /^casebook: scout failed: /);
-  assert.match(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'casebook.log'), 'utf8'), /scout failed for x/);
-});
-
-// ---------------------------------------------------------------- profiles (spec A)
-
-function profileSandbox() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'casebook-prof-'));
-  const home = path.join(root, 'home');
-  const cb = path.join(root, 'cb');
-  const dirs = { default: path.join(home, '.claude'), personal: path.join(home, '.claude_personal') };
-  const repo = path.join(root, 'acme-api');
-  fs.mkdirSync(repo, { recursive: true });
-  spawnSync('git', ['-C', repo, 'init', '-q']);
-  spawnSync('git', ['-C', repo, 'remote', 'add', 'origin', 'git@github.com:someone/acme-api.git']);
-
-  const stub = path.join(root, 'fake-claude');
-  fs.writeFileSync(stub, `#!/usr/bin/env node
-const fs=require('fs');fs.readFileSync(0,'utf8');
-if (process.argv.includes('--version')) { console.log('stub 1.0'); process.exit(0); }
-if (process.env.STUB_TOPICS) { console.log(process.env.STUB_TOPICS); process.exit(0); }
-fs.appendFileSync(${JSON.stringify(path.join(root, 'seen-config-dir.log'))}, (process.env.CLAUDE_CONFIG_DIR||'(unset)') + '\\n');
-console.log(JSON.stringify({score:4,title:'T',summary:'s',problem:'p',constraints:[],approach:'a',alternatives:[],outcome:'o',evidence:[],tags:[],quote:'',open_threads:[]}));
-`);
-  fs.chmodSync(stub, 0o755);
-
-  const baseEnv = { ...process.env, HOME: home, CASEBOOK_ROOT: cb, CASEBOOK_BIN_DIR: path.join(root, 'bin') };
-  delete baseEnv.CASEBOOK_HOME; delete baseEnv.CASEBOOK_PROFILE; delete baseEnv.CASEBOOK_SCOUT; delete baseEnv.CLAUDE_CONFIG_DIR;
-  const config = JSON.stringify({ defaultPolicy: 'public', scout: { command: stub, minTurns: 2 }, sweep: { settleMinutes: 0 } });
-  const seedStore = (name) => { fs.mkdirSync(path.join(cb, name), { recursive: true }); fs.writeFileSync(path.join(cb, name, 'config.json'), config); };
-
-  const run = (args, { configDir, env = {}, input } = {}) => {
-    const e = { ...baseEnv, ...env };
-    if (configDir) e.CLAUDE_CONFIG_DIR = configDir;
-    const r = spawnSync(process.execPath, [BIN, ...args], { encoding: 'utf8', cwd: repo, env: e, input });
-    return { ...r, out: r.stdout.trim() };
-  };
-  const transcript = (configDir, sid, turns = 3, mtime) => {
-    const dir = path.join(configDir, 'projects', repo.replace(/[^\w]/g, '-'));
-    fs.mkdirSync(dir, { recursive: true });
-    const lines = [];
-    for (let i = 0; i < turns; i++) {
-      lines.push({ type: 'user', sessionId: sid, cwd: repo, timestamp: new Date().toISOString(), message: { role: 'user', content: `turn ${i}` } });
-      lines.push({ type: 'assistant', sessionId: sid, cwd: repo, timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } });
-    }
-    const f = path.join(dir, `${sid}.jsonl`);
-    fs.writeFileSync(f, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
-    if (mtime) fs.utimesSync(f, mtime, mtime);
-    return f;
-  };
-  const seen = () => { try { return fs.readFileSync(path.join(root, 'seen-config-dir.log'), 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } };
-  return { root, home, cb, dirs, repo, run, transcript, seen, seedStore };
-}
-
-test('profile naming and store location', () => {
-  const p = profileSandbox();
-  const storeOf = (configDir, env) => path.relative(p.cb, path.dirname(p.run(['config'], { configDir, env }).out.split('\n')[0]));
-  assert.strictEqual(storeOf(undefined), 'default');
-  assert.strictEqual(storeOf('~/.claude'), 'default', 'explicit ~/.claude is the same profile as unset');
-  assert.strictEqual(storeOf(p.dirs.default + '/'), 'default', 'trailing slash stripped');
-  assert.strictEqual(storeOf(p.dirs.personal), 'personal');
-  assert.strictEqual(storeOf(path.join(p.home, '.claude-work')), 'work');
-  assert.strictEqual(storeOf('/opt/cc/work-cfg'), 'work-cfg');
-  assert.strictEqual(storeOf('/opt/cc/.dotted'), 'dotted');
-  assert.strictEqual(storeOf(p.dirs.personal, { CASEBOOK_PROFILE: 'mine' }), 'mine');
-
-  const rec = JSON.parse(fs.readFileSync(path.join(p.cb, 'personal', 'profile.json'), 'utf8'));
-  assert.strictEqual(rec.name, 'personal');
-  assert.strictEqual(rec.claudeConfigDir, p.dirs.personal);
-  assert.ok(rec.createdAt);
-});
-
-test('CASEBOOK_HOME still forces a single store', () => {
-  const p = profileSandbox();
-  const forced = path.join(p.root, 'forced');
-  const r = p.run(['config'], { configDir: p.dirs.personal, env: { CASEBOOK_HOME: forced } });
-  assert.strictEqual(r.out.split('\n')[0], path.join(forced, 'config.json'));
-});
-
-test('stores are isolated, and the scout runs as the session\'s own profile', async () => {
-  const p = profileSandbox();
-  p.seedStore('default'); p.seedStore('personal');
-  const tp = p.transcript(p.dirs.personal, 'sp', 3);
-  const input = JSON.stringify({ session_id: 'sp', transcript_path: tp, cwd: p.repo });
-
-  // Hook inside the personal profile.
-  const hook = p.run(['hook', 'session-end'], { configDir: p.dirs.personal, input });
-  assert.strictEqual(hook.out, '');
-  for (let i = 0; i < 40 && !/cb-/.test(p.run(['list'], { configDir: p.dirs.personal }).out); i++) await new Promise((r) => setTimeout(r, 150));
-  const personal = p.run(['list'], { configDir: p.dirs.personal });
-  assert.match(personal.out, /^\[profile: personal\]/);
-  assert.match(personal.out, /cb-/);
-  assert.match(p.run(['list', '--all']).out, /No casebook logs/, 'default profile sees nothing');
-  assert.ok(!fs.existsSync(path.join(p.cb, 'default', 'logs')));
-  assert.deepStrictEqual(p.seen(), [p.dirs.personal]);
-  assert.match(fs.readFileSync(p.run(['show', personal.out.match(/cb-[a-z0-9]{6}/)[0], '--path'], { configDir: p.dirs.personal }).out, 'utf8'), /profile: "personal"/);
-
-  // Terminal: no inherited CLAUDE_CONFIG_DIR, --profile picks the store and the config dir.
-  p.transcript(p.dirs.personal, 'sp2', 3);
-  const term = p.run(['scout', '--session', 'sp2', '--profile', 'personal', '--json']);
-  assert.strictEqual(JSON.parse(term.out).status, 'created');
-  assert.deepStrictEqual(p.seen(), [p.dirs.personal, p.dirs.personal]);
-
-  // And the reverse: a default-profile session never lands in personal.
-  const dtp = p.transcript(p.dirs.default, 'sd', 3);
-  assert.strictEqual(JSON.parse(p.run(['scout', '--session', 'sd', '--transcript', dtp, '--json']).out).status, 'created');
-  assert.strictEqual(JSON.parse(p.run(['list', '--json'], { configDir: p.dirs.personal }).out).length, 2);
-  assert.strictEqual(JSON.parse(p.run(['list', '--json']).out).length, 1);
-  assert.strictEqual(p.seen()[2], '(unset)', 'default profile with no CLAUDE_CONFIG_DIR keeps it unset for the child');
-});
-
-test('transcript discovery and catch-up stay inside the profile; installedAt is per store', () => {
-  const p = profileSandbox();
-  p.seedStore('default'); p.seedStore('personal');
-  p.run(['list']); // installs the default store now
-  const yesterday = new Date(Date.now() - 86400000);
-  p.transcript(p.dirs.personal, 'before-install', 3, yesterday);
-  p.run(['list'], { configDir: p.dirs.personal }); // personal installs later
-  p.transcript(p.dirs.personal, 'after-install', 3);
-  p.transcript(p.dirs.default, 'other-profile', 3);
-
-  p.run(['maintenance'], { configDir: p.dirs.personal });
-  const logs = JSON.parse(p.run(['list', '--json'], { configDir: p.dirs.personal }).out).map((l) => l.session_id);
-  assert.deepStrictEqual(logs, ['after-install'], 'no backfill before installedAt, nothing from the default profile');
-
-  // scout --session only looks in its own profile's projects
-  assert.match(p.run(['scout', '--session', 'other-profile'], { configDir: p.dirs.personal }).out, /Skipped: transcript not found/);
-});
-
-test('two config dirs with the same profile name get separate stores', () => {
-  const p = profileSandbox();
-  const a = '/srv/a/work-cfg';
-  const b = '/srv/b/work-cfg';
-  const storeOf = (dir) => path.basename(path.dirname(p.run(['config'], { configDir: dir }).out.split('\n')[0]));
-  assert.strictEqual(storeOf(a), 'work-cfg');
-  const second = storeOf(b);
-  assert.match(second, /^work-cfg-[0-9a-f]{4}$/);
-  assert.strictEqual(storeOf(b), second, 'stable');
-  assert.strictEqual(storeOf(a), 'work-cfg');
-  assert.match(fs.readFileSync(path.join(p.cb, second, 'casebook.log'), 'utf8'), /collision/);
-});
-
-test('--profile: unknown profile fails with the known list; profiles lists stores', () => {
-  const p = profileSandbox();
-  p.seedStore('default'); p.seedStore('personal');
-  p.run(['list']);
-  p.run(['list'], { configDir: p.dirs.personal });
-  const bad = p.run(['--profile', 'nope', 'list']);
-  assert.strictEqual(bad.status, 1);
-  assert.strictEqual(bad.stderr.trim(), 'casebook: no profile "nope". Known: default, personal');
-
-  const table = p.run(['profiles']).stdout;
-  assert.match(table, /^ {2}PROFILE +CONFIG DIR +LOGS +LAST LOG$/m);
-  assert.match(table, /^\* default /m);
-  assert.match(table, /^ {2}personal /m);
-  const json = JSON.parse(p.run(['profiles', '--json'], { configDir: p.dirs.personal }).out);
-  assert.deepStrictEqual(json.map((x) => [x.name, x.current]), [['default', false], ['personal', true]]);
-  assert.strictEqual(json[1].claudeConfigDir, p.dirs.personal);
-
-  const doc = p.run(['doctor'], { configDir: p.dirs.personal }).out;
-  assert.match(doc, /^profile +personal$/m);
-  assert.match(doc, new RegExp(`^config dir +${p.dirs.personal}$`, 'm'));
-});
-
-test('marketplace is named kinbasco-plugins', () => {
-  const m = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../.claude-plugin/marketplace.json'), 'utf8'));
-  assert.strictEqual(m.name, 'kinbasco-plugins');
-});
-
-test('handoff skill: same arguments as write, reads handoff.md, thin writes nothing, stays inside casebook', () => {
-  const root = path.resolve(__dirname, '../plugins/casebook');
-  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
-  const hint = (doc) => doc.match(/^argument-hint: (.+)$/m)[1];
-  const skill = read('skills/handoff/SKILL.md');
-
-  assert.strictEqual(hint(skill), hint(read('skills/write/SKILL.md')));
-  assert.match(skill, /\$\{CLAUDE_PLUGIN_ROOT\}\/handoff\.md/);
-  assert.ok(fs.existsSync(path.join(root, 'handoff.md')), 'the checks it reads ship with the plugin');
-  for (const id of ['E-1', 'E-2', 'E-3', 'E-4', 'A-1', 'A-2', 'A-3']) assert.match(read('handoff.md'), new RegExp(`\\| ${id} \\|`));
-  assert.match(skill, /Nothing was written/);
-  assert.match(skill, /casebook out-path --handoff/);
-  assert.match(skill, /Do not run `casebook written`/);
-  assert.doesNotMatch(skill, /\/porch:|mcp__plugin_porch/, 'a plugin never points at another plugin');
-});
-
-// ---------------------------------------------------------------- review follow-ups
-
-test('an empty lock file left by a dead scout is recovered', () => {
-  const s = sandbox();
-  const locks = path.join(s.env.CASEBOOK_HOME, 'state', 'locks');
-  fs.mkdirSync(locks, { recursive: true });
-  const lock = path.join(locks, 'dead.lock');
-  fs.writeFileSync(lock, '');
-  const old = new Date(Date.now() - 60000);
-  fs.utimesSync(lock, old, old);
-  const r = JSON.parse(s.run(['scout', '--session', 'dead', '--transcript', s.transcript('dead', 3), '--json']).out);
-  assert.strictEqual(r.status, 'created');
-});
-
-test('backfill says so when a catch-up already holds the lock', () => {
-  const s = sandbox();
-  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'sweep.lock');
-  fs.mkdirSync(path.dirname(lock), { recursive: true });
-  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, t: Date.now() }));
-  assert.match(s.run(['backfill', '--yes']).out, /A catch-up is already running/);
-});
-
-test('--profile rejects path-like names and cannot be combined with CASEBOOK_HOME', () => {
-  const p = profileSandbox();
-  p.seedStore('default');
-  p.run(['list']);
-  const bad = p.run(['--profile', '../x', 'list']);
-  assert.strictEqual(bad.status, 1);
-  assert.match(bad.stderr, /invalid profile name/);
-  assert.match(p.run(['--profile', '.hidden', 'list']).stderr, /invalid profile name/);
-  p.seedStore('_odd');
-  fs.writeFileSync(path.join(p.cb, '_odd', 'profile.json'), JSON.stringify({ name: '_odd', claudeConfigDir: path.join(p.home, '.odd') }));
-  assert.strictEqual(p.run(['--profile', '_odd', 'list']).status, 0, 'any store name the code can produce is reachable');
-  fs.mkdirSync(path.join(p.cb, 'broken'), { recursive: true });
-  fs.writeFileSync(path.join(p.cb, 'broken', 'profile.json'), '{}');
-  assert.match(p.run(['--profile', 'broken', 'list']).stderr, /no claudeConfigDir/);
-  const home = p.run(['--profile', 'default', 'list'], { env: { CASEBOOK_HOME: path.join(p.root, 'h') } });
-  assert.strictEqual(home.status, 1, 'never silently acts on the wrong store');
-  assert.match(home.stderr, /cannot be used while CASEBOOK_HOME is set/);
-  assert.match(p.run(['list', '--profile']).stderr, /--profile needs a profile name/);
-  assert.strictEqual(p.run(['help', '--profile', 'nope']).status, 0, 'help never needs a profile');
-});
-
-test('a background scout that finds the session already being scouted is logged', async () => {
-  const s = sandbox();
-  const tp = s.transcript('bgrun', 3);
-  const first = spawn(process.execPath, [BIN, 'scout', '--session', 'bgrun', '--transcript', tp], { cwd: s.repo, env: { ...s.env, STUB_DELAY: '2500' }, stdio: 'ignore' });
-  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'locks', 'bgrun.lock');
-  for (let i = 0; i < 50 && !fs.existsSync(lock); i++) await new Promise((r) => setTimeout(r, 50));
-  s.run(['scout', '--session', 'bgrun', '--transcript', tp, '--background']);
-  const logFile = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
-  const read = () => { try { return fs.readFileSync(logFile, 'utf8'); } catch { return ''; } };
-  for (let i = 0; i < 50 && !/not run/.test(read()); i++) await new Promise((r) => setTimeout(r, 100));
-  assert.match(read(), /scout for bgrun not run: A scout for this session is already running/);
-  await new Promise((r) => first.on('close', r));
-});
-
-test('a child pinned with CASEBOOK_PROFILE stays in the store when its config dir is spelled via a symlink', () => {
-  const p = profileSandbox();
-  const real = path.join(p.root, 'real-cfg');
-  const link = path.join(p.root, 'link-cfg');
-  fs.mkdirSync(real);
-  fs.symlinkSync(real, link);
-  const storeOf = (dir) => path.basename(path.dirname(p.run(['config'], { configDir: dir, env: { CASEBOOK_PROFILE: 'shared' } }).out.split('\n')[0]));
-  assert.strictEqual(storeOf(real), 'shared');
-  assert.strictEqual(storeOf(link), 'shared');
-});
-
-test('a fresh empty lock is respected; a stale one is reclaimed exactly once under contention', async () => {
-  const s = sandbox();
-  const locks = path.join(s.env.CASEBOOK_HOME, 'state', 'locks');
-  fs.mkdirSync(locks, { recursive: true });
-  const lock = path.join(locks, 'race.lock');
-  fs.writeFileSync(lock, '');
-  const tp = s.transcript('race', 3);
-  assert.match(s.run(['scout', '--session', 'race', '--transcript', tp]).out, /already running/, 'just-created lock gets its grace period');
-  const old = new Date(Date.now() - 60000);
-  fs.utimesSync(lock, old, old);
-  const go = () => new Promise((res) => {
-    let out = '';
-    const p = spawn(process.execPath, [BIN, 'scout', '--session', 'race', '--transcript', tp, '--json'], { cwd: s.repo, env: { ...s.env, STUB_DELAY: '800' } });
-    p.stdout.on('data', (d) => { out += d; });
-    p.on('close', () => res(JSON.parse(out)));
-  });
-  const results = await Promise.all([go(), go(), go()]);
-  assert.strictEqual(results.filter((r) => r.status === 'created').length, 1);
-  assert.strictEqual(s.calls().length, 1);
-  assert.deepStrictEqual(fs.readdirSync(locks), [], 'no leftover lock or aside files');
-});
-
-test('--limit must be a positive whole number', () => {
-  const s = sandbox();
-  for (const bad of ['abc', '0', '-2', '1.5']) {
-    const r = s.run(['scout', '--pending', '--dry-run', '--limit', bad]);
-    assert.strictEqual(r.status, 1, bad);
-    assert.match(r.stderr, /--limit must be a positive whole number/);
+  for (const cmd of ['scout', 'backfill', 'written', 'maintenance', 'profiles']) {
+    const r = s.run([cmd, '--yes']);
+    assert.strictEqual(r.status, 1, `${cmd} fails`);
+    assert.match(r.stderr, new RegExp(`${cmd} was removed in 0\\.3`));
+    assert.doesNotMatch(s.run(['help']).out, new RegExp(`^ {2}${cmd}\\b`, 'm'));
   }
-  assert.match(s.run(['backfill', '--limit', 'x', '--yes']).stderr, /--limit must be/);
-});
-
-test('--pending marks a recently active session partial, so SessionEnd can finish it', () => {
-  const s = sandbox();
-  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
-  fs.mkdirSync(path.dirname(meta), { recursive: true });
-  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
-  s.transcript('live-elsewhere', 3);
-  const r = JSON.parse(s.run(['scout', '--pending', '--json']).out);
-  assert.strictEqual(r[0].partial, true);
-  assert.match(s.run(['show', r[0].logId]).out, /partial: true/);
-  // The session carries on by one turn and ends: the auto scout finishes the same log despite regrowTurns.
-  const fin = JSON.parse(s.run(['scout', '--session', 'live-elsewhere', '--transcript', s.transcript('live-elsewhere', 4), '--auto', '--json']).out);
-  assert.strictEqual(fin.status, 'updated');
-  assert.match(s.run(['show', r[0].logId]).out, /partial: false/);
-});
-
-test('a partial log with nothing new is finished by the auto scout without a model call', () => {
-  const s = sandbox();
-  const tp = s.transcript('end', 3);
-  const r = JSON.parse(s.run(['scout', '--session', 'end', '--transcript', tp, '--live', '--json']).out);
-  assert.strictEqual(r.partial, true);
-  assert.strictEqual(s.calls().length, 1);
-  const fin = JSON.parse(s.run(['scout', '--session', 'end', '--transcript', tp, '--auto', '--json']).out);
-  assert.strictEqual(fin.status, 'updated');
-  assert.strictEqual(fin.logId, r.logId);
-  assert.strictEqual(fin.partial, false);
-  assert.strictEqual(s.calls().length, 1, 'no second model call');
-  assert.match(s.run(['show', r.logId]).out, /partial: false/);
-  assert.doesNotMatch(s.run(['list']).out, /…/);
-});
-
-test('session ids that sanitise to the same name get separate locks', () => {
-  const s = sandbox();
-  const locks = path.join(s.env.CASEBOOK_HOME, 'state', 'locks');
-  fs.mkdirSync(locks, { recursive: true });
-  // A live lock held for "x" must not block "../x".
-  fs.writeFileSync(path.join(locks, 'x.lock'), JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
-  const tp = s.transcript('../x', 3);
-  const r = JSON.parse(s.run(['scout', '--session', '../x', '--transcript', tp, '--json']).out);
-  assert.strictEqual(r.status, 'created');
-});
-
-test('CASEBOOK_PROFILE is validated like --profile', () => {
-  const p = profileSandbox();
-  const r = p.run(['list'], { env: { CASEBOOK_PROFILE: '../../escape' } });
-  assert.strictEqual(r.status, 1);
-  assert.match(r.stderr, /invalid profile name/);
-  assert.ok(!fs.existsSync(path.join(p.root, 'escape')));
-});
-
-test('a hash-suffixed store stays stable when the store that claimed the plain name is gone', () => {
-  const p = profileSandbox();
-  const storeOf = (dir) => path.basename(path.dirname(p.run(['config'], { configDir: dir }).out.split('\n')[0]));
-  assert.strictEqual(storeOf('/srv/a/work-cfg'), 'work-cfg');
-  const second = storeOf('/srv/b/work-cfg');
-  assert.match(second, /^work-cfg-[0-9a-f]{4}$/);
-  fs.rmSync(path.join(p.cb, 'work-cfg'), { recursive: true });
-  assert.strictEqual(storeOf('/srv/b/work-cfg'), second);
-});
-
-test('profiles lists the current store even before it has been used', () => {
-  const p = profileSandbox();
-  const list = JSON.parse(p.run(['profiles', '--json'], { configDir: p.dirs.personal }).out);
-  assert.deepStrictEqual(list.map((x) => [x.name, x.current]), [['personal', true]]);
-});
-
-test('the default profile leaves CLAUDE_CONFIG_DIR unset for the scout; other profiles set it', () => {
-  const p = profileSandbox();
-  p.seedStore('default'); p.seedStore('personal');
-  p.run(['list']);
-  p.run(['list'], { configDir: p.dirs.personal });
-  p.transcript(p.dirs.default, 'dd', 3);
-  p.transcript(p.dirs.personal, 'pp', 3);
-  p.run(['scout', '--session', 'dd']);
-  p.run(['scout', '--session', 'pp', '--profile', 'personal']);
-  assert.deepStrictEqual(p.seen(), ['(unset)', p.dirs.personal]);
-});
-
-test('a live scout does not finish a partial log; a mark added meanwhile is kept when it is finished', () => {
-  const s = sandbox();
-  const tp = s.transcript('lv', 3);
-  const r = JSON.parse(s.run(['scout', '--session', 'lv', '--transcript', tp, '--live', '--json']).out);
-  const again = JSON.parse(s.run(['scout', '--session', 'lv', '--transcript', tp, '--auto', '--live', '--json']).out);
-  assert.strictEqual(again.status, 'skipped', 'still running: leave it partial');
-  assert.match(s.run(['show', r.logId]).out, /partial: true/);
-  s.run(['mark', '--session', 'lv', 'late', 'note']);
-  const fin = JSON.parse(s.run(['scout', '--session', 'lv', '--transcript', tp, '--auto', '--json']).out);
-  assert.strictEqual(fin.status, 'updated');
-  const doc = s.run(['show', r.logId]).out;
-  assert.match(doc, /"note":"late note"/, 'marks on an existing log are applied directly and survive');
-  assert.match(doc, /partial: false/);
-  assert.strictEqual(s.calls().length, 1, 'nothing new in the transcript, so no second model call');
-});
-
-test('a catch-up pass skips a session another scout holds instead of waiting', async () => {
-  const s = sandbox();
-  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
-  fs.mkdirSync(path.dirname(meta), { recursive: true });
-  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
-  const tp = s.transcript('busy', 3);
-  const first = spawn(process.execPath, [BIN, 'scout', '--session', 'busy', '--transcript', tp], { cwd: s.repo, env: { ...s.env, STUB_DELAY: '2000' }, stdio: 'ignore' });
-  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'locks', 'busy.lock');
-  for (let i = 0; i < 50 && !fs.existsSync(lock); i++) await new Promise((r) => setTimeout(r, 50));
-  const t0 = Date.now();
-  const r = JSON.parse(s.run(['scout', '--pending', '--json']).out);
-  assert.ok(Date.now() - t0 < 1500, 'did not wait for the busy session');
-  assert.strictEqual(r[0].status, 'running');
-  await new Promise((res) => first.on('close', res));
-});
-
-test('an invalid CASEBOOK_PROFILE does not block an explicit --profile', () => {
-  const p = profileSandbox();
-  p.seedStore('default');
-  p.run(['list']);
-  const r = p.run(['list', '--profile', 'default'], { env: { CASEBOOK_PROFILE: '.x' } });
+  const root = path.resolve(__dirname, '../plugins/casebook');
+  for (const gone of ['skills/scout', 'skills/write', 'agents', 'lib/scout.js', 'prompts/scout.md']) assert.ok(!fs.existsSync(path.join(root, gone)), gone);
+  const hooks = JSON.parse(fs.readFileSync(path.join(root, 'hooks', 'hooks.json'), 'utf8')).hooks;
+  assert.deepStrictEqual(Object.keys(hooks), ['SessionStart']);
+  // A stale SessionEnd hook from an older install does nothing.
+  const r = s.run(['hook', 'session-end'], { input: JSON.stringify({ session_id: 'x', cwd: s.repo }) });
   assert.strictEqual(r.status, 0);
+  assert.strictEqual(r.out, '');
+  assert.strictEqual(s.calls().length, 0);
 });
 
-test('a symlinked ~/.claude is still the default profile', () => {
-  const p = profileSandbox();
-  fs.mkdirSync(p.dirs.default, { recursive: true });
-  const real = path.join(p.root, 'real-claude');
-  fs.mkdirSync(real);
-  fs.rmSync(p.dirs.default, { recursive: true });
-  fs.symlinkSync(real, p.dirs.default);
-  const store = path.basename(path.dirname(p.run(['config'], { configDir: real }).out.split('\n')[0]));
-  assert.strictEqual(store, 'default');
-});
-
-test('doctor probes claude the way the scout runs it', () => {
-  const p = profileSandbox();
-  p.seedStore('default'); p.seedStore('personal');
-  assert.match(p.run(['doctor']).out, /CLAUDE_CONFIG_DIR left unset/);
-  assert.match(p.run(['doctor'], { configDir: p.dirs.personal }).out, /CLAUDE_CONFIG_DIR set\)/);
-});
-
-test('the catch-up lock is atomic, owner-checked, and not stolen from a live holder', () => {
+test('a config from before 0.3 keeps its model settings under "scout"', () => {
   const s = sandbox();
-  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'sweep.lock');
-  fs.mkdirSync(path.dirname(lock), { recursive: true });
-  // Held by a live process for over 30 minutes: no longer stolen (it used to be).
-  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, t: Date.now() - 2 * 3600000 }));
-  assert.match(s.run(['backfill', '--yes']).out, /already running/);
-  assert.ok(fs.existsSync(lock), 'a live holder keeps its lock');
-  // A dead holder is reclaimed and the lock is released afterwards.
-  fs.writeFileSync(lock, JSON.stringify({ pid: 2147483646, t: Date.now() }));
-  s.transcript('lk', 3);
-  assert.doesNotMatch(s.run(['backfill', '--yes']).out, /already running/);
-  assert.ok(!fs.existsSync(lock), 'released');
-});
-
-test('catch-up sessions skipped as busy do not use up the limit', async () => {
-  const s = sandbox();
-  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
-  fs.mkdirSync(path.dirname(meta), { recursive: true });
-  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
-  const old = (id, ago) => { const f = s.transcript(id, 3); const t = new Date(Date.now() - ago); fs.utimesSync(f, t, t); return f; };
-  const busyTp = old('busy1', 5000000);
-  old('newer', 1000000);
-  const first = spawn(process.execPath, [BIN, 'scout', '--session', 'busy1', '--transcript', busyTp], { cwd: s.repo, env: { ...s.env, STUB_DELAY: '2500' }, stdio: 'ignore' });
-  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'locks', 'busy1.lock');
-  for (let i = 0; i < 50 && !fs.existsSync(lock); i++) await new Promise((r) => setTimeout(r, 50));
-  const r = JSON.parse(s.run(['scout', '--pending', '--limit', '1', '--json']).out);
-  assert.deepStrictEqual(r.map((x) => [x.sessionId, x.status]), [['busy1', 'running'], ['newer', 'created']]);
-  await new Promise((res) => first.on('close', res));
-});
-
-test('a recently active session is not finished early by a catch-up pass', () => {
-  const s = sandbox();
-  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
-  fs.mkdirSync(path.dirname(meta), { recursive: true });
-  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
-  const tp = s.transcript('act', 3);
-  const r = JSON.parse(s.run(['scout', '--session', 'act', '--transcript', tp, '--live', '--json']).out);
-  // Same transcript, still recent: the logic reached through a catch-up must leave it partial.
-  const again = JSON.parse(s.run(['scout', '--pending', '--json']).out);
-  assert.ok(again.every((x) => x.status !== 'updated'), 'unchanged and recent: nothing to do');
-  assert.match(s.run(['show', r.logId]).out, /partial: true/);
-});
-
-test('session ids that sanitise alike get separate ledgers as well as separate locks', () => {
-  const s = sandbox();
-  const a = JSON.parse(s.run(['scout', '--session', 'x', '--transcript', s.transcript('x', 3), '--json']).out);
-  const b = JSON.parse(s.run(['scout', '--session', '../x', '--transcript', s.transcript('../x', 3), '--json']).out);
-  assert.strictEqual(a.status, 'created');
-  assert.strictEqual(b.status, 'created', 'the second id is not mistaken for the first one');
-  assert.notStrictEqual(a.logId, b.logId);
-  const files = fs.readdirSync(path.join(s.env.CASEBOOK_HOME, 'state', 'sessions')).sort();
-  assert.strictEqual(files.length, 2);
-  assert.ok(files.includes('x.json'), 'ordinary ids keep their plain file name');
-});
-
-test('a relative CASEBOOK_HOME resolves to one absolute store', () => {
-  const s = sandbox();
-  const r = s.run(['config'], { env: { CASEBOOK_HOME: 'rel-store' }, cwd: s.root });
-  assert.strictEqual(r.out.split('\n')[0], path.join(fs.realpathSync(s.root), 'rel-store', 'config.json'));
-});
-
-// ---------- topics and discovery ----------
-
-// A session on a feature branch: the branch is set by a trailing entry, as Claude Code records it.
-const onBranch = (sid, branch) => [{ type: 'system', sessionId: sid, gitBranch: branch }];
-const topic = (o) => ({ score: 4, angle: 'debugging', title: 'T', summary: 's', problem: 'p', approach: 'a', outcome: 'o', tags: ['redis'], ...o });
-const reply = (...topics) => ({ STUB_TOPICS: JSON.stringify({ topics }) });
-const logsJson = (s) => JSON.parse(s.run(['list', '--json']).out);
-
-test('one session can give several topics; a rescan updates them instead of logging them twice', () => {
-  const s = sandbox();
-  const tp = s.transcript('multi', 3);
-  const two = reply(topic({ title: 'Debugging the reconnect storm' }), topic({ title: 'Choosing Redis Streams over pub/sub', angle: 'architecture', score: 3 }));
-  const r = s.run(['scout', '--session', 'multi', '--transcript', tp], { env: two });
-  assert.match(r.out, /^Created cb-\w{6} \(score 4, partial, debugging\): Debugging the reconnect storm\nCreated cb-\w{6} \(score 3, partial, architecture\): Choosing Redis Streams/);
-  const logs = logsJson(s);
-  assert.strictEqual(logs.length, 2);
-  assert.ok(logs.every((l) => l.sessions.join() === 'multi'));
-
-  // The rescan sees both logs and says so; nothing is duplicated, and a new angle becomes a third log.
-  const [dbg, arch] = ['Debugging the reconnect storm', 'Choosing Redis Streams over pub/sub'].map((t) => logs.find((l) => l.title === t).id);
-  const again = s.run(['scout', '--session', 'multi'], {
-    env: reply(topic({ title: 'Debugging the reconnect storm, with the root cause', same_as: [dbg], score: 5 }), topic({ title: 'Choosing Redis Streams over pub/sub', angle: 'architecture' }), topic({ title: 'Load-testing reconnects', angle: 'testing', score: 3 })),
-  });
-  assert.strictEqual(again.status, 0, again.stderr);
-  const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
-  assert.ok(prompt.includes(`### ${dbg} · debugging`) && prompt.includes(`### ${arch} · architecture`), 'the scan sees the existing logs');
-  assert.match(again.out, new RegExp(`Updated ${dbg} \\(score 5, partial, debugging\\): Debugging the reconnect storm, with the root cause`));
-  assert.match(again.out, new RegExp(`Updated ${arch} .*Choosing Redis Streams`), 'same title for the same session is never logged twice');
-  assert.match(again.out, /Created cb-\w{6} \(score 3, partial, testing\): Load-testing reconnects/);
-  assert.strictEqual(logsJson(s).length, 3);
-
-  // With several logs, a session mark waits for the next scan, which gives it to the topic it points to.
-  assert.match(s.run(['mark', '--session', 'multi', 'the', 'root', 'cause']).out, /Marked this session: the root cause/);
-  s.run(['scout', '--session', 'multi'], { env: reply(topic({ title: 'Debugging the reconnect storm, with the root cause', same_as: [dbg], marks: true }), topic({ title: 'Choosing Redis Streams over pub/sub', same_as: [arch] })) });
-  assert.match(s.run(['show', dbg]).out, /"note":"the root cause"/);
-  assert.doesNotMatch(s.run(['show', arch]).out, /the root cause/);
-
-  // Deleting one topic keeps the session scannable for others; the deleted one never comes back.
-  s.run(['delete', arch]);
-  const after = s.run(['scout', '--session', 'multi', '--json'], { env: reply(topic({ title: 'Choosing Redis Streams over pub/sub' }), topic({ title: 'Debugging the reconnect storm, with the root cause', same_as: [dbg] })) });
-  const res = JSON.parse(after.out);
-  assert.deepStrictEqual(res.logs.map((l) => l.logId), [dbg]);
-  assert.ok(!logsJson(s).some((l) => l.title.startsWith('Choosing Redis')));
-});
-
-test('a continued session can extend a log from an earlier session', () => {
-  const s = sandbox();
-  const first = JSON.parse(s.run(['scout', '--session', 'day1', '--transcript', s.transcript('day1', 3), '--json']).out).logId;
-  const r = JSON.parse(s.run(['scout', '--session', 'day2', '--transcript', s.transcript('day2', 3), '--json'], { env: reply(topic({ title: 'Reconnect storms, fixed over two days', same_as: [first] })) }).out);
-  assert.strictEqual(r.status, 'updated');
-  assert.strictEqual(r.logId, first);
-  const doc = s.run(['show', first]).out;
-  assert.match(doc, /sessions: \["day1","day2"\]/);
-  assert.match(doc, /user_turns: 6/);
-  assert.strictEqual(logsJson(s).length, 1);
+  const cfg = path.join(s.env.CASEBOOK_HOME, 'config.json');
+  const old = JSON.parse(fs.readFileSync(cfg, 'utf8'));
+  fs.writeFileSync(cfg, JSON.stringify({ ...old, scan: undefined, scout: old.scan }));
+  s.transcript('oc', 3);
+  assert.ok(discoverPick(s, reply(topic({ title: 'Old config' }))));
+  assert.match(s.run(['doctor']).out, /^scan +.*fake-claude → stub 1\.0 \(model haiku/m);
 });
 
 test('discovery links a feature branch, sees its logs and merges the duplicates on pick', () => {
   const s = sandbox();
-  const a = s.transcript('chain-a', 3, onBranch('chain-a', 'feat/ws'));
-  const b = s.transcript('chain-b', 3, onBranch('chain-b', 'feat/ws'));
+  s.transcript('chain-a', 3, onBranch('chain-a', 'feat/ws'));
+  s.transcript('chain-b', 3, onBranch('chain-b', 'feat/ws'));
   s.transcript('lone-c', 3); // on main, unlogged: its own candidate
-  const la = JSON.parse(s.run(['scout', '--session', 'chain-a', '--transcript', a, '--json']).out).logId;
-  const lb = JSON.parse(s.run(['scout', '--session', 'chain-b', '--transcript', b, '--json']).out).logId;
-  assert.notStrictEqual(la, lb, 'one-session scouts log the halves separately');
+  const la = seedLog(s, { sessions: ['chain-a'], title: 'Redis streams half' });
+  const lb = seedLog(s, { sessions: ['chain-b'], title: 'Websocket half', written_to: ['/old/cs.md'] });
   s.run(['mark', la, 'redis streams part']);
-  s.run(['written', lb, '--file', path.join(s.root, 'cs.md')]);
 
   const before = s.calls().length;
   const shortlist = JSON.parse(s.run(['discover', '--dry-run', '--json']).out);
@@ -916,31 +260,30 @@ test('discovery links a feature branch, sees its logs and merges the duplicates 
   const r = s.run(['discover', '--note', 'websocket redis', '--min-score', '3'], { env });
   assert.strictEqual(r.status, 0, r.stderr);
   assert.strictEqual(s.calls().length, before + 2, 'one model call per candidate');
-  assert.match(r.out, /\n1\. \[5…?\] Websocket reconnects backed by Redis Streams\n {3}acme-api · debugging · 2 sessions/);
+  assert.match(r.out, /\n1\. \[5\] Websocket reconnects backed by Redis Streams\n {3}acme-api · debugging · 2 sessions/);
   assert.match(r.out, new RegExp(`merges: ${la}, ${lb} \\(duplicates of this topic\\)`));
   const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
   assert.match(prompt, /Note: websocket redis/);
   assert.ok(prompt.includes(`### ${la} ·`), 'the chain scan sees existing logs');
 
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
+  const did = didOf(r.out);
   const p = s.run(['discover', 'pick', did, '1']);
   assert.strictEqual(p.status, 0, p.stderr);
-  assert.match(p.out, new RegExp(`^Updated ${lb} \\(score 5.*2 sessions\\): Websocket reconnects`), 'the written-up log survives');
-  assert.match(p.out, new RegExp(`Merged into it: ${la}`));
-  const doc = s.run(['show', lb]).out;
-  assert.match(doc, /sessions: \["chain-b","chain-a"\]|sessions: \["chain-a","chain-b"\]/);
+  assert.match(p.out, new RegExp(`^Updated ${la} \\(score 5, 2 sessions\\): Websocket reconnects`), 'the first log named survives');
+  assert.match(p.out, new RegExp(`Merged into it: ${lb} \\(duplicates of this topic; marks carried over\\)`));
+  const doc = s.run(['show', la]).out;
+  assert.match(doc, /sessions: \["chain-a","chain-b"\]/);
   assert.match(doc, /"note":"redis streams part"/, 'marks carry over');
-  assert.match(doc, /written_to: \[".*cs\.md"\]/);
-  assert.match(doc, new RegExp(`merged_from: \\["${la}"\\]`));
-  assert.ok(!logsJson(s).some((l) => l.id === la));
-  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`Already logged as ${lb}`));
+  assert.match(doc, new RegExp(`merged_from: \\["${lb}"\\]`));
+  assert.ok(!logsJson(s).some((l) => l.id === lb));
+  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`Already logged as ${la}`));
 });
 
 test('discovery: new angles, nothing-new topics, deleted topics, and the score, fit and tag filters', () => {
   const s = sandbox();
-  const a = s.transcript('fa', 3, onBranch('fa', 'feat/y'));
+  s.transcript('fa', 3, onBranch('fa', 'feat/y'));
   s.transcript('fb', 3, onBranch('fb', 'feat/y'));
-  const la = JSON.parse(s.run(['scout', '--session', 'fa', '--transcript', a, '--json']).out).logId;
+  const la = seedLog(s, { sessions: ['fa'] });
 
   assert.match(s.run(['discover', '--min-score', '5']).out, /No topic matched\. Scored 1 candidate\(s\) .*best scored 4/);
   assert.match(s.run(['discover', '--note', 'kafka'], { env: { STUB_FIT: '0' } }).out, /No topic matched/);
@@ -953,280 +296,373 @@ test('discovery: new angles, nothing-new topics, deleted topics, and the score, 
   // A new angle on the chain becomes its own log; the old one stays.
   const r = s.run(['discover', '--tags', 'user turn'], { env: reply(topic({ title: 'Testing reconnects across deploys', angle: 'testing', belongs: [2], fit: 2 })) });
   assert.match(r.out, /testing · 1 session ·[\s\S]*new log/);
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
-  const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
+  const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', didOf(r.out), '1']).out)[1];
   const logs = logsJson(s);
   assert.deepStrictEqual(logs.map((l) => l.id).sort(), [la, id].sort());
   assert.deepStrictEqual(logs.find((l) => l.id === id).sessions, ['fb']);
 
-  // A deleted topic is not offered again, unless --force.
+  // A deleted topic is not offered again, even reworded, unless --force.
   s.run(['delete', id]);
-  const env = reply(topic({ title: 'Testing reconnects across deploys', angle: 'testing', belongs: [2] }));
-  assert.match(s.run(['discover'], { env }).out, /No topic matched/);
-  assert.match(s.run(['discover', '--force'], { env }).out, /Testing reconnects across deploys/);
+  assert.match(s.run(['discover'], { env: reply(topic({ title: 'Testing reconnect across deploy', angle: 'testing', belongs: [2] })) }).out, /No topic matched/);
+  assert.match(s.run(['discover', '--force'], { env: reply(topic({ title: 'Testing reconnects across deploys', angle: 'testing', belongs: [2] })) }).out, /Testing reconnects across deploys/);
 });
 
-// ---------------------------------------------------------------- topics review follow-ups
-
-test('a session mark on a session with several logs is placed by the next auto scan, even with little new activity', () => {
+test('the same new topic is offered once per discovery, and a pick never logs it twice', () => {
   const s = sandbox();
-  const tp = s.transcript('pm', 3);
-  const two = reply(topic({ title: 'Debugging the reconnect storm' }), topic({ title: 'Choosing Redis Streams', angle: 'architecture' }));
-  s.run(['scout', '--session', 'pm', '--transcript', tp, '--auto'], { env: two });
-  const dbg = logsJson(s).find((l) => l.title === 'Debugging the reconnect storm').id;
-  s.run(['mark', '--session', 'pm', 'the', 'root', 'cause']);
-  const tp2 = s.transcript('pm', 4); // one more turn: far below regrowTurns
-  const r = JSON.parse(s.run(['scout', '--session', 'pm', '--transcript', tp2, '--auto', '--json'], {
-    env: reply(topic({ title: 'Debugging the reconnect storm', same_as: [dbg], marks: true }), topic({ title: 'Choosing Redis Streams', angle: 'architecture' })),
-  }).out);
-  assert.strictEqual(r.status, 'updated');
+  s.transcript('dup', 3);
+  const r = s.run(['discover'], { env: reply(topic({ title: 'Fix Redis retry storm', score: 5 }), topic({ title: 'Fixing Redis retry storms' }), topic({ title: 'Fixing Redis retry storms', angle: 'testing', score: 3 })) });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.out, /1\. \[5\] Fix Redis retry storm\n/);
+  assert.doesNotMatch(r.out, /\] Fixing Redis retry storms\n {3}acme-api · debugging/, 'the retold story is dropped');
+  assert.match(r.out, /2\. \[3\] Fixing Redis retry storms\n {3}acme-api · testing/, 'another angle is another topic');
+
+  // A discovery saved before this check can still list the twin: the pick finds the log the first pick made.
+  const did = didOf(r.out);
+  const file = path.join(s.env.CASEBOOK_HOME, 'state', 'discoveries', `${did}.json`);
+  const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+  d.topics.push({ ...d.topics[0], rank: 3, topic: { ...d.topics[0].topic, title: 'Fixing the Redis retry storms' } });
+  fs.writeFileSync(file, JSON.stringify(d));
+  const first = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
+  assert.strictEqual(s.run(['discover', 'pick', did, '3']).out, `Already logged as ${first}: Fix Redis retry storm`);
+  assert.match(s.run(['discover', 'pick', did, '2']).out, /^Created cb-/);
+  assert.deepStrictEqual(logsJson(s).map((l) => l.title).sort(), ['Fix Redis retry storm', 'Fixing Redis retry storms']);
+  assert.match(s.run(['discover', 'pick', did, '3']).out, new RegExp(`^Already logged as ${first}`), 'and stays so');
+});
+
+test('topics with other titles but the same description are the same story', () => {
+  const s = sandbox();
+  s.transcript('ds', 3);
+  const desc = 'Websocket gateway reconnect handling: clients retried in lockstep after deploys and overloaded Redis; added jittered exponential backoff to the reconnect loop.';
+  const r = s.run(['discover'], { env: reply(
+    topic({ title: 'Taming the thundering herd', description: desc, score: 5 }),
+    topic({ title: 'Jittered backoff for websocket clients', description: `${desc} Also capped retries.` }),
+    topic({ title: 'Load-testing the gateway reconnects', angle: 'testing', description: desc, score: 3 }),
+  ) });
+  assert.match(r.out, /1\. \[5\] Taming the thundering herd/);
+  assert.doesNotMatch(r.out, /Jittered backoff for websocket clients/, 'same angle, same description: dropped');
+  assert.match(r.out, /2\. \[3\] Load-testing the gateway reconnects/, 'another angle stays');
+
+  // The description is kept on the log, shown to later scans, and remembered when the log is deleted.
+  const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', didOf(r.out), '1']).out)[1];
+  assert.ok(s.run(['show', id]).out.includes(`description: ${JSON.stringify(desc)}`));
+  s.transcript('ds2', 3);
+  s.run(['discover'], { env: reply(topic({ title: 'Other work', angle: 'data', belongs: [2] })) });
+  assert.ok(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8').includes(`Description: ${desc}`));
+  s.run(['delete', id]);
+  const ledger = JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'state', 'sessions', 'ds.json'), 'utf8'));
+  assert.strictEqual(ledger.deletedTopics[0].description, desc);
+  const again = s.run(['discover', '--exclude', 'ds2'], { env: reply(topic({ title: 'Reconnect storms after deploys', description: desc, belongs: [1] })) });
+  assert.match(again.out, /No topic matched/, 'a deleted topic stays deleted under a new title');
+  assert.ok(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8').includes(`: ${desc}`), 'the model sees the deleted description');
+
+  // A log from before descriptions is compared by its summary.
+  const old = seedLog(s, { sessions: ['x1'], title: 'Something else', body: `# Something else\n\n${desc}\n\n## Problem\np\n` });
+  const { sameTopic, describe } = require('../plugins/casebook/lib/topics');
+  const { readLog } = require('../plugins/casebook/lib/store');
+  const log = readLog(path.join(s.env.CASEBOOK_HOME, 'logs', 'acme-api', `${old}.md`));
+  assert.strictEqual(describe(log), desc);
+  assert.ok(sameTopic(log, { title: 'Unrelated words', angle: 'debugging', description: desc }));
+  assert.ok(!sameTopic(log, { title: 'Unrelated words', angle: 'debugging', description: 'Short one.' }), 'too short to compare');
+});
+
+test('one model call checks the remaining topics for retellings in other words', () => {
+  const s = sandbox();
+  s.transcript('u1', 3, onBranch('u1', 'feat/u'));
+  s.transcript('u2', 3, onBranch('u2', 'feat/u'));
+  const x = seedLog(s, { sessions: ['u1'], title: 'Queue retry budget' });
+  const env = reply(
+    topic({ title: 'Stopping retry storms', description: 'Retry storms in the queue worker.', score: 5, belongs: [1, 2] }),
+    topic({ title: 'Queue retry budget, end to end', same_as: [x], belongs: [1, 2] }),
+    topic({ title: 'Schema for job audit', angle: 'data', description: 'Audit table for jobs.', score: 3, belongs: [2] }),
+  );
+  const r = s.run(['discover'], { env: { ...env, STUB_DEDUPE: '{"duplicates":[[1,2]]}' } });
+  assert.strictEqual(r.status, 0, r.stderr);
+  const asked = fs.readFileSync(path.join(s.root, 'last-dedupe.txt'), 'utf8');
+  assert.match(asked, /### 1\. Stopping retry storms\nProject A · Angle: debugging · 2 sessions\nDescription: Retry storms in the queue worker\./);
+  assert.doesNotMatch(asked, /acme-api/, 'projects are labels, never names');
+  assert.match(asked, /### 2\. Queue retry budget, end to end\nProject A · Angle: debugging · 2 sessions · updates an existing log/);
+  assert.doesNotMatch(r.out, /Stopping retry storms/, 'the new retelling goes; the topic that names the log stays');
+  assert.match(r.out, new RegExp(`1\\. \\[4\\] Queue retry budget, end to end[\\s\\S]*updates: ${x}`));
+  assert.match(r.out, /2\. \[3\] Schema for job audit/);
+
+  // A failed check offers the topics unchecked and says so in the log.
+  const f = s.run(['discover'], { env: { ...env, STUB_DEDUPE_FAIL: '1' } });
+  assert.match(f.out, /Stopping retry storms/);
+  assert.match(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'casebook.log'), 'utf8'), /the duplicate check failed; topics are offered unchecked/);
+
+  // One topic left: nothing to compare, no call.
+  const calls = fs.readFileSync(path.join(s.root, 'dedupe-calls.log'), 'utf8').trim().split('\n').length;
+  s.run(['discover'], { env: reply(topic({ title: 'Only one', angle: 'testing', belongs: [2] })) });
+  assert.strictEqual(fs.readFileSync(path.join(s.root, 'dedupe-calls.log'), 'utf8').trim().split('\n').length, calls);
+  // Every topic updates a log: nothing could be dropped, no call.
+  const y = seedLog(s, { sessions: ['u2'], title: 'Schema for job audit', angle: 'data' });
+  s.transcript('u1', 4, onBranch('u1', 'feat/u')); s.transcript('u2', 4, onBranch('u2', 'feat/u'));
+  const all = s.run(['discover'], { env: reply(topic({ title: 'Queue retry budget', same_as: [x], belongs: [1] }), topic({ title: 'Schema for job audit', angle: 'data', same_as: [y], belongs: [2] })) });
+  assert.match(all.out, /2 topic\(s\)/);
+  assert.strictEqual(fs.readFileSync(path.join(s.root, 'dedupe-calls.log'), 'utf8').trim().split('\n').length, calls);
+});
+
+test('a session mark on a session with several logs goes to the topic it points to', () => {
+  const s = sandbox();
+  s.transcript('pm', 3, onBranch('pm', 'feat/pm'));
+  s.transcript('pm-next', 3, onBranch('pm-next', 'feat/pm'));
+  const dbg = seedLog(s, { sessions: ['pm'], title: 'Debugging the reconnect storm' });
+  const arch = seedLog(s, { sessions: ['pm'], title: 'Choosing Redis Streams', angle: 'architecture' });
+  assert.match(s.run(['mark', '--session', 'pm', 'the', 'root', 'cause']).out, /Marked this session: the root cause/);
+  const id = discoverPick(s, reply(topic({ title: 'Debugging the reconnect storm', same_as: [dbg], belongs: [1, 2], marks: true })));
+  assert.strictEqual(id, dbg);
   assert.match(s.run(['show', dbg]).out, /"note":"the root cause"/);
+  assert.doesNotMatch(s.run(['show', arch]).out, /the root cause/);
+  assert.ok(!fs.existsSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'pm.json')));
+
+  // With exactly one log, the mark goes straight to it.
+  const solo = seedLog(s, { sessions: ['solo'], title: 'Solo work' });
+  assert.match(s.run(['mark', '--session', 'solo', 'nice']).out, new RegExp(`Marked ${solo} \\(this session's existing log\\): nice`));
 });
 
-test('a one-session rescan never lowers the score of a log that spans more sessions, and keeps it partial', () => {
+test('an empty reply keeps pending marks for the next discovery', () => {
   const s = sandbox();
-  const id = JSON.parse(s.run(['scout', '--session', 'w1', '--transcript', s.transcript('w1', 3), '--json'], { env: { STUB_SCORE: '5' } }).out).logId;
-  s.run(['scout', '--session', 'w2', '--transcript', s.transcript('w2', 3)], { env: reply(topic({ title: 'Reconnects over two days', same_as: [id], score: 5 })) });
+  s.transcript('empty', 3);
+  s.run(['mark', '--session', 'empty', 'keep', 'me']);
+  assert.match(s.run(['discover'], { env: { STUB_TOPICS: '{"topics":[]}' } }).out, /No topic matched/);
+  assert.ok(fs.existsSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'empty.json')), 'the mark is kept');
+  // A topic that does not point at the mark leaves it waiting too.
+  discoverPick(s, reply(topic({ title: 'Unrelated' })));
+  assert.ok(fs.existsSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'empty.json')));
+});
+
+test('a scan of some of a log\'s sessions never lowers its score, and sees the whole log', () => {
+  const s = sandbox();
+  s.transcript('w3', 3);
   const long = 'x'.repeat(5000);
-  const file = s.run(['show', id, '--path']).out;
-  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('## Problem', `## Problem\n${long}END-OF-LONG`));
-  const r = JSON.parse(s.run(['scout', '--session', 'w2', '--json'], { env: reply(topic({ title: 'Reconnects over two days', same_as: [id], score: 3 })) }).out);
-  assert.strictEqual(r.score, 5);
+  const id = seedLog(s, { sessions: ['w1', 'w2'], score: 5, title: 'Reconnects over two days', body: `# Reconnects over two days\n\n## Problem\n${long}END-OF-LONG\n` });
+  assert.strictEqual(discoverPick(s, reply(topic({ title: 'Reconnects over two days, revisited', same_as: [id], score: 3 }))), id);
   assert.match(s.run(['show', id]).out, /score: 5/);
   assert.match(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8'), /END-OF-LONG/, 'the model sees the whole log it may rewrite');
 });
 
-test('an unknown same_as id does not let a low-score topic past the gate', () => {
+test('a discovery rewrites a log of the same sessions only when they have new turns or pending marks for it', () => {
   const s = sandbox();
-  const r = s.run(['scout', '--session', 'ghost', '--transcript', s.transcript('ghost', 3), '--auto'], { env: reply(topic({ title: 'Renamed a variable', score: 1, same_as: ['cb-zzzzzz'] })) });
-  assert.strictEqual(r.out, 'Skipped: score 1', 'the made-up id is ignored, so the score gate applies');
-  assert.strictEqual(logsJson(s).length, 0);
+  s.transcript('ra', 3);
+  const la = seedLog(s, { sessions: ['ra'], scanned_at: new Date(Date.now() - 1000).toISOString() });
+  const same = reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [la], belongs: [1] }));
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'nothing new');
+  s.run(['mark', la, 'add the before and after numbers']);
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'a mark by ID is in the log already');
+
+  s.transcript('ra', 5);
+  const r = s.run(['discover'], { env: same });
+  assert.match(r.out, new RegExp(`updates: ${la}`), 'new turns are news');
+  assert.strictEqual(s.run(['discover', 'pick', didOf(r.out), '1']).status, 0);
+  const started = JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'state', 'discoveries', `${didOf(r.out)}.json`), 'utf8')).scan_started_at;
+  assert.strictEqual(logsJson(s).find((l) => l.id === la).scanned_at, started, 'scanned as of the start of the discovery, not the pick');
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'scanned with those turns now');
 });
 
-test('a deleted topic stays deleted when reworded; a session that gets a log again is scanned automatically again', () => {
+test('a session with a pending mark is a candidate however short, even after a scan saw it', () => {
   const s = sandbox();
-  const tp = s.transcript('tomb', 3);
-  const id = JSON.parse(s.run(['scout', '--session', 'tomb', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixing websocket reconnect storms' })) }).out).logId;
-  s.run(['delete', id]);
-  assert.match(s.run(['scout', '--session', 'tomb'], { env: reply(topic({ title: 'Fixing WebSocket reconnect storm on deploy' })) }).out, /ones you deleted/);
-  assert.match(s.run(['scout', '--session', 'tomb', '--auto']).out, /logs were deleted/);
-
-  // Discovery logs a new angle for it: the session is no longer treated as deleted.
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Load-testing the gateway', angle: 'testing' })) }).out)[1];
-  s.run(['discover', 'pick', did, '1']);
-  assert.doesNotMatch(s.run(['scout', '--session', 'tomb', '--auto']).out, /logs were deleted/);
+  s.transcript('tiny', 1);
+  const sids = () => JSON.parse(s.run(['discover', '--dry-run', '--json']).out).flatMap((g) => g.sessions);
+  assert.deepStrictEqual(sids(), []);
+  s.run(['mark', '--session', 'tiny', 'the deadlock fix']);
+  assert.deepStrictEqual(sids(), ['tiny']);
+  // A narrowed scan that places nothing leaves the mark unseen; an open one marks it seen, and it stays a candidate.
+  s.run(['discover', '--tags', 'user turn'], { env: reply(topic({ title: 'Other', fit: 0 })) });
+  assert.ok(!JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'tiny.json'), 'utf8'))[0].seen);
+  s.run(['discover'], { env: { STUB_TOPICS: '{"topics":[]}' } });
+  assert.ok(JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'tiny.json'), 'utf8'))[0].seen);
+  assert.deepStrictEqual(sids(), ['tiny']);
+  discoverPick(s, reply(topic({ title: 'Deadlock fix', marks: true })));
+  assert.deepStrictEqual(sids(), [], 'its mark is placed: short again');
 });
 
-test('tags with regex characters are matched literally and never crash discovery', () => {
+test('a pending mark a scan saw and placed nowhere is no longer news', () => {
   const s = sandbox();
-  s.transcript('rx', 3);
-  const r = s.run(['discover', '--dry-run', '--tags', 'c(,[slug]']);
-  assert.strictEqual(r.status, 0, r.stderr);
-  assert.match(r.out, /0 eligible/);
+  s.transcript('pm', 3);
+  const a = seedLog(s, { sessions: ['pm'], title: 'A', scanned_at: new Date(Date.now() - 60000).toISOString() });
+  seedLog(s, { sessions: ['pm'], title: 'B', angle: 'testing', scanned_at: new Date(Date.now() - 60000).toISOString() });
+  s.run(['mark', '--session', 'pm', 'about a deleted topic']);
+  const same = reply(topic({ title: 'A', same_as: [a], belongs: [1], marks: false }));
+  assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${a}`), 'unseen: news');
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'seen and left unplaced: not news again');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'pm.json'), 'utf8')).length, 1, 'still pending');
+  // A later scan that places it on a log of these sessions still can.
+  const placed = s.run(['discover'], { env: reply(topic({ title: 'A', same_as: [a], belongs: [1], marks: true })) });
+  assert.match(placed.out, new RegExp(`updates: ${a}`));
+  assert.strictEqual(s.run(['discover', 'pick', didOf(placed.out), '1']).status, 0);
+  const log = logsJson(s).find((l) => l.id === a);
+  assert.deepStrictEqual(log.marks.map((m) => m.note), ['about a deleted topic']);
+  assert.ok(!('seen' in log.marks[0]), 'the scan\'s bookkeeping stays out of the log');
 });
 
-test('a marked session always gets a log, even when its only topic scores low', () => {
+test('older logs and marks a scan already saw are not news', () => {
   const s = sandbox();
-  s.run(['mark', '--session', 'lowm', 'queue', 'idea']);
-  const r = JSON.parse(s.run(['scout', '--session', 'lowm', '--transcript', s.transcript('lowm', 3), '--auto', '--json'], { env: reply(topic({ title: 'Tiny tweak', score: 1 })) }).out);
-  assert.strictEqual(r.status, 'created');
-  assert.match(s.run(['show', r.logId]).out, /"note":"queue idea"/);
+  s.transcript('v1', 3);
+  // A 0.1 log: no session_turns, no scanned_at.
+  const old = seedLog(s, { sessions: undefined, session_id: 'v1', user_turns: 3, session_turns: undefined, scanned_at: undefined });
+  const same = reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [old], belongs: [1] }));
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/);
+  // A pending mark left unplaced by the last scan stays pending, but is no longer news.
+  const marks = path.join(s.env.CASEBOOK_HOME, 'marks', 'v1.json');
+  fs.mkdirSync(path.dirname(marks), { recursive: true });
+  fs.writeFileSync(marks, JSON.stringify([{ at: new Date(Date.now() - 86400000).toISOString(), note: 'seen', session: 'v1' }]));
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/);
+  // Its turn count may include casebook's own commands: a session that changed since the log is news.
+  const later = new Date(Date.now() + 1000).toISOString();
+  s.transcript('v1', 3, [{ type: 'user', sessionId: 'v1', cwd: s.repo, timestamp: later, message: { role: 'user', content: '<command-name>/casebook:list</command-name>' } }]);
+  assert.match(s.run(['discover'], { env: same }).out, /No topic matched/, 'only casebook ran since: not news');
+  s.transcript('v1', 3, [{ type: 'user', sessionId: 'v1', cwd: s.repo, timestamp: later, message: { role: 'user', content: 'one more fix' } }]);
+  assert.match(s.run(['discover'], { env: same }).out, new RegExp(`updates: ${old}`), 'changed since the log: news');
 });
 
-test('a log deleted before topics existed keeps its session closed unless --force', () => {
+test('a --force pick reopens a session closed by an older casebook', () => {
   const s = sandbox();
-  const tp = s.transcript('old', 3);
+  s.transcript('old', 3);
   const ledger = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions', 'old.json');
   fs.mkdirSync(path.dirname(ledger), { recursive: true });
   fs.writeFileSync(ledger, JSON.stringify({ sessionId: 'old', deleted: true, logId: 'cb-aaaaaa' }));
-  assert.match(s.run(['scout', '--session', 'old', '--transcript', tp]).out, /log was deleted \(use --force/);
-  assert.ok(!JSON.parse(s.run(['discover', '--dry-run', '--json']).out).some((g) => g.sessions.includes('old')));
-  assert.strictEqual(JSON.parse(s.run(['scout', '--session', 'old', '--force', '--json']).out).status, 'created');
+  discoverPick(s, reply(topic({ title: 'Back again' })), { args: ['--force'] });
+  assert.ok(JSON.parse(s.run(['discover', '--dry-run', '--json']).out).some((g) => g.sessions.includes('old')), 'no --force needed any more');
+  assert.ok(!JSON.parse(fs.readFileSync(ledger, 'utf8')).deleted);
 });
 
-test('two topics of one scan never write into the same log; reworded rescans update, merged ids resolve', () => {
+test('flags removed in 0.3 fail instead of widening a batch delete', () => {
   const s = sandbox();
-  const tp = s.transcript('claim', 3);
-  const id = JSON.parse(s.run(['scout', '--session', 'claim', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixed websocket reconnect storms' })) }).out).logId;
+  const id = seedLog(s, { score: 2 });
+  for (const flag of ['--unwritten', '--written', '--pending', '--generated', '--quiet', '--live']) {
+    const r = s.run(['delete', '--below-score', '3', '--yes', flag]);
+    assert.strictEqual(r.status, 1, flag);
+    assert.match(r.stderr, new RegExp(`${flag} was removed in 0\\.3`));
+  }
+  assert.strictEqual(s.run(['list', '--unwritten']).status, 1);
+  assert.ok(logsJson(s).some((l) => l.id === id), 'nothing deleted');
+});
 
-  // Both name the same log: the better one updates it, the other becomes its own log.
-  const r = JSON.parse(s.run(['scout', '--session', 'claim', '--json'], {
-    env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [id], score: 5 }), topic({ title: 'Picking Redis Streams for fan-out', angle: 'architecture', same_as: [id], score: 3 })),
-  }).out);
-  assert.deepStrictEqual(r.logs.map((l) => l.status), ['updated', 'created']);
-  assert.strictEqual(r.logs[0].logId, id);
-  assert.strictEqual(r.score, 5);
-  assert.strictEqual(logsJson(s).length, 2);
+test('show and the startup hook merge old stores first; a CASEBOOK_ROOT store is merged into itself', () => {
+  const s = sandbox();
+  const oldStore = (home, name, id) => {
+    const dir = path.join(home, name);
+    seedLog({ env: { CASEBOOK_HOME: dir } }, { id });
+    fs.writeFileSync(path.join(dir, 'profile.json'), JSON.stringify({ name }));
+    return dir;
+  };
+  oldStore(s.env.CASEBOOK_HOME, 'default', 'cb-old001');
+  const shown = s.run(['show', 'cb-old001', '--path']);
+  assert.strictEqual(shown.status, 0, shown.stderr);
+  assert.strictEqual(shown.out, path.join(s.env.CASEBOOK_HOME, 'logs', 'acme-api', 'cb-old001.md'));
 
-  // A reworded title without same_as is still the same story.
-  const again = JSON.parse(s.run(['scout', '--session', 'claim', '--json'], { env: reply(topic({ title: 'Fixing websocket reconnect storms on deploy' })) }).out);
-  assert.strictEqual(again.logId, id);
-  assert.strictEqual(logsJson(s).length, 2);
+  oldStore(s.env.CASEBOOK_HOME, 'work', 'cb-old002');
+  assert.strictEqual(s.run(['hook', 'session-start']).status, 0);
+  assert.ok(fs.existsSync(path.join(s.env.CASEBOOK_HOME, 'logs', 'acme-api', 'cb-old002.md')));
+
+  const root = path.join(s.root, 'cbroot');
+  oldStore(root, 'default', 'cb-old003');
+  fs.copyFileSync(path.join(s.env.CASEBOOK_HOME, 'config.json'), path.join(root, 'default', 'config.json'));
+  const env = { CASEBOOK_HOME: '', CASEBOOK_ROOT: root };
+  assert.deepStrictEqual(JSON.parse(s.run(['list', '--json'], { env }).out).map((l) => l.id), ['cb-old003']);
+  assert.ok(fs.existsSync(path.join(root, 'config.json')));
+});
+
+test('a log deleted before topics existed keeps its session out of discovery unless --force', () => {
+  const s = sandbox();
+  s.transcript('old', 3);
+  const ledger = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions', 'old.json');
+  fs.mkdirSync(path.dirname(ledger), { recursive: true });
+  fs.writeFileSync(ledger, JSON.stringify({ sessionId: 'old', deleted: true, logId: 'cb-aaaaaa' }));
+  assert.ok(!JSON.parse(s.run(['discover', '--dry-run', '--json']).out).some((g) => g.sessions.includes('old')));
+  assert.ok(JSON.parse(s.run(['discover', '--dry-run', '--json', '--force']).out).some((g) => g.sessions.includes('old')));
+  assert.match(s.run(['mark', '--session', 'old', 'x']).out, /discovery leaves it out: run \/casebook:discovery --force/);
 });
 
 test('discover pick checks again: a deleted target or topic is refused, not logged anew', () => {
   const s = sandbox();
-  const a = s.transcript('pa', 3, onBranch('pa', 'feat/p'));
+  s.transcript('pa', 3, onBranch('pa', 'feat/p'));
   s.transcript('pb', 3, onBranch('pb', 'feat/p'));
-  const la = JSON.parse(s.run(['scout', '--session', 'pa', '--transcript', a, '--json']).out).logId;
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Something else entirely', same_as: [la], belongs: [1, 2] })) }).out)[1];
+  const la = seedLog(s, { sessions: ['pa'] });
+  const did = didOf(s.run(['discover'], { env: reply(topic({ title: 'Something else entirely', same_as: [la], belongs: [1, 2] })) }).out);
   s.run(['delete', la]);
   const p = s.run(['discover', 'pick', did, '1']);
   assert.strictEqual(p.status, 1);
   assert.match(p.stderr, new RegExp(`the log this topic updates is gone \\(${la}\\)`));
   assert.strictEqual(logsJson(s).length, 0);
 
-  const did2 = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Load-testing the gateway', belongs: [2] })) }).out)[1];
+  const did2 = didOf(s.run(['discover'], { env: reply(topic({ title: 'Load-testing the gateway', belongs: [2] })) }).out);
   const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did2, '1']).out)[1];
   s.run(['delete', id]);
-  const fresh = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover', '--force'], { env: reply(topic({ title: 'Load-testing the gateway', belongs: [2] })) }).out)[1];
+  const fresh = didOf(s.run(['discover', '--force'], { env: reply(topic({ title: 'Load-testing the gateway', belongs: [2] })) }).out);
   assert.match(s.run(['discover', 'pick', fresh, '1']).out, /Created/, '--force carries over to the pick');
 });
 
 test('a topic updating a live log is not dropped because a deleted log had a similar title', () => {
   const s = sandbox();
-  const tp = s.transcript('live', 3);
-  const r = JSON.parse(s.run(['scout', '--session', 'live', '--transcript', tp, '--json'], {
-    env: reply(topic({ title: 'Debugging Redis stream consumer lag' }), topic({ title: 'Debugging Redis stream consumer restarts', angle: 'reliability' })),
-  }).out);
-  const [lag, restarts] = r.logs.map((l) => l.logId);
+  s.transcript('live', 3, onBranch('live', 'feat/lv'));
+  s.transcript('live2', 3, onBranch('live2', 'feat/lv'));
+  const lag = seedLog(s, { sessions: ['live'], title: 'Debugging Redis stream consumer lag' });
+  const restarts = seedLog(s, { sessions: ['live'], title: 'Debugging Redis stream consumer restarts', angle: 'reliability' });
   s.run(['delete', restarts]);
-  const up = JSON.parse(s.run(['scout', '--session', 'live', '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer lag', same_as: [lag], score: 5 })) }).out);
-  assert.strictEqual(up.logId, lag);
+  assert.strictEqual(discoverPick(s, reply(topic({ title: 'Debugging Redis stream consumer lag', same_as: [lag], belongs: [1, 2], score: 5 }))), lag);
   assert.match(s.run(['show', lag]).out, /score: 5/);
 });
 
-// ---------------------------------------------------------------- topics review, round 3
-
-test('re-picking a topic whose log was merged away reports it, instead of logging it again', () => {
+test('re-picking a topic whose log was merged away reports it; a merged ID still opens its log', () => {
   const s = sandbox();
   s.transcript('ma', 3, onBranch('ma', 'feat/m'));
   s.transcript('mb', 3, onBranch('mb', 'feat/m'));
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Gateway rewrite', belongs: [1, 2] })) }).out)[1];
+  const did = didOf(s.run(['discover'], { env: reply(topic({ title: 'Gateway rewrite', belongs: [1, 2] })) }).out);
   const x = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
-  const y = JSON.parse(s.run(['scout', '--session', 'other', '--transcript', s.transcript('other', 3), '--json'], { env: reply(topic({ title: 'Unrelated', angle: 'data' })) }).out).logId;
-  s.run(['scout', '--session', 'other', '--json'], { env: reply(topic({ title: 'Gateway rewrite, all of it', same_as: [y, x] })) });
+  const y = seedLog(s, { sessions: ['ma', 'other'], title: 'Unrelated', angle: 'data' });
+  assert.strictEqual(discoverPick(s, reply(topic({ title: 'Gateway rewrite, all of it', same_as: [y, x], belongs: [1, 2] }))), y);
   assert.ok(!logsJson(s).some((l) => l.id === x), 'x was merged away');
-  const again = s.run(['discover', 'pick', did, '1']);
-  assert.match(again.out, /^Already logged as cb-/);
+  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`^Already logged as ${y}`));
   assert.strictEqual(logsJson(s).length, 1);
-});
 
-test('a pick works out partial from the sessions as they are now', () => {
-  const s = sandbox();
-  s.transcript('pp', 3);
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Settled work' })) }).out)[1];
-  const file = path.join(s.env.CASEBOOK_HOME, 'state', 'discoveries', `${did}.json`);
-  const d = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.strictEqual(d.topics[0].partial, true, 'recent when discovered');
-  const old = new Date(Date.now() - 3600000);
-  for (const dir of fs.readdirSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects'))) fs.utimesSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', dir, 'pp.jsonl'), old, old);
-  const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
-  assert.match(s.run(['show', id]).out, /partial: false/);
-});
-
-test('an empty reply keeps pending marks and says no topic was found', () => {
-  const s = sandbox();
-  s.run(['mark', '--session', 'empty', 'keep', 'me']);
-  const r = s.run(['scout', '--session', 'empty', '--transcript', s.transcript('empty', 3)], { env: { STUB_TOPICS: '{"topics":[]}' } });
-  assert.strictEqual(r.out, 'Skipped: the scout found no topic');
-  assert.ok(fs.existsSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'empty.json')), 'the mark is kept');
-});
-
-test('an unmarked note found in the transcript is not re-added and does not force a rescan', () => {
-  const s = sandbox();
-  const cmd = { type: 'user', sessionId: 'um', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args>queue idea</command-args>' } };
-  const tp = s.transcript('um', 3, [cmd]);
-  const id = JSON.parse(s.run(['scout', '--session', 'um', '--transcript', tp, '--auto', '--json']).out).logId;
-  assert.match(s.run(['show', id]).out, /"note":"queue idea"/);
-  s.run(['unmark', id]);
-  const calls = s.calls().length;
-  const tp2 = s.transcript('um', 4, [cmd]);
-  assert.match(s.run(['scout', '--session', 'um', '--transcript', tp2, '--auto']).out, /not enough new activity/);
-  assert.strictEqual(s.calls().length, calls);
-  s.run(['scout', '--session', 'um', '--transcript', tp2]);
-  assert.doesNotMatch(s.run(['show', id]).out, /queue idea/);
-});
-
-test('a log claimed by a title match is not overwritten by a later topic naming it', () => {
-  const s = sandbox();
-  const tp = s.transcript('tw', 3);
-  const id = JSON.parse(s.run(['scout', '--session', 'tw', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixing reconnect storms' })) }).out).logId;
-  const r = JSON.parse(s.run(['scout', '--session', 'tw', '--json'], {
-    env: reply(topic({ title: 'Fixed reconnect storms', score: 4 }), topic({ title: 'Why we picked Redis Streams', angle: 'architecture', same_as: [id], score: 3 })),
-  }).out);
-  assert.deepStrictEqual(r.logs.map((l) => l.status), ['updated', 'created']);
-  assert.match(s.run(['show', id]).out, /^# Fixed reconnect storms/m);
-});
-
-test('the write lock: a stale lock is reclaimed once; mark, unmark and written take it', () => {
-  const s = sandbox();
-  const id = JSON.parse(s.run(['scout', '--session', 'wl', '--transcript', s.transcript('wl', 3), '--json']).out).logId;
-  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'write.lock');
-  fs.writeFileSync(lock, 'crashed');
-  const old = new Date(Date.now() - 60000);
-  fs.utimesSync(lock, old, old);
-  assert.match(s.run(['mark', id, 'after', 'a', 'crash']).out, /Marked/);
-  assert.ok(!fs.existsSync(lock) && !fs.existsSync(`${lock}.reclaim`), 'reclaimed and released');
-  assert.match(s.run(['written', id, '--file', path.join(s.root, 'a.md')]).out, /Recorded 1/);
-  assert.match(s.run(['unmark', id]).out, /Unmarked/);
-  assert.strictEqual(s.run(['discover', '--candidates', '0']).stderr.trim(), 'casebook: --candidates must be a positive whole number, got "0"');
-});
-
-// ---------------------------------------------------------------- topics review, round 4
-
-test('unmarking a bare mark, or deleting a marked log, does not bring the mark back', () => {
-  const s = sandbox();
-  const bare = { type: 'user', sessionId: 'bm', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args></command-args>' } };
-  const tp = s.transcript('bm', 3, [bare]);
-  const id = JSON.parse(s.run(['scout', '--session', 'bm', '--transcript', tp, '--auto', '--json']).out).logId;
-  assert.match(s.run(['show', id]).out, /marked: true/);
-  s.run(['unmark', id]);
-  const calls = s.calls().length;
-  assert.match(s.run(['scout', '--session', 'bm', '--transcript', s.transcript('bm', 4, [bare]), '--auto']).out, /not enough new activity/);
-  assert.strictEqual(s.calls().length, calls, 'no rescan for the unmarked bare mark');
-
-  const perf = { type: 'user', sessionId: 'dm', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args>perf win</command-args>' } };
-  const tp2 = s.transcript('dm', 3, [perf]);
-  const r = JSON.parse(s.run(['scout', '--session', 'dm', '--transcript', tp2, '--auto', '--json'], {
-    env: reply(topic({ title: 'Halved p99 latency', angle: 'performance', marks: true }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })),
-  }).out);
-  const [marked, other] = r.logs.map((l) => l.logId);
-  s.run(['delete', marked]);
-  const calls2 = s.calls().length;
-  assert.match(s.run(['scout', '--session', 'dm', '--transcript', s.transcript('dm', 4, [perf]), '--auto']).out, /not enough new activity/);
-  assert.strictEqual(s.calls().length, calls2);
-  assert.match(s.run(['show', other]).out, /marked: false/);
-});
-
-test('a merged ID still opens its log; delete refuses a merged ID', () => {
-  const s = sandbox();
-  const x = JSON.parse(s.run(['scout', '--session', 'mx', '--transcript', s.transcript('mx', 3), '--json'], { env: reply(topic({ title: 'Gateway rewrite' })) }).out).logId;
-  const y = JSON.parse(s.run(['scout', '--session', 'my', '--transcript', s.transcript('my', 3), '--json'], { env: reply(topic({ title: 'Unrelated', angle: 'data' })) }).out).logId;
-  s.run(['scout', '--session', 'my', '--json'], { env: reply(topic({ title: 'Gateway rewrite, all of it', same_as: [y, x] })) });
-  const survivor = logsJson(s)[0].id;
-  const merged = survivor === x ? y : x;
-  const show = s.run(['show', merged, '--path']);
+  const show = s.run(['show', x, '--path']);
   assert.strictEqual(show.status, 0, show.stderr);
-  assert.match(show.stderr, new RegExp(`${merged} was merged into ${survivor}`));
-  assert.ok(show.out.endsWith(`${survivor}.md`));
-  assert.strictEqual(s.run(['mark', merged, 'note']).status, 0);
-  const del = s.run(['delete', merged]);
+  assert.match(show.stderr, new RegExp(`${x} was merged into ${y}`));
+  assert.ok(show.out.endsWith(`${y}.md`));
+  assert.strictEqual(s.run(['mark', x, 'note']).status, 0);
+  const del = s.run(['delete', x]);
   assert.strictEqual(del.status, 1);
   assert.match(del.stderr, /was merged into/);
   assert.strictEqual(logsJson(s).length, 1);
 });
 
+test('the write lock: a stale lock is reclaimed once; mark and unmark take it', () => {
+  const s = sandbox();
+  const id = seedLog(s, { sessions: ['wl'] });
+  const lock = path.join(s.env.CASEBOOK_HOME, 'state', 'write.lock');
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  fs.writeFileSync(lock, 'crashed');
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(lock, old, old);
+  assert.match(s.run(['mark', id, 'after', 'a', 'crash']).out, /Marked/);
+  assert.ok(!fs.existsSync(lock) && !fs.existsSync(`${lock}.reclaim`), 'reclaimed and released');
+  assert.match(s.run(['unmark', id]).out, /Unmarked/);
+  assert.strictEqual(s.run(['discover', '--candidates', '0']).stderr.trim(), 'casebook: --candidates must be a positive whole number, got "0"');
+});
+
+test('deleting logs remembers their topics per session, also for ids that sanitise alike', () => {
+  const s = sandbox();
+  const a = seedLog(s, { sessions: ['x'], title: 'First' });
+  const b = seedLog(s, { sessions: ['../x'], title: 'Second' });
+  s.run(['delete', a, b]);
+  const dir = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions');
+  const files = fs.readdirSync(dir).sort();
+  assert.strictEqual(files.length, 2, 'the second id is not mistaken for the first one');
+  assert.ok(files.includes('x.json'), 'ordinary ids keep their plain file name');
+  const titles = files.map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')).deletedTopics.map((d) => d.title)).flat().sort();
+  assert.deepStrictEqual(titles, ['First', 'Second']);
+});
+
 test('discovery lists a log as updated by one topic only, and a pick refuses a log changed since', () => {
   const s = sandbox();
-  const l = JSON.parse(s.run(['scout', '--session', 'base', '--transcript', s.transcript('base', 3), '--json'], { env: reply(topic({ title: 'Reconnect storms' })) }).out).logId;
+  const l = seedLog(s, { sessions: ['base'], title: 'Reconnect storms' });
   for (const [sid, br] of [['ca', 'feat/a'], ['cb', 'feat/a'], ['da', 'feat/b'], ['db', 'feat/b']]) s.transcript(sid, 3, onBranch(sid, br));
-  const r = s.run(['discover', '--exclude', 'base'], { env: reply(topic({ title: 'Reconnect storms, end to end', same_as: [l], belongs: [1, 2] })) });
+  const r = s.run(['discover'], { env: reply(topic({ title: 'Reconnect storms, end to end', same_as: [l], belongs: [1, 2] })) });
   assert.strictEqual(r.status, 0, r.stderr);
   assert.strictEqual([...r.out.matchAll(new RegExp(`updates: ${l}`, 'g'))].length, 1, r.out);
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
   s.run(['mark', l, 'later note']);
-  const p = s.run(['discover', 'pick', did, '1']);
+  const p = s.run(['discover', 'pick', didOf(r.out), '1']);
   assert.strictEqual(p.status, 1);
   assert.match(p.stderr, new RegExp(`${l} changed since the discovery ran`));
   assert.match(s.run(['show', l]).out, /^# Reconnect storms$/m);
@@ -1236,16 +672,183 @@ test('a long chain shows the model every log of its sessions', () => {
   const s = sandbox();
   const ids = [];
   for (const sid of ['l1', 'l2', 'l3', 'l4']) {
-    const tp = s.transcript(sid, 3, onBranch(sid, 'feat/long'));
-    const r = JSON.parse(s.run(['scout', '--session', sid, '--transcript', tp, '--json'], {
-      env: reply(topic({ title: `${sid} lag` }), topic({ title: `${sid} schema`, angle: 'data' }), topic({ title: `${sid} tests`, angle: 'testing' })),
-    }).out);
-    ids.push(...r.logs.map((x) => x.logId));
+    s.transcript(sid, 3, onBranch(sid, 'feat/long'));
+    for (const angle of ['debugging', 'data', 'testing']) ids.push(seedLog(s, { sessions: [sid], title: `${sid} ${angle}`, angle }));
   }
-  assert.strictEqual(ids.length, 12);
   s.run(['discover'], { env: reply(topic({ title: 'All of it', same_as: ids, belongs: [1, 2, 3, 4] })) });
   const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
   for (const id of ids) assert.ok(prompt.includes(`### ${id} ·`), `${id} is in the prompt`);
+});
+
+test('same_as can only name a log shown to the model; one session in two folders does not crash discovery', () => {
+  const s = sandbox();
+  const x = seedLog(s, { sessions: ['cx'], project: 'client-x', repo: null, policy: 'anonymize', title: 'Client billing' });
+  s.transcript('mine', 3);
+  const id = discoverPick(s, reply(topic({ title: 'Gateway', same_as: [x] })));
+  assert.notStrictEqual(id, x, 'a new log');
+  assert.match(s.run(['show', x]).out, /^# Client billing$/m, 'the unseen log is untouched');
+
+  const other = path.join(s.root, 'client-x');
+  fs.mkdirSync(other);
+  const moved = fs.readFileSync(s.transcript('twin', 3), 'utf8').split(s.repo).join(other);
+  const dir = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', other.replace(/[^\w]/g, '-'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'twin.jsonl'), moved);
+  const d = s.run(['discover', '--dry-run', '--all']);
+  assert.strictEqual(d.status, 0, d.stderr);
+});
+
+test('a pick refuses when its sessions were logged again since; pick mistakes are not logged as errors', () => {
+  const s = sandbox();
+  s.transcript('g1', 3, onBranch('g1', 'feat/g'));
+  s.transcript('g2', 3, onBranch('g2', 'feat/g'));
+  const did = didOf(s.run(['discover'], { env: reply(topic({ title: 'Gateway retries', belongs: [1, 2] })) }).out);
+  const later = seedLog(s, { sessions: ['g2'], title: 'Gateway retry budget' });
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, new RegExp(`logged again since the discovery ran \\(${later}\\)`));
+
+  assert.strictEqual(s.run(['discover', 'pick', 'd-000000', '1']).status, 1);
+  const errLog = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
+  assert.ok(!fs.existsSync(errLog) || !/no discovery|changed since/.test(fs.readFileSync(errLog, 'utf8')));
+});
+
+test('a new angle with a similar title is a new log, and a deleted angle does not block another', () => {
+  const s = sandbox();
+  s.transcript('an8', 3);
+  const lag = seedLog(s, { sessions: ['an8', 'an8-old'], title: 'Debugging Redis stream consumer lag' });
+  const r = discoverPick(s, reply(topic({ title: 'Debugging Redis stream consumer restarts', angle: 'reliability' })));
+  assert.notStrictEqual(r, lag);
+  assert.match(s.run(['show', lag]).out, /^# Debugging Redis stream consumer lag$/m);
+  s.run(['delete', r]);
+  const again = discoverPick(s, reply(topic({ title: 'Debugging Redis stream consumer restart', angle: 'architecture' })));
+  assert.ok(again && again !== r, 'another angle than the deleted one');
+});
+
+test('a removed worktree inside its repo stays in the repo\'s project; sessions without a folder are left out', () => {
+  const s = sandbox();
+  const wt = path.join(s.repo, '.claude', 'worktrees', 'feat-x');
+  const tp = s.transcript('wt11', 3);
+  fs.writeFileSync(tp, fs.readFileSync(tp, 'utf8').split(s.repo).join(wt));
+  const id = discoverPick(s, reply(topic({ title: 'Worktree work' })));
+  assert.match(s.run(['show', id]).out, /project: "acme-api"/);
+  assert.match(s.run(['show', id]).out, /policy: "public"/);
+
+  const nc = s.transcript('nocwd', 3);
+  fs.writeFileSync(nc, fs.readFileSync(nc, 'utf8').split(`"cwd":${JSON.stringify(s.repo)},`).join(''));
+  const dry = JSON.parse(s.run(['discover', '--dry-run', '--json']).out);
+  assert.ok(!dry.some((g) => g.sessions.includes('nocwd')));
+});
+
+test('a note with only a score threshold does not filter by fit; note words lose trailing dots', () => {
+  const s = sandbox();
+  s.transcript('th1', 3);
+  const r = s.run(['discover', '--note', 'find anything that scores > 3', '--min-score', '4'], { env: { STUB_FIT: '0' } });
+  assert.match(r.out, /^Discovery d-/, r.out);
+  const { keywords } = require('../plugins/casebook/lib/discover');
+  assert.deepStrictEqual(keywords('webhook retries. Also redis.'), ['webhook', 'retries', 'redis']);
+});
+
+test('discovery updates a same-title log of its own sessions; a gone folder outside a worktree borrows no repo', () => {
+  const s = sandbox();
+  s.transcript('tt1', 3, onBranch('tt1', 'feat/t'));
+  s.transcript('tt2', 3, onBranch('tt2', 'feat/t'));
+  const id = seedLog(s, { sessions: ['tt1'], title: 'Fix Redis retry storm' });
+  const r = s.run(['discover'], { env: reply(topic({ title: 'Fixing Redis retry storms', belongs: [1, 2] })) });
+  assert.match(r.out, new RegExp(`updates: ${id}`), r.out);
+
+  const s2 = sandbox();
+  const clone = path.join(s2.repo, 'tmp', 'client-api');
+  const tc = s2.transcript('cl12', 3);
+  fs.writeFileSync(tc, fs.readFileSync(tc, 'utf8').split(s2.repo).join(clone));
+  const l = discoverPick(s2, reply(topic({ title: 'Client work' })), { args: ['--project', 'client-api'] });
+  const doc = s2.run(['show', l]).out;
+  assert.match(doc, /project: "client-api"/);
+  assert.match(doc, /policy: "anonymize"/);
+});
+
+test('a branch name links sessions of one repository only; an exact title of another angle is a new log', () => {
+  const { linkSessions } = require('../plugins/casebook/lib/discover');
+  const now = Date.now();
+  const sess = (id, o) => ({
+    sessionId: id, project: 'api', policy: 'anonymize', branch: 'feature/auth', prUrls: [], files: [], readFiles: [], opening: '',
+    startedAt: new Date(now - (id === 'a' ? 48 : 1) * 3600000).toISOString(), endedAt: new Date(now - (id === 'a' ? 47 : 0) * 3600000).toISOString(), ...o,
+  });
+  assert.strictEqual(linkSessions([sess('a', { repo: 'github.com/me/api' }), sess('b', { repo: 'github.com/client/api' })]).length, 2);
+  assert.strictEqual(linkSessions([sess('a', { repo: 'github.com/me/api' }), sess('b', { repo: 'github.com/me/api' })]).length, 1);
+
+  const s = sandbox();
+  s.transcript('ex13', 3);
+  const arch = seedLog(s, { sessions: ['ex13', 'ex13-old'], title: 'Moving queue retries to Redis streams', angle: 'architecture' });
+  const r = discoverPick(s, reply(topic({ title: 'Moving queue retries to Redis streams', angle: 'debugging' })));
+  assert.notStrictEqual(r, arch);
+  assert.match(s.run(['show', arch]).out, /angle: "architecture"/);
+});
+
+test('a gone folder is left out under a skip default', () => {
+  const s = sandbox();
+  const cfg = path.join(s.env.CASEBOOK_HOME, 'config.json');
+  fs.writeFileSync(cfg, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfg, 'utf8')), defaultPolicy: 'skip' }));
+  const tc = s.transcript('gs13', 3);
+  fs.writeFileSync(tc, fs.readFileSync(tc, 'utf8').split(s.repo).join(path.join(s.root, 'tmp-client')));
+  assert.ok(!JSON.parse(s.run(['discover', '--dry-run', '--json', '--all']).out).some((g) => g.sessions.includes('gs13')));
+});
+
+test('a pick refuses when any log it merges was deleted', () => {
+  const s = sandbox();
+  s.transcript('m14a', 3, onBranch('m14a', 'feat/m'));
+  s.transcript('m14b', 3, onBranch('m14b', 'feat/m'));
+  const la = seedLog(s, { sessions: ['m14a'], title: 'Part one' });
+  const lb = seedLog(s, { sessions: ['m14b'], title: 'Part two' });
+  const did = didOf(s.run(['discover'], { env: reply(topic({ title: 'The whole story', same_as: [la, lb], belongs: [1, 2] })) }).out);
+  s.run(['delete', lb]);
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, new RegExp(`gone \\(${lb}\\)`));
+  assert.match(s.run(['show', la]).out, /^# Part one$/m);
+});
+
+test('an update drops the fields older casebooks kept; a bad --since is not logged as a failure', () => {
+  const s = sandbox();
+  s.transcript('up1', 3, onBranch('up1', 'feat/u'));
+  s.transcript('up2', 3, onBranch('up2', 'feat/u'));
+  const id = seedLog(s, { sessions: ['up1'], partial: true, partial_sessions: ['up1'], scout_mode: 'auto', scouted_at: '2026-01-01T00:00:00.000Z', written_to: ['/x.md'] });
+  assert.strictEqual(discoverPick(s, reply(topic({ title: 'Both halves', same_as: [id], belongs: [1, 2] }))), id);
+  const doc = s.run(['show', id]).out;
+  assert.doesNotMatch(doc, /partial|scout_mode|scouted_at/);
+  assert.match(doc, /written_to: \["\/x\.md"\]/, 'old data is kept as it was');
+
+  const bad = s.run(['discover', '--since', '3 months']);
+  assert.strictEqual(bad.status, 1);
+  const log = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
+  assert.ok(!fs.existsSync(log) || !/command discover failed/.test(fs.readFileSync(log, 'utf8')));
+});
+
+test('a pick checks the project policy again', () => {
+  const s = sandbox();
+  s.transcript('pk16', 3, onBranch('pk16', 'feat/k'));
+  s.transcript('pk16b', 3, onBranch('pk16b', 'feat/k'));
+  const did = didOf(s.run(['discover'], { env: reply(topic({ title: 'Schema change', angle: 'data', belongs: [1, 2] })) }).out);
+  fs.writeFileSync(path.join(s.repo, '.casebook.json'), JSON.stringify({ policy: 'anonymize' }));
+  const p = s.run(['discover', 'pick', did, '1']);
+  assert.strictEqual(p.status, 1);
+  assert.match(p.stderr, /no longer public/);
+  fs.writeFileSync(path.join(s.repo, '.casebook.json'), JSON.stringify({ policy: 'skip' }));
+  assert.match(s.run(['discover', 'pick', did, '1']).stderr, /now set to skip; nothing was logged/);
+});
+
+test('a relative CASEBOOK_HOME resolves to one absolute store', () => {
+  const s = sandbox();
+  const r = s.run(['config'], { env: { CASEBOOK_HOME: 'rel-store' }, cwd: s.root });
+  assert.strictEqual(r.out.split('\n')[0], path.join(fs.realpathSync(s.root), 'rel-store', 'config.json'));
+});
+
+test('tags with regex characters are matched literally and never crash discovery', () => {
+  const s = sandbox();
+  s.transcript('rx', 3);
+  const r = s.run(['discover', '--dry-run', '--tags', 'c(,[slug]']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.out, /0 eligible/);
 });
 
 test('linking: "continuous" is not a continuation; reasons name no repo or branch unless public', () => {
@@ -1265,79 +868,6 @@ test('linking: "continuous" is not a continuation; reasons name no repo or branc
   assert.match(pg.reasons.join(), /acme-corp\/billing\/pull\/12/);
 });
 
-// ---------------------------------------------------------------- topics review, round 5
-
-const slow = (s, args, env) => new Promise((res) => {
-  let out = '';
-  let err = '';
-  const p = spawn(process.execPath, [BIN, ...args], { cwd: s.repo, env: { ...s.env, ...env } });
-  p.stdout.on('data', (d) => { out += d; });
-  p.stderr.on('data', (d) => { err += d; });
-  p.on('close', (code) => res({ code, out: out.trim(), stderr: err }));
-});
-const pause = (ms) => new Promise((r) => setTimeout(r, ms));
-
-test('a mark made while a scout runs is kept; a log changed meanwhile makes the scan run again', async () => {
-  const s = sandbox();
-  const tp = s.transcript('rc', 3);
-  const two = reply(topic({ title: 'Halved p99 latency', angle: 'performance' }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' }));
-  const [a] = JSON.parse(s.run(['scout', '--session', 'rc', '--transcript', tp, '--json'], { env: two }).out).logs.map((l) => l.logId);
-  const before = s.calls().length;
-  const run = slow(s, ['scout', '--session', 'rc', '--transcript', tp, '--json'], { ...two, STUB_DELAY: '1500' });
-  await pause(700);
-  assert.strictEqual(s.run(['mark', '--session', 'rc', 'the', 'backoff', 'decision']).status, 0);
-  assert.strictEqual(s.run(['mark', a, 'direct note']).status, 0);
-  const r = await run;
-  assert.strictEqual(r.code, 0, r.stderr);
-  assert.strictEqual(s.calls().length, before + 2, 'the log changed during the first call, so the scan ran again');
-  assert.match(s.run(['show', a]).out, /"note":"direct note"/, 'the change made meanwhile survives');
-  const marks = JSON.parse(fs.readFileSync(path.join(s.env.CASEBOOK_HOME, 'marks', 'rc.json'), 'utf8'));
-  assert.deepStrictEqual(marks.map((m) => m.note), ['the backoff decision'], 'the mark added meanwhile waits for the next scan');
-});
-
-test('marks that only point at deleted topics stop forcing rescans; a mark of another log is not this session\'s', () => {
-  const s = sandbox();
-  const cmd = (sid, args) => ({ type: 'user', sessionId: sid, cwd: s.repo, message: { role: 'user', content: `<command-name>/casebook:mark</command-name><command-args>${args}</command-args>` } });
-  const A = topic({ title: 'Halved p99 latency', angle: 'performance' });
-  const r = JSON.parse(s.run(['scout', '--session', 'dd', '--transcript', s.transcript('dd', 3), '--json'], { env: reply(A, topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })) }).out);
-  s.run(['delete', r.logs[0].logId]);
-  // The manual scout left the other log partial; the first auto scan that adds nothing finishes it.
-  const calls = s.calls().length;
-  const first = s.run(['scout', '--session', 'dd', '--transcript', s.transcript('dd', 4, [cmd('dd', 'retry storm')]), '--auto'], { env: reply(A) });
-  assert.match(first.out, /ones you deleted/);
-  assert.strictEqual(s.calls().length, calls + 1);
-  assert.match(s.run(['show', r.logs[1].logId]).out, /partial: false/);
-  const again = s.run(['scout', '--session', 'dd', '--transcript', s.transcript('dd', 5, [cmd('dd', 'retry storm')]), '--auto'], { env: reply(A) });
-  assert.match(again.out + again.stderr, /not enough new activity/, JSON.stringify(again));
-  assert.strictEqual(s.calls().length, calls + 1, 'no rescan for a mark already found to point at a deleted topic');
-
-  const tp2 = s.transcript('om', 3, [cmd('om', 'cb-abc123 great example')]);
-  const l = JSON.parse(s.run(['scout', '--session', 'om', '--transcript', tp2, '--auto', '--json']).out).logId;
-  assert.match(s.run(['show', l]).out, /marked: false/);
-});
-
-test('same_as can only name a log shown to the model; one session in two folders does not crash discovery', () => {
-  const s = sandbox();
-  const other = path.join(s.root, 'client-x');
-  fs.mkdirSync(other);
-  const tpx = s.transcript('cx', 3);
-  const moved = fs.readFileSync(tpx, 'utf8').split(s.repo).join(other);
-  const dir = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', other.replace(/[^\w]/g, '-'));
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'cx.jsonl'), moved);
-  fs.rmSync(tpx);
-  const x = JSON.parse(s.run(['scout', '--session', 'cx', '--transcript', path.join(dir, 'cx.jsonl'), '--json'], { env: reply(topic({ title: 'Client billing' })) }).out).logId;
-  const r = JSON.parse(s.run(['scout', '--session', 'mine', '--transcript', s.transcript('mine', 3), '--json'], { env: reply(topic({ title: 'Gateway', same_as: [x] })) }).out);
-  assert.strictEqual(r.status, 'created');
-  assert.match(s.run(['show', x]).out, /^# Client billing$/m, 'the unseen log is untouched');
-
-  const dup = path.join(dir, 'twin.jsonl');
-  fs.writeFileSync(dup, moved.split('"cx"').join('"twin"'));
-  fs.copyFileSync(dup, path.join(path.dirname(s.transcript('twin', 3)), 'twin.jsonl'));
-  const d = s.run(['discover', '--dry-run', '--all']);
-  assert.strictEqual(d.status, 0, d.stderr);
-});
-
 test('a later session naming package.json is not a handoff', () => {
   const { linkSessions } = require('../plugins/casebook/lib/discover');
   const now = Date.now();
@@ -1350,19 +880,6 @@ test('a later session naming package.json is not a handoff', () => {
   assert.strictEqual(linkSessions([sess('a', { files: ['/r/docs/handoff.md'] }), sess('b', { opening: 'read handoff.md and carry on' })]).length, 1);
 });
 
-// ---------------------------------------------------------------- topics review, round 6
-
-test('one session\'s auto scout does not finish a log another running session feeds', () => {
-  const s = sandbox();
-  const a = s.transcript('pa6', 3, onBranch('pa6', 'feat/six'));
-  s.transcript('pb6', 3, onBranch('pb6', 'feat/six'));
-  const la = JSON.parse(s.run(['scout', '--session', 'pa6', '--transcript', a, '--json']).out).logId;
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Both halves', same_as: [la], belongs: [1, 2] })) }).out)[1];
-  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`^Updated ${la}`));
-  s.run(['scout', '--session', 'pa6', '--transcript', a, '--auto']);
-  assert.match(s.run(['show', la]).out, /partial: true/, 'pb6 may still be running');
-});
-
 test('picking a topic never overwrites a title match the discovery did not list', () => {
   const s = sandbox();
   s.transcript('ta6', 3, onBranch('ta6', 'feat/tw'));
@@ -1373,131 +890,6 @@ test('picking a topic never overwrites a title match the discovery did not list'
   const two = s.run(['discover', 'pick', did, '2']);
   assert.match(two.out, /^Created cb-/, two.out);
   assert.match(s.run(['show', one]).out, /^# Redis stream backpressure fix$/m);
-});
-
-test('a pending mark reopens a session whose logs were deleted; note words lose trailing dots', () => {
-  const s = sandbox();
-  const tp = s.transcript('dl6', 3);
-  const id = JSON.parse(s.run(['scout', '--session', 'dl6', '--transcript', tp, '--auto', '--json']).out).logId;
-  s.run(['delete', id]);
-  const calls = s.calls().length;
-  s.run(['scout', '--session', 'dl6', '--transcript', tp, '--auto']);
-  assert.strictEqual(s.calls().length, calls, 'closed after the delete');
-  s.run(['mark', '--session', 'dl6', 'the real story is the cache fix']);
-  s.run(['scout', '--session', 'dl6', '--transcript', tp, '--auto'], { env: reply(topic({ title: 'Cache fix', angle: 'performance' })) });
-  assert.strictEqual(s.calls().length, calls + 1, 'the mark is placed by the next auto scan');
-  assert.ok(logsJson(s).some((l) => l.marked));
-
-  const { keywords } = require('../plugins/casebook/lib/discover');
-  assert.deepStrictEqual(keywords('webhook retries. Also redis.'), ['webhook', 'retries', 'redis']);
-});
-
-// ---------------------------------------------------------------- topics review, round 7
-
-test('the catch-up sweep passes over sessions whose logs were deleted, without crashing', () => {
-  const s = sandbox();
-  const meta = path.join(s.env.CASEBOOK_HOME, 'state', 'meta.json');
-  fs.mkdirSync(path.dirname(meta), { recursive: true });
-  fs.writeFileSync(meta, JSON.stringify({ installedAt: new Date(Date.now() - 86400000).toISOString() }));
-  const id = JSON.parse(s.run(['scout', '--session', 'sw7', '--transcript', s.transcript('sw7', 3), '--auto', '--json']).out).logId;
-  s.run(['delete', id]);
-  s.transcript('sw7', 4);
-  s.transcript('other7', 3);
-  const dry = s.run(['scout', '--pending', '--dry-run', '--json']);
-  assert.strictEqual(dry.status, 0, dry.stderr);
-  assert.deepStrictEqual(JSON.parse(dry.out).map((d) => d.sessionId), ['other7']);
-  s.run(['mark', '--session', 'sw7', 'cache fix']);
-  assert.deepStrictEqual(JSON.parse(s.run(['scout', '--pending', '--dry-run', '--json']).out).map((d) => d.sessionId).sort(), ['other7', 'sw7']);
-});
-
-test('a log is partial per session: the final scan of the session that made it partial finishes it', () => {
-  const s = sandbox();
-  const l = JSON.parse(s.run(['scout', '--session', 'f1', '--transcript', s.transcript('f1', 3), '--auto', '--json']).out).logId;
-  const tp2 = s.transcript('f2', 3);
-  const r = JSON.parse(s.run(['scout', '--session', 'f2', '--transcript', tp2, '--json'], { env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [l] })) }).out);
-  assert.strictEqual(r.logId, l);
-  assert.match(s.run(['show', l]).out, /partial: true/);
-  s.run(['scout', '--session', 'f2', '--transcript', tp2, '--auto']);
-  assert.match(s.run(['show', l]).out, /partial: false/, 'f1 was finished already, f2 is now');
-});
-
-test('a pick refuses when its sessions were logged again since; a reply with no topics logs nothing', () => {
-  const s = sandbox();
-  s.transcript('g1', 3, onBranch('g1', 'feat/g'));
-  const tp = s.transcript('g2', 3, onBranch('g2', 'feat/g'));
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Gateway retries', belongs: [1, 2] })) }).out)[1];
-  const later = JSON.parse(s.run(['scout', '--session', 'g2', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Gateway retry budget' })) }).out).logId;
-  const p = s.run(['discover', 'pick', did, '1']);
-  assert.strictEqual(p.status, 1);
-  assert.match(p.stderr, new RegExp(`logged again since the discovery ran \\(${later}\\)`));
-
-  for (const bad of ['{"topics":null}', '{}', '{"error":"overloaded"}']) {
-    const r = s.run(['scout', '--session', 'nt', '--transcript', s.transcript('nt', 3)], { env: { STUB_TOPICS: bad } });
-    assert.strictEqual(r.out, 'Skipped: the scout found no topic', bad);
-  }
-  assert.strictEqual(logsJson(s).length, 1);
-});
-
-// ---------------------------------------------------------------- topics review, round 8
-
-test('a new angle with a similar title is a new log, and a deleted angle does not block it', () => {
-  const s = sandbox();
-  const tp = s.transcript('an8', 3);
-  const lag = JSON.parse(s.run(['scout', '--session', 'an8', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer lag' })) }).out).logId;
-  const r = JSON.parse(s.run(['scout', '--session', 'an8', '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer restarts', angle: 'reliability' })) }).out);
-  assert.strictEqual(r.status, 'created');
-  assert.notStrictEqual(r.logId, lag);
-  assert.match(s.run(['show', lag]).out, /^# Debugging Redis stream consumer lag$/m);
-  s.run(['delete', r.logId]);
-  const again = JSON.parse(s.run(['scout', '--session', 'an8', '--json'], { env: reply(topic({ title: 'Debugging Redis stream consumer restart', angle: 'architecture' })) }).out);
-  assert.strictEqual(again.status, 'created', 'another angle than the deleted one');
-});
-
-test('a nearby log changing during the model call does not rerun the scan', async () => {
-  const s = sandbox();
-  const near = JSON.parse(s.run(['scout', '--session', 'nb8', '--transcript', s.transcript('nb8', 3), '--auto', '--json'], { env: reply(topic({ title: 'Nearby work', angle: 'data' })) }).out).logId;
-  const tp = s.transcript('mn8', 3);
-  const before = s.calls().length;
-  const run = slow(s, ['scout', '--session', 'mn8', '--transcript', tp, '--json'], { ...reply(topic({ title: 'Own work' })), STUB_DELAY: '1200' });
-  await pause(600);
-  s.run(['mark', near, 'meanwhile']);
-  const r = await run;
-  assert.strictEqual(r.code, 0, r.stderr);
-  assert.strictEqual(s.calls().length, before + 1);
-  assert.match(s.run(['show', near]).out, /"note":"meanwhile"/);
-});
-
-test('scout output labels each log by its own partial state; pick mistakes are not logged as errors', () => {
-  const s = sandbox();
-  const l = JSON.parse(s.run(['scout', '--session', 'q1', '--transcript', s.transcript('q1', 3), '--json']).out).logId;
-  const tp2 = s.transcript('q2', 3);
-  s.run(['scout', '--session', 'q2', '--transcript', tp2, '--auto']);
-  const out = s.run(['scout', '--session', 'q2', '--transcript', s.transcript('q2', 12)], { env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [l] })) }).out;
-  assert.match(out, new RegExp(`Updated ${l} \\(score \\d, partial\\)`), 'q1 is still partial');
-  const p = s.run(['discover', 'pick', 'd-000000', '1']);
-  assert.strictEqual(p.status, 1);
-  const errLog = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
-  assert.ok(!fs.existsSync(errLog) || !/no discovery/.test(fs.readFileSync(errLog, 'utf8')));
-});
-
-// ---------------------------------------------------------------- topics review, round 9
-
-test('a losing topic that retells the same story is dropped; a same-angle claim beats a title match', () => {
-  const s = sandbox();
-  const tp = s.transcript('dp9', 3);
-  const id = JSON.parse(s.run(['scout', '--session', 'dp9', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fix Redis retry storms' })) }).out).logId;
-  const r = JSON.parse(s.run(['scout', '--session', 'dp9', '--json'], {
-    env: reply(topic({ title: 'Fix Redis retry storms', same_as: [id], score: 5 }), topic({ title: 'Fixing the Redis retry storms', same_as: [id], score: 3 })),
-  }).out);
-  assert.deepStrictEqual(r.logs.map((l) => l.status), ['updated']);
-  assert.strictEqual(logsJson(s).length, 1);
-
-  const r2 = JSON.parse(s.run(['scout', '--session', 'dp9', '--json'], {
-    env: reply(topic({ title: 'Fixed Redis retry storm', score: 5 }), topic({ title: 'Redis retry storms after deploys', same_as: [id], score: 4 })),
-  }).out);
-  const upd = r2.logs.find((l) => l.status === 'updated');
-  assert.strictEqual(upd.logId, id);
-  assert.strictEqual(upd.title, 'Redis retry storms after deploys', 'the topic that named the log updates it');
 });
 
 test('a "continue" opening links to the session that ended last, not the one that started last', () => {
@@ -1513,8 +905,6 @@ test('a "continue" opening links to the session that ended last, not the one tha
   const ab = groups.find((g) => g.members.some((m) => m.sessionId === 'B'));
   assert.deepStrictEqual(ab.members.map((m) => m.sessionId).sort(), ['A', 'B']);
 });
-
-// ---------------------------------------------------------------- topics review, round 10
 
 test('a session whose folder is gone keeps its own project; a chain with one anonymized session is anonymized', () => {
   const s = sandbox();
@@ -1543,33 +933,6 @@ test('a session whose folder is gone keeps its own project; a chain with one ano
   assert.match(prompt, /Project: \[anonymized\]/);
 });
 
-test('a bare mark the skill wrote a note for does not come back after unmark', () => {
-  const s = sandbox();
-  const bare = { type: 'user', sessionId: 'bk', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args></command-args>' } };
-  const id = JSON.parse(s.run(['scout', '--session', 'bk', '--transcript', s.transcript('bk', 3), '--auto', '--json']).out).logId;
-  s.run(['mark', '--session', 'bk', '--generated', '--', 'Fixed redis retry storm']);
-  assert.match(s.run(['show', id]).out, /"note":"Fixed redis retry storm"/);
-  s.run(['unmark', id]);
-  const calls = s.calls().length;
-  assert.match(s.run(['scout', '--session', 'bk', '--transcript', s.transcript('bk', 4, [bare]), '--auto']).out, /not enough new activity/);
-  assert.strictEqual(s.calls().length, calls);
-  assert.match(s.run(['show', id]).out, /marked: false/);
-});
-
-test('a scan runs again when another scan of the project created a log meanwhile', async () => {
-  const s = sandbox();
-  const t1 = s.transcript('cc1', 3);
-  const t2 = s.transcript('cc2', 3);
-  const env = { ...reply(topic({ title: 'Fix Redis retry storm' })) };
-  const [a, b] = await Promise.all([
-    slow(s, ['scout', '--session', 'cc1', '--transcript', t1, '--json'], { ...env, STUB_DELAY: '400' }),
-    slow(s, ['scout', '--session', 'cc2', '--transcript', t2, '--json'], { ...env, STUB_DELAY: '1400' }),
-  ]);
-  assert.strictEqual(a.code, 0, a.stderr);
-  assert.strictEqual(b.code, 0, b.stderr);
-  assert.strictEqual(s.calls().length, 3, 'the slower scan looked again with the new log shown');
-});
-
 test('editing requirements.txt or a README in any format is not a handoff', () => {
   const { linkSessions } = require('../plugins/casebook/lib/discover');
   const now = Date.now();
@@ -1584,209 +947,327 @@ test('editing requirements.txt or a README in any format is not a handoff', () =
   assert.strictEqual(linkSessions([sess('a', { files: ['/r/notes/handoff.txt'] }), sess('b', { readFiles: ['/r/notes/handoff.txt'] })]).length, 1);
 });
 
-// ---------------------------------------------------------------- topics review, round 11
+// ---------------------------------------------------------------- profiles: one store, scout runs where claude ran
 
-test('a removed worktree inside its repo stays in the repo\'s project; sessions without a folder are left out', () => {
-  const s = sandbox();
-  const wt = path.join(s.repo, '.claude', 'worktrees', 'feat-x');
-  const tp = s.transcript('wt11', 3);
-  fs.writeFileSync(tp, fs.readFileSync(tp, 'utf8').split(s.repo).join(wt));
-  const r = JSON.parse(s.run(['scout', '--session', 'wt11', '--transcript', tp, '--json']).out);
-  assert.match(s.run(['show', r.logId]).out, /project: "acme-api"/);
-  assert.match(s.run(['show', r.logId]).out, /policy: "public"/);
+function profileSandbox() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'casebook-prof-'));
+  const home = path.join(root, 'home');
+  const cb = path.join(root, 'cb');
+  const dirs = { default: path.join(home, '.claude'), personal: path.join(home, '.claude_personal') };
+  const repo = path.join(root, 'acme-api');
+  fs.mkdirSync(repo, { recursive: true });
+  spawnSync('git', ['-C', repo, 'init', '-q']);
+  spawnSync('git', ['-C', repo, 'remote', 'add', 'origin', 'git@github.com:someone/acme-api.git']);
 
-  const nc = s.transcript('nocwd', 3);
-  fs.writeFileSync(nc, fs.readFileSync(nc, 'utf8').split(`"cwd":${JSON.stringify(s.repo)},`).join(''));
-  const dry = JSON.parse(s.run(['discover', '--dry-run', '--json']).out);
-  assert.ok(!dry.some((g) => g.sessions.includes('nocwd')));
+  const stub = path.join(root, 'fake-claude');
+  fs.writeFileSync(stub, `#!/usr/bin/env node
+const fs=require('fs');const input=fs.readFileSync(0,'utf8');
+if (input.includes('casebook duplicate checker')) { console.log('{"duplicates":[]}'); process.exit(0); }
+if (process.argv.includes('--version')) { console.log('stub 1.0'); process.exit(0); }
+if (process.env.STUB_TOPICS) { console.log(process.env.STUB_TOPICS); process.exit(0); }
+fs.appendFileSync(${JSON.stringify(path.join(root, 'seen-config-dir.log'))}, (process.env.CLAUDE_CONFIG_DIR||'(unset)') + '\\n');
+console.log(JSON.stringify({score:4,title:'T',summary:'s',problem:'p',constraints:[],approach:'a',alternatives:[],outcome:'o',evidence:[],tags:[],quote:'',open_threads:[]}));
+`);
+  fs.chmodSync(stub, 0o755);
+
+  const baseEnv = { ...process.env, HOME: home, CASEBOOK_HOME: cb, CASEBOOK_BIN_DIR: path.join(root, 'bin') };
+  delete baseEnv.CASEBOOK_PROFILE; delete baseEnv.CASEBOOK_SCAN; delete baseEnv.CLAUDE_CONFIG_DIR;
+  const config = JSON.stringify({ defaultPolicy: 'public', scan: { command: stub, minTurns: 2 } });
+  const seedStore = (dir = cb) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'config.json'), config); };
+
+  const run = (args, { configDir, env = {}, input } = {}) => {
+    const e = { ...baseEnv, ...env };
+    if (configDir) e.CLAUDE_CONFIG_DIR = configDir;
+    const r = spawnSync(process.execPath, [BIN, ...args], { encoding: 'utf8', cwd: repo, env: e, input });
+    return { ...r, out: r.stdout.trim() };
+  };
+  const transcript = (configDir, sid, turns = 3, mtime) => {
+    const dir = path.join(configDir, 'projects', repo.replace(/[^\w]/g, '-'));
+    fs.mkdirSync(dir, { recursive: true });
+    const lines = [];
+    for (let i = 0; i < turns; i++) {
+      lines.push({ type: 'user', sessionId: sid, cwd: repo, timestamp: new Date().toISOString(), message: { role: 'user', content: `turn ${i}` } });
+      lines.push({ type: 'assistant', sessionId: sid, cwd: repo, timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } });
+    }
+    const f = path.join(dir, `${sid}.jsonl`);
+    fs.writeFileSync(f, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    if (mtime) fs.utimesSync(f, mtime, mtime);
+    return f;
+  };
+  const seen = () => { try { return fs.readFileSync(path.join(root, 'seen-config-dir.log'), 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } };
+  return { root, home, cb, dirs, repo, run, transcript, seen, seedStore };
+}
+
+test('every profile shares one store; each log records its profile; a scan runs as the account claude ran under', () => {
+  const p = profileSandbox();
+  p.seedStore();
+  p.transcript(p.dirs.personal, 'sp', 3);
+  const r = p.run(['discover', '--json'], { configDir: p.dirs.personal });
+  assert.strictEqual(r.status, 0, r.stderr);
+  const pick = p.run(['discover', 'pick', JSON.parse(r.out).id, '1'], { configDir: p.dirs.personal });
+  const id = pick.out.match(/cb-[a-z0-9]{6}/)[0];
+  assert.ok(p.run(['list']).out.includes(id), 'a log made in personal is listed from the default profile');
+  assert.deepStrictEqual(p.seen(), [p.dirs.personal], 'billed to the profile the session ran under');
+  assert.match(fs.readFileSync(p.run(['show', id, '--path']).out, 'utf8'), /profile: "personal"/);
+  assert.ok(fs.existsSync(path.join(p.cb, 'logs', 'acme-api', `${id}.md`)));
+
+  p.transcript(p.dirs.default, 'sd', 3);
+  const d = JSON.parse(p.run(['discover', '--json']).out);
+  assert.strictEqual(p.run(['discover', 'pick', d.id, '1']).status, 0);
+  assert.strictEqual(p.seen()[1], '(unset)', 'default profile with no CLAUDE_CONFIG_DIR keeps it unset for the child');
+  assert.strictEqual(JSON.parse(p.run(['list', '--json'], { configDir: p.dirs.personal }).out).length, 2);
+  assert.strictEqual(JSON.parse(p.run(['list', '--json']).out).length, 2);
+  assert.deepStrictEqual(fs.readdirSync(p.cb).filter((n) => !['logs', 'state', 'config.json', 'casebook.log'].includes(n)), [], 'no per-profile folders');
 });
 
-test('a note with only a score threshold does not filter by fit; a pick counts its sessions as scanned', () => {
-  const s = sandbox();
-  s.transcript('th1', 3);
-  const r = s.run(['discover', '--note', 'find anything that scores > 3', '--min-score', '4'], { env: { STUB_FIT: '0' } });
-  assert.match(r.out, /^Discovery d-/, r.out);
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
-  // Settled by now, so the pick finishes it and records its size.
-  const old = new Date(Date.now() - 3600000);
-  for (const d of fs.readdirSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects'))) {
-    const f = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', d, 'th1.jsonl');
-    if (fs.existsSync(f)) fs.utimesSync(f, old, old);
+test('transcripts are read from the config dir claude ran under', () => {
+  const p = profileSandbox();
+  p.seedStore();
+  p.transcript(p.dirs.personal, 'mine', 3);
+  p.transcript(p.dirs.default, 'other-profile', 3);
+  const sids = (configDir) => JSON.parse(p.run(['discover', '--dry-run', '--json'], { configDir }).out).flatMap((g) => g.sessions);
+  assert.deepStrictEqual(sids(p.dirs.personal), ['mine']);
+  assert.deepStrictEqual(sids(undefined), ['other-profile']);
+  assert.deepStrictEqual(p.seen(), [], 'a dry run makes no model call');
+});
+
+test('profile names come from the config dir', () => {
+  const p = profileSandbox();
+  const nameOf = (configDir) => p.run(['doctor'], { configDir }).out.match(/^profile +(\S+)$/m)[1];
+  assert.strictEqual(nameOf(undefined), 'default');
+  assert.strictEqual(nameOf('~/.claude'), 'default');
+  assert.strictEqual(nameOf(p.dirs.default + '/'), 'default');
+  assert.strictEqual(nameOf(p.dirs.personal), 'personal');
+  assert.strictEqual(nameOf(path.join(p.home, '.claude-work')), 'work');
+  assert.strictEqual(nameOf('/opt/cc/work-cfg'), 'work-cfg');
+  assert.strictEqual(nameOf('/opt/cc/.dotted'), 'dotted');
+  const real = path.join(p.root, 'real-claude');
+  fs.mkdirSync(real);
+  fs.mkdirSync(p.home, { recursive: true });
+  fs.symlinkSync(real, p.dirs.default);
+  assert.strictEqual(nameOf(real), 'default', 'a symlinked ~/.claude is still default');
+  const doc = p.run(['doctor'], { configDir: p.dirs.personal }).out;
+  assert.match(doc, new RegExp(`^config dir +${p.dirs.personal}$`, 'm'));
+  assert.match(doc, new RegExp(`^store +${p.cb}$`, 'm'));
+});
+
+test('doctor probes claude the way a scan runs it', () => {
+  const p = profileSandbox();
+  p.seedStore();
+  assert.match(p.run(['doctor']).out, /CLAUDE_CONFIG_DIR left unset/);
+  assert.match(p.run(['doctor'], { configDir: p.dirs.personal }).out, /CLAUDE_CONFIG_DIR set\)/);
+});
+
+test('--profile is gone and says what to do instead', () => {
+  const p = profileSandbox();
+  const r = p.run(['list', '--profile', 'personal']);
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /every profile shares one store.*CLAUDE_CONFIG_DIR/);
+  assert.strictEqual(p.run(['help', '--profile', 'x']).status, 0);
+});
+
+test('old per-profile stores are merged into the one store', () => {
+  const p = profileSandbox();
+  // Build two stores the old way: ~/.casebook/<profile>/ with a profile.json.
+  const old = {};
+  for (const [name, dir] of [['default', p.dirs.default], ['personal', p.dirs.personal]]) {
+    const store = path.join(p.cb, name);
+    p.seedStore(store);
+    p.transcript(dir, `s-${name}`, 3);
+    const opts = { configDir: dir, env: { CASEBOOK_HOME: store } };
+    const d = JSON.parse(p.run(['discover', '--json'], opts).out);
+    const r = { logId: p.run(['discover', 'pick', d.id, '1'], opts).out.match(/cb-[a-z0-9]{6}/)[0] };
+    p.run(['mark', r.logId, `note ${name}`], opts);
+    p.run(['mark', '--session', `pending-${name}`, 'waiting'], opts);
+    fs.writeFileSync(path.join(store, 'profile.json'), JSON.stringify({ name, claudeConfigDir: dir }));
+    fs.mkdirSync(path.join(store, 'case-studies'), { recursive: true });
+    fs.writeFileSync(path.join(store, 'case-studies', 'x.md'), name);
+    old[name] = r.logId;
   }
-  s.run(['discover', 'pick', did, '1']);
-  const dir = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions');
-  const ledger = fs.readdirSync(dir).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))).find((l) => l.sessionId === 'th1');
-  assert.strictEqual(ledger.userTurns, 3);
-  assert.ok(ledger.size > 0);
-});
+  fs.writeFileSync(path.join(p.cb, 'personal', 'config.json'), JSON.stringify({ defaultPolicy: 'skip', projects: [{ match: '*/client-x/*', policy: 'skip' }] }));
 
-// ---------------------------------------------------------------- topics review, round 12
-
-test('the final scan settles every log the session fed, also those no topic names', () => {
-  const s = sandbox();
-  const tp = s.transcript('fz', 3);
-  const r = JSON.parse(s.run(['scout', '--session', 'fz', '--transcript', tp, '--live', '--json'], {
-    env: reply(topic({ title: 'Halved p99 latency', angle: 'performance' }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })),
-  }).out);
-  const [a, b] = r.logs.map((l) => l.logId);
-  s.run(['scout', '--session', 'fz', '--transcript', s.transcript('fz', 12), '--auto'], { env: reply(topic({ title: 'Halved p99 latency', angle: 'performance', same_as: [a] })) });
-  assert.match(s.run(['show', a]).out, /partial: false/);
-  assert.match(s.run(['show', b]).out, /partial: false/);
-});
-
-test('discovery updates a same-title log of its own sessions; a gone folder outside a worktree borrows no repo', () => {
-  const s = sandbox();
-  const tp = s.transcript('tt1', 3, onBranch('tt1', 'feat/t'));
-  s.transcript('tt2', 3, onBranch('tt2', 'feat/t'));
-  const id = JSON.parse(s.run(['scout', '--session', 'tt1', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fix Redis retry storm' })) }).out).logId;
-  const r = s.run(['discover'], { env: reply(topic({ title: 'Fixing Redis retry storms', belongs: [1, 2] })) });
-  assert.match(r.out, new RegExp(`updates: ${id}`), r.out);
-
-  const clone = path.join(s.repo, 'tmp', 'client-api');
-  const tc = s.transcript('cl12', 3);
-  fs.writeFileSync(tc, fs.readFileSync(tc, 'utf8').split(s.repo).join(clone));
-  const l = JSON.parse(s.run(['scout', '--session', 'cl12', '--transcript', tc, '--json']).out).logId;
-  const doc = s.run(['show', l]).out;
-  assert.match(doc, /project: "client-api"/);
-  assert.match(doc, /policy: "anonymize"/);
-});
-
-// ---------------------------------------------------------------- topics review, round 13
-
-test('a branch name links sessions of one repository only; an exact title of another angle is a new log', () => {
-  const { linkSessions } = require('../plugins/casebook/lib/discover');
-  const now = Date.now();
-  const sess = (id, o) => ({
-    sessionId: id, project: 'api', policy: 'anonymize', branch: 'feature/auth', prUrls: [], files: [], readFiles: [], opening: '',
-    startedAt: new Date(now - (id === 'a' ? 48 : 1) * 3600000).toISOString(), endedAt: new Date(now - (id === 'a' ? 47 : 0) * 3600000).toISOString(), ...o,
-  });
-  assert.strictEqual(linkSessions([sess('a', { repo: 'github.com/me/api' }), sess('b', { repo: 'github.com/client/api' })]).length, 2);
-  assert.strictEqual(linkSessions([sess('a', { repo: 'github.com/me/api' }), sess('b', { repo: 'github.com/me/api' })]).length, 1);
-
-  const s = sandbox();
-  const tp = s.transcript('ex13', 3);
-  const arch = JSON.parse(s.run(['scout', '--session', 'ex13', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Moving queue retries to Redis streams', angle: 'architecture' })) }).out).logId;
-  const r = JSON.parse(s.run(['scout', '--session', 'ex13', '--json'], { env: reply(topic({ title: 'Moving queue retries to Redis streams', angle: 'debugging' })) }).out);
-  assert.strictEqual(r.status, 'created');
-  assert.match(s.run(['show', arch]).out, /angle: "architecture"/);
-});
-
-test('a gone folder is skipped under a skip default; each bare mark recorded accounts for one transcript mark', () => {
-  const s = sandbox();
-  const cfg = path.join(s.env.CASEBOOK_HOME, 'config.json');
-  fs.writeFileSync(cfg, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfg, 'utf8')), defaultPolicy: 'skip' }));
-  const tc = s.transcript('gs13', 3);
-  fs.writeFileSync(tc, fs.readFileSync(tc, 'utf8').split(s.repo).join(path.join(s.root, 'tmp-client')));
-  assert.match(s.run(['scout', '--session', 'gs13', '--transcript', tc]).out, /policy is skip/);
-
-  const bare = { type: 'user', sessionId: 'bm13', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args></command-args>' } };
-  const id = JSON.parse(s.run(['scout', '--session', 'bm13', '--transcript', s.transcript('bm13', 3), '--auto', '--json']).out).logId;
-  s.run(['mark', '--session', 'bm13', '--generated', '--', 'first bare mark']);
-  // Two bare marks in the transcript, but casebook mark recorded only one: the other is the fallback.
-  s.run(['scout', '--session', 'bm13', '--transcript', s.transcript('bm13', 4, [bare, bare]), '--auto']);
-  const marks = JSON.parse(/marks: (\[.*\])/.exec(s.run(['show', id]).out)[1]);
-  assert.deepStrictEqual(marks.map((m) => m.note).sort(), ['', 'first bare mark']);
-});
-
-// ---------------------------------------------------------------- topics review, round 14
-
-const ledgerOf = (s, sid) => {
-  const dir = path.join(s.env.CASEBOOK_HOME, 'state', 'sessions');
-  return fs.readdirSync(dir).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))).find((l) => l.sessionId === sid);
-};
-
-test('a generated bare mark is counted once; a quoted mark matches its stored note', () => {
-  const s = sandbox();
-  s.run(['mark', '--session', 'nolog14', '--generated', '--', 'the cache fix']);
-  assert.strictEqual(ledgerOf(s, 'nolog14').bareMarks, 1);
-
-  const quoted = { type: 'user', sessionId: 'q14', cwd: s.repo, message: { role: 'user', content: '<command-name>/casebook:mark</command-name><command-args>"the queue redesign"</command-args>' } };
-  const id = JSON.parse(s.run(['scout', '--session', 'q14', '--transcript', s.transcript('q14', 3), '--auto', '--json']).out).logId;
-  s.run(['mark', '--session', 'q14', '--', 'the queue redesign']);
-  const calls = s.calls().length;
-  assert.match(s.run(['scout', '--session', 'q14', '--transcript', s.transcript('q14', 4, [quoted]), '--auto']).out, /not enough new activity/);
-  assert.strictEqual(s.calls().length, calls);
-  const marks = JSON.parse(/marks: (\[.*\])/.exec(s.run(['show', id]).out)[1]);
-  assert.deepStrictEqual(marks.map((m) => m.note), ['the queue redesign']);
-});
-
-test('a pick refuses when any log it merges was deleted; a session with no folder is never the caller\'s project', () => {
-  const s = sandbox();
-  const a = s.transcript('m14a', 3, onBranch('m14a', 'feat/m'));
-  const b = s.transcript('m14b', 3, onBranch('m14b', 'feat/m'));
-  const la = JSON.parse(s.run(['scout', '--session', 'm14a', '--transcript', a, '--json'], { env: reply(topic({ title: 'Part one' })) }).out).logId;
-  const lb = JSON.parse(s.run(['scout', '--session', 'm14b', '--transcript', b, '--json'], { env: reply(topic({ title: 'Part two' })) }).out).logId;
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'The whole story', same_as: [la, lb], belongs: [1, 2] })) }).out)[1];
-  s.run(['delete', lb]);
-  const p = s.run(['discover', 'pick', did, '1']);
-  assert.strictEqual(p.status, 1);
-  assert.match(p.stderr, new RegExp(`gone \\(${lb}\\)`));
-  assert.match(s.run(['show', la]).out, /^# Part one$/m);
-
-  const nc = s.transcript('nc14', 3);
-  fs.writeFileSync(nc, fs.readFileSync(nc, 'utf8').split(`"cwd":${JSON.stringify(s.repo)},`).join(''));
-  const l = JSON.parse(s.run(['scout', '--session', 'nc14', '--transcript', nc, '--json']).out).logId;
-  const doc = s.run(['show', l]).out;
-  assert.match(doc, /project: "unknown"/);
-  assert.match(doc, /policy: "anonymize"/);
-});
-
-// ---------------------------------------------------------------- topics review, round 15
-
-test('a log deleted while its session is being scanned stays deleted', async () => {
-  const s = sandbox();
-  const tp = s.transcript('dl15', 3);
-  const x = JSON.parse(s.run(['scout', '--session', 'dl15', '--transcript', tp, '--json']).out).logId;
-  const run = slow(s, ['scout', '--session', 'dl15', '--transcript', tp, '--json'], { STUB_DELAY: '1200' });
-  await pause(600);
-  s.run(['delete', x]);
-  const r = await run;
-  assert.strictEqual(r.code, 0, r.stderr);
-  assert.match(r.out, /"status":"skipped"/);
-  assert.strictEqual(logsJson(s).length, 0);
-});
-
-test('a rescan from a folder that is gone keeps the log\'s project; a bad --since is not logged as a failure', () => {
-  const s = sandbox();
-  const tp = s.transcript('gk15', 3);
-  const id = JSON.parse(s.run(['scout', '--session', 'gk15', '--transcript', tp, '--json']).out).logId;
-  fs.writeFileSync(tp, fs.readFileSync(tp, 'utf8').split(s.repo).join(path.join(s.root, 'acme-api-feature')));
-  s.run(['scout', '--session', 'gk15', '--transcript', tp, '--json'], { env: reply(topic({ title: 'Fixed websocket reconnect storms', same_as: [id] })) });
-  const doc = s.run(['show', id]).out;
-  assert.match(doc, /project: "acme-api"/);
-  assert.match(doc, /repo: "github.com\/someone\/acme-api"/);
-  assert.match(doc, /policy: "anonymize"/, 'only ever stricter');
-
-  const bad = s.run(['discover', '--since', '3 months']);
-  assert.strictEqual(bad.status, 1);
-  const log = path.join(s.env.CASEBOOK_HOME, 'casebook.log');
-  assert.ok(!fs.existsSync(log) || !/command discover failed/.test(fs.readFileSync(log, 'utf8')));
-});
-
-// ---------------------------------------------------------------- topics review, round 16
-
-test('a pick settles only the logs it writes, and checks the project policy again', () => {
-  const s = sandbox();
-  const tp = s.transcript('pk16', 3, onBranch('pk16', 'feat/k'));
-  s.transcript('pk16b', 3, onBranch('pk16b', 'feat/k'));
-  const r = JSON.parse(s.run(['scout', '--session', 'pk16', '--transcript', tp, '--live', '--json'], {
-    env: reply(topic({ title: 'Halved p99 latency', angle: 'performance' }), topic({ title: 'Moved queues to Redis Streams', angle: 'architecture' })),
-  }).out);
-  const [l1, l2] = r.logs.map((l) => l.logId);
-  const old = new Date(Date.now() - 3600000);
-  for (const d of fs.readdirSync(path.join(s.env.CLAUDE_CONFIG_DIR, 'projects'))) {
-    for (const n of ['pk16.jsonl', 'pk16b.jsonl']) { const f = path.join(s.env.CLAUDE_CONFIG_DIR, 'projects', d, n); if (fs.existsSync(f)) fs.utimesSync(f, old, old); }
+  const logs = JSON.parse(p.run(['list', '--json']).out);
+  assert.deepStrictEqual(logs.map((l) => l.id).sort(), [old.default, old.personal].sort());
+  assert.ok(logs.every((l) => l.marked));
+  for (const id of Object.values(old)) assert.ok(fs.existsSync(path.join(p.cb, 'logs', 'acme-api', `${id}.md`)));
+  const merged = JSON.parse(fs.readFileSync(path.join(p.cb, 'config.json'), 'utf8'));
+  assert.strictEqual(merged.defaultPolicy, 'skip', 'the strictest default policy wins');
+  assert.deepStrictEqual(merged.projects[0], { match: '*/client-x/*', policy: 'skip' }, 'another profile\'s privacy rules are kept, first');
+  assert.ok(merged.scan.command, 'the default profile\'s scan settings stay');
+  assert.ok(fs.existsSync(path.join(p.cb, 'personal', 'config.json')), 'kept for a 0.2 process still running');
+  for (const name of ['default', 'personal']) {
+    assert.ok(fs.existsSync(path.join(p.cb, name, 'profile.migrated.json')));
+    assert.ok(!fs.existsSync(path.join(p.cb, name, 'profile.json')));
+    assert.strictEqual(fs.readFileSync(path.join(p.cb, name, 'case-studies', 'x.md'), 'utf8'), name, 'case studies stay put');
+    assert.ok(!fs.existsSync(path.join(p.cb, name, 'logs')));
   }
-  const did = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Halved p99 latency across both', angle: 'performance', same_as: [l1], belongs: [1, 2] })) }).out)[1];
-  assert.match(s.run(['discover', 'pick', did, '1']).out, new RegExp(`^Updated ${l1}`));
-  assert.match(s.run(['show', l1]).out, /partial: false/);
-  assert.match(s.run(['show', l2]).out, /partial: true/, 'not touched by the pick: its own final scan settles it');
+  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /merged profile store "personal".*default policy and 1 project rule\(s\) were merged/);
+  // Pending marks and discoveries come along.
+  for (const name of ['default', 'personal']) assert.ok(fs.existsSync(path.join(p.cb, 'marks', `pending-${name}.json`)));
+  assert.strictEqual(fs.readdirSync(path.join(p.cb, 'state', 'discoveries')).length, 2);
+});
 
-  const did2 = /Discovery (d-[a-z0-9]{6})/.exec(s.run(['discover'], { env: reply(topic({ title: 'Schema change', angle: 'data', belongs: [1, 2] })) }).out)[1];
-  fs.writeFileSync(path.join(s.repo, '.casebook.json'), JSON.stringify({ policy: 'anonymize' }));
-  const p = s.run(['discover', 'pick', did2, '1']);
-  assert.strictEqual(p.status, 1);
-  assert.match(p.stderr, /no longer public/);
+test('a session in two stores keeps the marks and deleted topics of both; a log with the same ID is left behind', () => {
+  const p = profileSandbox();
+  p.seedStore();
+  const store = path.join(p.cb, 'work');
+  const put = (base, rel, data) => { const f = path.join(base, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, typeof data === 'string' ? data : JSON.stringify(data)); };
+  put(store, 'marks/dup.json', [{ at: '1', note: 'old' }, { at: '2', note: 'both' }]);
+  put(p.cb, 'marks/dup.json', [{ at: '2', note: 'both' }, { at: '3', note: 'new' }]);
+  put(store, 'state/sessions/dup.json', { sessionId: 'dup', deletedTopics: [{ id: 'cb-aaaaaa', title: 'A' }] });
+  put(p.cb, 'state/sessions/dup.json', { sessionId: 'dup', deletedTopics: [{ id: 'cb-bbbbbb', title: 'B' }] });
+  put(store, 'logs/acme-api/cb-same01.md', 'old');
+  put(p.cb, 'logs/acme-api/cb-same01.md', 'new');
+  put(store, 'profile.json', '{}');
+  assert.strictEqual(p.run(['list']).status, 0);
+  const read = (rel) => JSON.parse(fs.readFileSync(path.join(p.cb, rel), 'utf8'));
+  assert.deepStrictEqual(read('marks/dup.json').map((m) => m.note), ['both', 'new', 'old']);
+  assert.deepStrictEqual(read('state/sessions/dup.json').deletedTopics.map((t) => t.id), ['cb-bbbbbb', 'cb-aaaaaa']);
+  assert.ok(!fs.existsSync(path.join(store, 'marks', 'dup.json')));
+  assert.strictEqual(fs.readFileSync(path.join(p.cb, 'logs/acme-api/cb-same01.md'), 'utf8'), 'new', 'never overwritten');
+  assert.strictEqual(fs.readFileSync(path.join(store, 'left-behind/logs/acme-api/cb-same01.md'), 'utf8'), 'old', 'set aside');
+  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /1 file\(s\) already present .* were set aside in/);
+  // A 0.2 process still running saves into the merged store: the next run merges that too.
+  seedLog({ env: { CASEBOOK_HOME: store } }, { id: 'cb-late02' });
+  assert.ok(JSON.parse(p.run(['list', '--json']).out).some((l) => l.id === 'cb-late02'));
+  assert.ok(fs.existsSync(path.join(store, 'profile.migrated.json')));
+});
+
+test('discovery skill: scans this session too, and passes --force on', () => {
+  const skill = fs.readFileSync(path.resolve(__dirname, '../plugins/casebook/skills/discovery/SKILL.md'), 'utf8');
+  assert.doesNotMatch(skill, /--exclude/);
+  assert.match(skill, /argument-hint: .*\[--force\]/);
+  assert.match(skill, /`--force` pass through/);
+  const { logSummary } = require('../plugins/casebook/lib/util');
+  assert.strictEqual(logSummary('# T\n\n\n## Problem\np'), '', 'an empty summary is not the Problem section');
+});
+
+test('an untouched config of another profile adds no rules, but its default policy still counts', () => {
+  const p = profileSandbox();
+  const put = (name, cfg) => { const d = path.join(p.cb, name); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify(cfg)); fs.writeFileSync(path.join(d, 'profile.json'), '{}'); };
+  const mine = { defaultPolicy: 'public', projects: [{ match: 'github.com/me/oss', policy: 'public' }, { match: 'github.com/me/*', policy: 'anonymize' }] };
+  put('default', mine);
+  put('personal', require('../plugins/casebook/lib/util').DEFAULT_CONFIG);
+  assert.strictEqual(p.run(['list']).status, 0);
+  const c = JSON.parse(fs.readFileSync(path.join(p.cb, 'config.json'), 'utf8'));
+  assert.deepStrictEqual(c.projects, mine.projects);
+  assert.strictEqual(c.defaultPolicy, 'anonymize', 'the strictest default policy wins');
+});
+
+test('a store a 0.2 process recreates is merged again, but its config only once', () => {
+  const p = profileSandbox();
+  p.seedStore();
+  const d = path.join(p.cb, 'work');
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify({ projects: [{ match: 'github.com/me/*', policy: 'anonymize' }] }));
+  fs.writeFileSync(path.join(d, 'profile.json'), '{}');
+  assert.strictEqual(p.run(['list']).status, 0);
+  const file = path.join(p.cb, 'config.json');
+  const c = JSON.parse(fs.readFileSync(file, 'utf8'));
+  c.projects = c.projects.map((r) => (r.match === 'github.com/me/*' ? { ...r, policy: 'public' } : r));
+  fs.writeFileSync(file, JSON.stringify(c));
+  fs.writeFileSync(path.join(d, 'profile.json'), '{}');
+  seedLog({ env: { CASEBOOK_HOME: d } }, { id: 'cb-late01' });
+  assert.ok(JSON.parse(p.run(['list', '--json']).out).some((l) => l.id === 'cb-late01'), 'the new log is merged');
+  assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).projects.find((r) => r.match === 'github.com/me/*').policy, 'public', 'the user\'s edit stays');
+});
+
+test('a store linked from elsewhere is merged; a config that fails to merge keeps its store for the next run', () => {
+  const p = profileSandbox();
+  p.seedStore();
+  const far = path.join(p.root, 'synced', 'personal');
+  seedLog({ env: { CASEBOOK_HOME: far } }, { id: 'cb-link01' });
+  fs.writeFileSync(path.join(far, 'profile.json'), '{}');
+  fs.symlinkSync(far, path.join(p.cb, 'personal'));
+  assert.ok(JSON.parse(p.run(['list', '--json']).out).some((l) => l.id === 'cb-link01'));
+
+  const d = path.join(p.cb, 'work');
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'config.json'), '{ "projects": [ { "match": "*/client/*", "policy": "skip" }, ] }');
+  fs.writeFileSync(path.join(d, 'profile.json'), '{}');
+  assert.strictEqual(p.run(['list']).status, 0);
+  assert.ok(fs.existsSync(path.join(d, 'profile.json')), 'not marked merged');
+  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /"work": its config\.json could not be merged/);
+  fs.writeFileSync(path.join(d, 'config.json'), '{ "projects": [ { "match": "*/client/*", "policy": "skip" } ] }');
+  assert.strictEqual(p.run(['list']).status, 0);
+  assert.ok(JSON.parse(fs.readFileSync(path.join(p.cb, 'config.json'), 'utf8')).projects.some((r) => r.match === '*/client/*' && r.policy === 'skip'));
+});
+
+test('merging configs never loosens a rule: one rule per pattern, the strictest, skip first', () => {
+  const p = profileSandbox();
+  const put = (name, cfg) => { const d = path.join(p.cb, name); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify(cfg)); fs.writeFileSync(path.join(d, 'profile.json'), '{}'); };
+  put('default', { projects: [{ match: 'github.com/acme/*', policy: 'skip' }, { match: 'github.com/me/*', policy: 'public' }] });
+  put('personal', { projects: [{ match: 'github.com/acme/*', policy: 'anonymize' }, { match: '*', policy: 'anonymize' }], scout: { command: '/opt/claude' } });
+  assert.strictEqual(p.run(['list']).status, 0);
+  const c = JSON.parse(fs.readFileSync(path.join(p.cb, 'config.json'), 'utf8'));
+  assert.deepStrictEqual(c.projects.map((r) => `${r.match}:${r.policy}`), ['github.com/acme/*:skip', '*:anonymize', 'github.com/me/*:public']);
+  assert.match(fs.readFileSync(path.join(p.cb, 'casebook.log'), 'utf8'), /its scan settings were not used/);
+});
+
+test('casebook\'s own commands are not turns of the session', () => {
+  const { condense } = require('../plugins/casebook/lib/transcript');
+  const line = (text) => JSON.stringify({ type: 'user', sessionId: 'c', timestamp: '2026-11-01T00:00:00Z', message: { role: 'user', content: text } });
+  const said = (text) => JSON.stringify({ type: 'assistant', sessionId: 'c', timestamp: '2026-11-01T00:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text }] } });
+  const raw = [line('fix the bug'), said('fixed it'), line('<command-name>/casebook:show</command-name><command-args>cb-aaaaaa</command-args>'),
+    said('Other session story'), line('<command-name>/review</command-name>'), said('reviewed'), line('now the tests'), said('tests added')].join('\n');
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cbt-')), 'c.jsonl');
+  fs.writeFileSync(f, raw);
+  const c = condense(f);
+  assert.strictEqual(c.userTurns, 3);
+  assert.doesNotMatch(c.text, /Other session story|casebook:show/, 'what a casebook command printed is not this session\'s work');
+  assert.match(c.text, /fixed it[\s\S]*reviewed[\s\S]*tests added/);
+
+  // Casebook calls the model makes are not work, nor files in the store; the work around them is.
+  const tools = (...content) => JSON.stringify({ type: 'assistant', sessionId: 'c', timestamp: '2026-11-01T00:00:00Z', message: { role: 'assistant', content } });
+  const use = (name, input) => ({ type: 'tool_use', name, input });
+  const raw2 = [line('check the list, then fix the retry bug'), tools(use('Bash', { command: 'casebook list' }), use('Skill', { skill: 'casebook:show' }),
+    use('Write', { file_path: path.join(os.homedir(), '.casebook', 'handoffs', 'x.md') })), said('cb-aaaaaa: another session story'),
+    tools(use('Edit', { file_path: '/repo/retry.js' }), { type: 'text', text: 'fixing retries' })].join('\n');
+  fs.writeFileSync(f, raw2);
+  const c2 = condense(f);
+  assert.doesNotMatch(c2.text, /casebook list|casebook:show|handoffs|another session story/);
+  fs.writeFileSync(f, tools(use('Bash', { command: 'cd ~/proj && CASEBOOK_HOME=/x casebook list --all' }), use('Bash', { command: 'casebook-lint .' }), use('Bash', { command: 'grep -rn casebook lib' })));
+  assert.deepStrictEqual(condense(f).text.split('\n'), ['  [Bash] casebook-lint .', '  [Bash] grep -rn casebook lib']);
+  fs.writeFileSync(f, tools(use('Bash', { command: 'node "$CLAUDE_PLUGIN_ROOT/bin/casebook" list' }), use('Bash', { command: ' ~/.local/bin/casebook show cb-x' })));
+  assert.strictEqual(condense(f).text, '');
+  // A topic number typed in answer to a discovery is not a turn; a mark's reply is still work.
+  fs.writeFileSync(f, [line('<command-name>/casebook:discovery</command-name>'), said('1. topic'), line('1'), said('Created cb-x'),
+    line('<command-name>/casebook:mark</command-name>'), said('marked, carrying on with the fix')].join('\n'));
+  assert.strictEqual(condense(f).userTurns, 0);
+  assert.deepStrictEqual(condense(f).text.split('\n'), ['CLAUDE: marked, carrying on with the fix']);
+  // A discovery's pick (AskUserQuestion) and what it prints stay casebook's; the next typed turn is the session's,
+  // even with no tool call after it.
+  const ask = (q) => tools(use('AskUserQuestion', { questions: [{ question: q }] }));
+  fs.writeFileSync(f, [line('<command-name>/casebook:discovery</command-name>'), tools(use('Bash', { command: 'casebook discover' })), ask('Which topic?'),
+    tools(use('Bash', { command: 'casebook discover pick d-aaaaaa 1' })), said('Created cb-aaaaaa: OTHER PROJECT STORY'),
+    line('shard by tenant or region? 40k tenants'), said('By tenant: p99 stays flat')].join('\n'));
+  const h = condense(f);
+  assert.strictEqual(h.userTurns, 1);
+  assert.deepStrictEqual(h.text.split('\n'), ['USER: shard by tenant or region? 40k tenants', 'CLAUDE: By tenant: p99 stays flat']);
+
+  assert.match(c2.text, /fixing retries/);
+  assert.deepStrictEqual(c2.files, ['/repo/retry.js']);
+});
+
+test('marketplace is named kinbasco-plugins', () => {
+  const m = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../.claude-plugin/marketplace.json'), 'utf8'));
+  assert.strictEqual(m.name, 'kinbasco-plugins');
+});
+
+test('handoff skill: reads handoff.md, thin writes nothing, stays inside casebook', () => {
+  const root = path.resolve(__dirname, '../plugins/casebook');
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
+  const hint = (doc) => doc.match(/^argument-hint: (.+)$/m)[1];
+  const skill = read('skills/handoff/SKILL.md');
+
+  assert.match(hint(skill), /^"<log-id> \[<log-id>…\] \[--out <dir>\]/);
+  assert.match(skill, /\$\{CLAUDE_PLUGIN_ROOT\}\/handoff\.md/);
+  assert.ok(fs.existsSync(path.join(root, 'handoff.md')), 'the checks it reads ship with the plugin');
+  for (const id of ['E-1', 'E-2', 'E-3', 'E-4', 'A-1', 'A-2', 'A-3']) assert.match(read('handoff.md'), new RegExp(`\\| ${id} \\|`));
+  assert.match(skill, /Nothing was written/);
+  assert.match(skill, /casebook out-path --project/);
+  assert.doesNotMatch(skill, /casebook written|\/casebook:write|\/casebook:scout/);
+  assert.doesNotMatch(skill, /\/porch:|mcp__plugin_porch/, 'a plugin never points at another plugin');
 });
 
 // ---------- link: ~/.local/bin/casebook ----------

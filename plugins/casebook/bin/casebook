@@ -4,18 +4,26 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn, spawnSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const U = require('../lib/util');
 const store = require('../lib/store');
 const { resolveProject } = require('../lib/project');
-const { scoutSession, sweep } = require('../lib/scout');
 const F = require('../lib/filter');
 const D = require('../lib/discover');
 const T = require('../lib/topics');
 const L = require('../lib/link');
 
-const BOOL = new Set(['all', 'marked', 'unmarked', 'written', 'unwritten', 'json', 'path', 'yes', 'force', 'dry-run', 'help', 'handoff',
-  'auto', 'live', 'pending', 'background', 'quiet', 'generated']);
+const BOOL = new Set(['all', 'marked', 'unmarked', 'json', 'path', 'yes', 'force', 'dry-run', 'help', 'handoff']);
+const REMOVED = {
+  written: 'casebook no longer tracks write-ups',
+  unwritten: 'casebook no longer tracks write-ups',
+  pending: 'the scout is gone; /casebook:discovery makes every log',
+  generated: 'marks are always yours now',
+  live: 'the scout is gone; /casebook:discovery makes every log',
+  background: 'the scout is gone; /casebook:discovery makes every log',
+  auto: 'the scout is gone; /casebook:discovery makes every log',
+  quiet: 'the scout is gone; /casebook:discovery makes every log',
+};
 
 function parseArgs(argv) {
   const pos = [];
@@ -25,6 +33,8 @@ function parseArgs(argv) {
     if (a === '--') { pos.push(...argv.slice(i + 1)); break; }
     if (a.startsWith('--')) {
       const [k, inline] = a.slice(2).split(/=(.*)/s);
+      // Flags of older casebooks fail loudly: silently ignoring a filter would widen a batch delete.
+      if (Object.hasOwn(REMOVED, k)) fail(`--${k} was removed in 0.3: ${REMOVED[k]}`);
       const key = k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       if (inline !== undefined) opt[key] = inline;
       else if (BOOL.has(k)) opt[key] = true;
@@ -43,23 +53,6 @@ function findLog(id) {
   return l;
 }
 
-function readStdinJson() {
-  try {
-    const raw = fs.readFileSync(0, 'utf8');
-    return raw.trim() ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-function detach(args) {
-  // Pin the child to this profile, including when we were started from a terminal with --profile.
-  const env = { ...process.env, CASEBOOK_PROFILE: U.paths.profileName() };
-  if (U.paths.claudeConfigDirExplicit()) env.CLAUDE_CONFIG_DIR = U.paths.claudeConfigDir();
-  const child = spawn(process.execPath, [__filename, ...args], { detached: true, stdio: 'ignore', env });
-  child.unref();
-}
-
 function currentProject(opt, config) {
   if (opt.all) return null;
   return opt.project || resolveProject(process.cwd(), config).project;
@@ -73,11 +66,10 @@ function pad(s, n) {
 function row(log) {
   const m = log.meta;
   const date = String(m.started_at || m.created_at || '').slice(0, 10);
-  const score = `${m.score ?? '-'}${m.partial ? '…' : ''}`;
-  return `${pad(m.id, 10)} ${pad(date, 11)} ${pad(score, 5)} ${pad(m.marked ? '📌' : '', 3)} ${pad(F.isWritten(log) ? '✓' : '', 3)} ${m.title || ''}${m.angle ? `  · ${m.angle}` : ''}`;
+  return `${pad(m.id, 10)} ${pad(date, 11)} ${pad(m.score ?? '-', 5)} ${pad(m.marked ? '📌' : '', 3)} ${m.title || ''}${m.angle ? `  · ${m.angle}` : ''}`;
 }
 
-const HEADER = `${pad('ID', 10)} ${pad('DATE', 11)} ${pad('SCORE', 5)} ${pad('MRK', 3)} ${pad('WRT', 3)} TITLE`;
+const HEADER = `${pad('ID', 10)} ${pad('DATE', 11)} ${pad('SCORE', 5)} ${pad('MRK', 3)} TITLE`;
 
 function parseLimit(v, fallback, flag = '--limit') {
   if (v === undefined) return fallback;
@@ -86,85 +78,22 @@ function parseLimit(v, fallback, flag = '--limit') {
   return n;
 }
 
-function describe(r) {
-  const one = (l) => `${l.status === 'created' ? 'Created' : 'Updated'} ${l.logId} (score ${l.score}${(l.partial ?? r.partial) ? ', partial' : ''}${r.logs && r.logs.length > 1 && l.angle ? `, ${l.angle}` : ''}): ${l.title}${l.merged && l.merged.length ? ` (merged ${l.merged.join(', ')})` : ''}`;
-  if (r.status === 'created' || r.status === 'updated') return (r.logs && r.logs.length ? r.logs : [{ ...r }]).map(one).join('\n');
-  if (r.status === 'running') return r.reason;
-  if (r.status === 'error') return `Failed: ${r.reason}`;
-  return `Skipped: ${r.reason}`;
-}
-
-/** `scout --pending`: the catch-up pass, run on demand. Auto-mode gates still apply to each session. */
-function scoutPending(config, opt) {
-  const meta = U.readJson(U.paths.meta(), {});
-  const o = {
-    since: meta.installedAt ? new Date(meta.installedAt) : null,
-    exclude: opt.exclude,
-    limit: parseLimit(opt.limit, config.sweep.maxPerRun),
-    settleMinutes: 0,
-    partialIfRecent: true,
-  };
-  const id8 = (r) => r.sessionId.slice(0, 8);
-  if (opt.dryRun) {
-    const { results } = sweep(config, { ...o, dryRun: true });
-    if (opt.json) return out(JSON.stringify(results.map(({ sessionId, project, mtimeMs, userTurns }) => ({ sessionId, project, modified: new Date(mtimeMs).toISOString(), userTurns })), null, 2));
-    if (!results.length) return out('No sessions to catch up on.');
-    for (const r of results) out(`${id8(r)}  ${pad(r.project || '?', 24)} ${new Date(r.mtimeMs).toISOString().slice(0, 16).replace('T', ' ')}  ${r.userTurns ?? '?'} turns`);
-    return;
-  }
-  const { results, locked } = sweep(config, o);
-  if (locked) return out('A catch-up is already running. Check /casebook:list in a minute.');
-  if (opt.json) return out(JSON.stringify(results.map(({ sessionId, status, logId, reason, score, title, partial, logs }) => ({ sessionId, status, logId, reason, score, title, partial, logs }))));
-  if (!results.length) return out('No sessions to catch up on.');
-  for (const r of results) for (const line of describe(r).split('\n')) out(`${id8(r)}  ${line}`);
-}
-
 // ------------------------------------------------------------------ commands
 
 const commands = {
   // Hooks. Must stay fast and must never print to stdout (SessionStart stdout becomes context).
   hook({ pos }) {
-    if (process.env.CASEBOOK_SCOUT) return;
-    const input = readStdinJson();
-    const sid = input.session_id;
+    // A scan's own `claude -p`, or a casebook 0.2 scout's (still running across the update): never merge mid-scan.
+    if (process.env.CASEBOOK_SCAN || process.env.CASEBOOK_SCOUT) return;
     try {
-      U.loadConfig();
-      if (pos[0] === 'session-end' && sid) {
-        detach(['scout', '--session', sid, ...(input.transcript_path ? ['--transcript', input.transcript_path] : []), ...(input.cwd ? ['--cwd', input.cwd] : []), '--auto', '--quiet']);
-      } else if (pos[0] === 'session-start') {
-        try { L.linkBin(); } catch (err) { U.logError('linking the casebook CLI failed', err); }
-        detach(['maintenance', ...(sid ? ['--exclude', sid] : [])]);
-      }
+      if (pos[0] !== 'session-start') return;
+      // Apart, and the link first: a slow or failed merge never keeps the link from being refreshed, nor the other way.
+      try { L.linkBin(); } catch (err) { U.logError('linking the casebook CLI failed', err); }
+      // The hook has seconds, not a minute: when the store is busy, the next command merges instead.
+      try { U.migrateProfiles({ waitMs: 2000 }); } catch (err) { U.logError('merging old profile stores failed', err); }
     } catch (err) {
       U.logError(`hook ${pos[0]} failed`, err);
     }
-  },
-
-  scout({ pos, opt }) {
-    const config = U.loadConfig();
-    if (opt.pending) return scoutPending(config, opt);
-    const sessionId = opt.session || pos[0];
-    if (!sessionId) fail('scout needs --session <id>, a session id, or --pending');
-
-    if (opt.background) {
-      detach(['scout', '--session', sessionId, ...(opt.transcript ? ['--transcript', opt.transcript] : []), ...(opt.cwd ? ['--cwd', opt.cwd] : []),
-        ...(opt.live ? ['--live'] : []), ...(opt.force ? ['--force'] : []), ...(opt.auto ? ['--auto'] : []), '--quiet']);
-      return opt.json ? out(JSON.stringify({ status: 'background' })) : out('Scouting in the background. Run /casebook:list in a minute.');
-    }
-
-    let r;
-    try {
-      r = scoutSession({ sessionId, transcriptPath: opt.transcript, cwd: opt.cwd, force: Boolean(opt.force), live: Boolean(opt.live), mode: opt.auto ? 'auto' : 'manual' }, config);
-    } catch (err) {
-      U.logError(`scout failed for ${sessionId}`, err);
-      if (opt.quiet) return;
-      fail(`scout failed: ${err.message}`);
-    }
-    if (opt.quiet) {
-      if (r.status === 'running' || (r.status === 'skipped' && r.reason === 'transcript not found')) U.logError(`scout for ${sessionId} not run: ${r.reason}`);
-      return;
-    }
-    out(opt.json ? JSON.stringify(r) : describe(r));
   },
 
   async discover({ pos, opt }) {
@@ -175,8 +104,8 @@ const commands = {
       if (opt.json) return out(JSON.stringify(r));
       if (r.status === 'exists') return out(`Already logged as ${r.logId}: ${r.title}`);
       const n = r.sessions.length;
-      out(`${r.status === 'created' ? 'Created' : 'Updated'} ${r.logId} (score ${r.score}${r.partial ? ', partial' : ''}, ${n} session${n > 1 ? 's' : ''}): ${r.title}`);
-      if (r.merged.length) out(`Merged into it: ${r.merged.join(', ')} (duplicates of this topic; marks and written files carried over)`);
+      out(`${r.status === 'created' ? 'Created' : 'Updated'} ${r.logId} (score ${r.score}, ${n} session${n > 1 ? 's' : ''}): ${r.title}`);
+      if (r.merged.length) out(`Merged into it: ${r.merged.join(', ')} (duplicates of this topic; marks carried over)`);
       return;
     }
     const minScore = opt.minScore === undefined ? null : Number(opt.minScore);
@@ -205,7 +134,7 @@ const commands = {
     if (!r.topics.length) {
       if (!r.eligible) return out(`Nothing to discover in ${scope}: ${r.sessions} session(s), none${opt.tags ? ' that mention those tags' : ' long enough'}.`);
       out(`No topic matched. Scored ${r.scored} candidate(s) in ${scope}; the best scored ${r.best || '-'}.`);
-      if (r.failed.length) out(`${r.failed.length} scout(s) failed: ${r.failed[0]}`);
+      if (r.failed.length) out(`${r.failed.length} scan(s) failed: ${r.failed[0]}`);
       return;
     }
     out(`Discovery ${r.id} · ${r.topics.length} topic(s) from ${r.scored} candidate(s) · ${r.sessions} session(s) in ${scope}`);
@@ -214,7 +143,7 @@ const commands = {
       const last = ms.map((m) => m.endedAt || '').sort().pop();
       const span = `${String(ms[0].startedAt || '').slice(0, 10)} → ${String(last || '').slice(0, 10)}`;
       out('');
-      out(`${t.rank}. [${t.score}${t.partial ? '…' : ''}] ${t.topic.title}`);
+      out(`${t.rank}. [${t.score}] ${t.topic.title}`);
       out(`   ${t.info.project} · ${t.topic.angle || 'general'} · ${ms.length} session${ms.length > 1 ? 's' : ''} · ${span}${t.fit ? ` · fit ${t.fit}/3` : ''}`);
       if (t.topic.summary) out(`   ${t.topic.summary}`);
       if (t.topic.tags.length) out(`   tags: ${t.topic.tags.join(', ')}`);
@@ -222,30 +151,7 @@ const commands = {
       out(`   sessions: ${ms.map((m) => `${m.sessionId.slice(0, 8)} (${String(m.startedAt || '').slice(0, 10)}, ${m.userTurns} turns)`).join(', ')}`);
       out(t.updates.length > 1 ? `   merges: ${t.updates.join(', ')} (duplicates of this topic)` : t.updates.length ? `   updates: ${t.updates[0]}` : '   new log');
     }
-    if (r.failed.length) { out(''); out(`${r.failed.length} scout(s) failed: ${r.failed[0]}`); }
-  },
-
-  maintenance({ opt }) {
-    const config = U.loadConfig();
-    if (config.sweep.enabled) {
-      const meta = U.readJson(U.paths.meta(), {});
-      sweep(config, {
-        since: meta.installedAt ? new Date(meta.installedAt) : null,
-        exclude: opt.exclude,
-        limit: config.sweep.maxPerRun,
-        settleMinutes: config.sweep.settleMinutes,
-      });
-    }
-  },
-
-  profiles({ opt }) {
-    const list = U.listProfiles();
-    if (opt.json) return out(JSON.stringify(list, null, 2));
-    if (!list.length) return out('No casebook stores yet.');
-    const w = Math.max(7, ...list.map((p) => p.name.length));
-    const wd = Math.max(10, ...list.map((p) => String(p.claudeConfigDir || '-').length));
-    out(`  ${pad('PROFILE', w)}  ${pad('CONFIG DIR', wd)}  LOGS  LAST LOG`);
-    for (const p of list) out(`${p.current ? '*' : ' '} ${pad(p.name, w)}  ${pad(p.claudeConfigDir || '-', wd)}  ${String(p.logs).padStart(4)}  ${p.lastLog || '-'}`);
+    if (r.failed.length) { out(''); out(`${r.failed.length} scan(s) failed: ${r.failed[0]}`); }
   },
 
   list({ opt }) {
@@ -255,12 +161,9 @@ const commands = {
     let logs = store.allLogs(project);
     if (opt.marked) logs = logs.filter((l) => l.meta.marked);
     if (opt.minScore) logs = logs.filter((l) => (l.meta.score || 0) >= Number(opt.minScore));
-    if (opt.unwritten) logs = logs.filter((l) => !F.isWritten(l));
-    if (opt.written) logs = logs.filter((l) => F.isWritten(l));
     if (since) logs = logs.filter((l) => new Date(l.meta.started_at || l.meta.created_at) >= since);
 
     if (opt.json) return out(JSON.stringify(logs.map((l) => ({ ...l.meta, file: l.file })), null, 2));
-    out(`[profile: ${U.paths.profileName()}]`);
     if (!logs.length) {
       const others = store.listProjects().filter((p) => p !== project);
       out(project ? `No casebook logs for "${project}" match.` : 'No casebook logs match.');
@@ -284,6 +187,7 @@ const commands = {
   },
 
   show({ pos, opt }) {
+    U.loadConfig();
     const log = findLog(pos[0] || '');
     if (!log) fail(`no log with id "${pos[0] || ''}"`);
     out(opt.path ? log.file : fs.readFileSync(log.file, 'utf8'));
@@ -302,26 +206,18 @@ const commands = {
     }
     if (!opt.session) fail('mark needs a log ID, or --session <id> to mark the current session');
     const note = U.normNote(pos.join(' '));
-    // --generated: the skill wrote the note for a bare /casebook:mark, which the transcript shows with no note.
-    // Counted so the scan knows that empty transcript mark was placed (it is only a fallback for a failed mark).
-    const recordBare = () => {
-      if (opt.generated) store.setLedger(opt.session, { bareMarks: ((store.getLedger(opt.session) || {}).bareMarks || 0) + 1 });
-    };
-    // A session with exactly one log: mark that log. With several, the next scan gives the mark to the topic it points to.
-    // One lock, so the bare mark is counted exactly once whichever way it goes.
-    // Counted only once the mark is written: if writing it fails, the transcript copy stays the fallback.
+    // A session with exactly one log: mark that log. Otherwise the mark waits for a discovery pick of this session,
+    // which gives it to the topic it points to.
     const { one, marks } = store.withWriteLock(() => {
       const logs = T.logsForSessions([opt.session]);
-      const r = logs.length === 1 ? { one: store.applyMark(logs[0], note, opt.session) } : { marks: store.addPendingMark(opt.session, note) };
-      recordBare();
-      return r;
+      return logs.length === 1 ? { one: store.applyMark(logs[0], note, opt.session) } : { marks: store.addPendingMark(opt.session, note) };
     });
     if (one) return out(`📌 Marked ${one.meta.id} (this session's existing log)${note ? `: ${note}` : ''}`);
-    // A session closed since 0.1 (its log deleted before topics) is never scanned again on its own.
+    // A session closed since 0.1 (its log deleted before topics) is left out of discovery unless --force.
     const closed = T.legacyDeleted(store.getLedger(opt.session));
     out(`📌 Marked this session${note ? `: ${note}` : ''} (${marks.length} mark${marks.length > 1 ? 's' : ''}). ${closed
-      ? `Its log was deleted in an older casebook, so it is not scanned on its own: run /casebook:scout ${opt.session} --force to place the mark.`
-      : 'It goes to the topic it points to when the session is scanned.'}`);
+      ? 'Its log was deleted in an older casebook, so discovery leaves it out: run /casebook:discovery --force to place the mark (--force also offers topics you deleted again).'
+      : 'It goes to the topic it points to when /casebook:discovery logs a topic from this session.'}`);
   },
 
   unmark({ pos }) {
@@ -331,39 +227,19 @@ const commands = {
     out(`Unmarked ${log.meta.id}`);
   },
 
-  written({ pos, opt }) {
-    if (!opt.file) fail('written needs --file <path>');
-    for (const id of pos) {
-      const log = store.withWriteLock(() => {
-        const l = findLog(id);
-        if (!l) return null;
-        const list = new Set(l.meta.written_to || []);
-        list.add(path.resolve(U.expandHome(opt.file)));
-        l.meta.written_to = [...list];
-        l.meta.written_at = new Date().toISOString();
-        return store.saveLog(l);
-      });
-      if (!log) fail(`no log with id "${id}"`);
-    }
-    out(`Recorded ${pos.length} log(s) as written to ${opt.file}`);
-  },
-
   'out-path'({ opt }) {
-    const config = U.loadConfig();
+    U.loadConfig();
     if (!opt.project) fail('out-path needs --project <name>');
-    // --handoff names a new folder (not a file) under handoffs/, for /casebook:handoff.
-    const root = opt.handoff
-      ? opt.dir || path.join(U.paths.home(), 'handoffs')
-      : opt.dir || config.output.dir || path.join(U.paths.home(), 'case-studies');
+    // A new handoff folder under handoffs/, for /casebook:handoff. (--handoff is accepted for older skills.)
+    const root = opt.dir || path.join(U.paths.home(), 'handoffs');
     const dir = U.mkdirp(path.join(U.expandHome(root), U.slugify(opt.project)));
-    // Local date, so a file written late in the evening is not named after tomorrow (UTC).
+    // Local date, so a folder made late in the evening is not named after tomorrow (UTC).
     const now = new Date();
     const day = [now.getFullYear(), now.getMonth() + 1, now.getDate()].map((n) => String(n).padStart(2, '0')).join('-');
     const base = `${day}-${U.slugify(opt.title)}`;
-    const ext = opt.handoff ? '' : '.md';
-    let file = path.join(dir, `${base}${ext}`);
-    for (let n = 2; fs.existsSync(file); n++) file = path.join(dir, `${base}-${n}${ext}`);
-    out(file);
+    let folder = path.join(dir, base);
+    for (let n = 2; fs.existsSync(folder); n++) folder = path.join(dir, `${base}-${n}`);
+    out(folder);
   },
 
   delete({ pos, opt }) {
@@ -396,24 +272,9 @@ const commands = {
     }
   },
 
-  backfill({ opt }) {
-    const config = U.loadConfig();
-    const since = U.parseAge(opt.since || '30d');
-    const limit = parseLimit(opt.limit, 20);
-    if (!opt.yes) {
-      out(`Backfill would scout up to ${limit} past session(s) since ${since.toISOString().slice(0, 10)}, one headless ${config.scout.model} call each.`);
-      out('Re-run with --yes to start.');
-      return;
-    }
-    const { locked } = sweep(config, {
-      since, limit, settleMinutes: 0, partialIfRecent: true,
-      onResult: (c, r) => out(`${c.sessionId.slice(0, 8)}  ${r.status}${r.logs && r.logs.length ? ' ' + r.logs.map((l) => l.logId).join(', ') : r.logId ? ' ' + r.logId : ''}${r.reason ? ' (' + r.reason + ')' : ''}${r.title ? ' — ' + r.title : ''}`),
-    });
-    if (locked) out('A catch-up is already running. Check /casebook:list in a minute.');
-  },
-
   config() {
     U.loadConfig();
+    if (!fs.existsSync(U.paths.config())) fail('old profile stores are still being merged into the shared one; try again in a minute (see casebook doctor)');
     out(U.paths.config());
     out(fs.readFileSync(U.paths.config(), 'utf8'));
   },
@@ -428,20 +289,18 @@ const commands = {
 
   doctor() {
     const config = U.loadConfig();
-    // Probe the way the real scout runs: CLAUDE_CONFIG_DIR is set only when it matters (see paths.claudeConfigDirExplicit).
+    // Probe the way a scan runs: CLAUDE_CONFIG_DIR is passed only when it was set (see paths.claudeConfigDirExplicit).
     const probeEnv = { ...process.env };
     if (U.paths.claudeConfigDirExplicit()) probeEnv.CLAUDE_CONFIG_DIR = U.paths.claudeConfigDir();
-    const which = spawnSync(config.scout.command, ['--version'], { encoding: 'utf8', env: probeEnv });
+    const which = spawnSync(config.scan.command, ['--version'], { encoding: 'utf8', env: probeEnv });
     const project = resolveProject(process.cwd(), config);
-    const meta = U.readJson(U.paths.meta(), {});
     out(`node        ${process.version}`);
     out(`profile     ${U.paths.profileName()}`);
     out(`config dir  ${U.paths.claudeConfigDir()}`);
     out(`store       ${U.paths.home()}`);
-    out(`scout       ${config.scout.command} → ${which.status === 0 ? which.stdout.trim() : 'NOT FOUND'} (model ${config.scout.model}, CLAUDE_CONFIG_DIR ${U.paths.claudeConfigDirExplicit() ? 'set' : 'left unset'})`);
+    out(`scan        ${config.scan.command} → ${which.status === 0 ? which.stdout.trim() : 'NOT FOUND'} (model ${config.scan.model}, CLAUDE_CONFIG_DIR ${U.paths.claudeConfigDirExplicit() ? 'set' : 'left unset'})`);
     out(`this dir    project "${project.project}", policy ${project.policy}${project.repo ? `, ${project.repo}` : ''}`);
     out(`logs        ${store.allLogs().length} across ${store.listProjects().length} project(s)`);
-    out(`installed   ${meta.installedAt || '-'}`);
     try {
       const lines = fs.readFileSync(U.paths.errorLog(), 'utf8').trim().split('\n').slice(-5);
       out(`recent errors (${U.paths.errorLog()}):`);
@@ -450,25 +309,20 @@ const commands = {
   },
 
   help() {
-    out(`casebook — capture potential case studies from Claude Code sessions
+    out(`casebook — find potential case studies in your Claude Code sessions
 
-  list [--project P | --all] [--marked] [--min-score N] [--unwritten|--written] [--since 30d] [--json]
+  list [--project P | --all] [--marked] [--min-score N] [--since 30d] [--json]
   show <id> [--path]
   mark [<id>] [note…] [--session <session-id>]     mark a log, or the current session
   unmark <id>
   delete <id…>                                     delete specific logs
-  delete [--project P] [--below-score N] [--older-than 30d] [--unmarked] [--written|--unwritten] [--yes]
-  scout [<session-id>] [--live] [--background] [--force]   scout one session now (default: manual)
-  scout --pending [--dry-run] [--limit N] [--exclude <session-id>]   catch up on missed sessions now
+  delete [--project P] [--below-score N] [--older-than 30d] [--unmarked] [--yes]
   discover [--note "…"] [--min-score N] [--tags a,b] [--project P | --all] [--since 90d] [--candidates 5] [--dry-run]
                                                    find topics across linked sessions, ranked (top 3)
   discover pick <discovery-id> <n>                 log topic n of a discovery as one log
-  profiles [--json]                                list every profile's store
   link [--json]                                    symlink ~/.local/bin/casebook to this plugin (done at every startup)
-  backfill [--since 30d] [--limit 20] [--yes]      scout past sessions
-  written <id…> --file <path>                      record that logs were written up
-  out-path --project P --title T [--dir D] [--handoff]   where a case study file (or handoff folder) should go
-  config | doctor | help\n\nGlobal: --profile <name> runs against another profile's store (see: casebook profiles).`);
+  out-path --project P --title T [--dir D]         where a new handoff folder should go
+  config | doctor | help`);
   },
 };
 
@@ -476,8 +330,13 @@ const { pos, opt } = parseArgs(process.argv.slice(2));
 const name = pos.shift() || 'help';
 const fn = commands[name];
 if ('profile' in opt && fn && !opt.help && name !== 'help') {
-  try { U.useProfile(opt.profile); } catch (err) { fail(err.message); }
+  fail('--profile is gone: every profile shares one store. To read another profile\'s sessions, set CLAUDE_CONFIG_DIR.');
 }
+// Commands removed in 0.3 fail, so a script calling one does not take the help text for success.
+const GONE = { scout: 'the scout is gone; run /casebook:discovery', backfill: 'the scout is gone; run /casebook:discovery',
+  maintenance: 'the scout is gone; run /casebook:discovery', written: 'casebook no longer tracks write-ups',
+  profiles: 'every profile shares one store now; set CLAUDE_CONFIG_DIR to pick the account' };
+if (!fn && Object.hasOwn(GONE, name)) fail(`${name} was removed in 0.3: ${GONE[name]}`);
 if (!fn || opt.help) commands.help();
 else {
   const onError = (err) => {

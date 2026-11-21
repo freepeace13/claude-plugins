@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { paths, sessionKey, mkdirp, readJson, writeJsonAtomic, writeFileAtomic, parseDoc, renderDoc, newId, ID_RE } = require('./util');
+const { paths, sessionKey, mkdirp, readJson, writeJsonAtomic, writeFileAtomic, parseDoc, renderDoc, newId, ID_RE, logSummary, withWriteLock } = require('./util');
 
 function listProjects() {
   try {
@@ -47,9 +47,8 @@ function findLog(id) {
   return null;
 }
 
-/** touch: false keeps updated_at, for bookkeeping that changes no notes (settling a partial log). */
-function saveLog(log, { touch = true } = {}) {
-  if (touch || !log.meta.updated_at) log.meta.updated_at = new Date().toISOString();
+function saveLog(log) {
+  log.meta.updated_at = new Date().toISOString();
   writeFileAtomic(log.file, renderDoc(log.meta, log.body));
   return log;
 }
@@ -71,56 +70,17 @@ function deleteLog(log) {
 function deleteLogLocked(log) {
   fs.rmSync(log.file, { force: true });
   try { fs.rmdirSync(path.dirname(log.file)); } catch { /* not empty */ }
-  // The topic is remembered per session so no later scan logs it again. A session left with no logs at all
-  // is not scouted again automatically; a manual scout can still look for other topics in it.
+  // The topic is remembered per session so no later discovery logs it again.
   const m = log.meta;
   const sessions = Array.isArray(m.sessions) && m.sessions.length ? m.sessions : [m.session_id].filter(Boolean);
-  const left = allLogs();
   for (const sid of sessions) {
     const prev = getLedger(sid) || {};
-    const deletedTopics = [...(prev.deletedTopics || []), { id: m.id, title: m.title, angle: m.angle || '', at: new Date().toISOString() }];
-    const stillLogged = left.some((l) => (Array.isArray(l.meta.sessions) && l.meta.sessions.length ? l.meta.sessions : [l.meta.session_id]).includes(sid));
-    // Its marks go with it: a /casebook:mark for them in the transcript must not mark another log.
-    setLedger(sid, { deletedTopics, ...forgetMarks(prev, m.marks || [], sid), ...(stillLogged ? {} : { deleted: true, deletedAt: new Date().toISOString() }) });
+    const description = m.description || logSummary(log.body);
+    setLedger(sid, { deletedTopics: [...(prev.deletedTopics || []), { id: m.id, title: m.title, angle: m.angle || '', description, at: new Date().toISOString() }] });
   }
 }
 
-/**
- * Run fn while holding the store's write lock. Logs are shared between sessions now, so two scans must not
- * update or create logs at the same moment. Held only for the writes, never during a model call.
- */
-function withWriteLock(fn) {
-  const file = path.join(paths.home(), 'state', 'write.lock');
-  mkdirp(path.dirname(file));
-  const deadline = Date.now() + 60000;
-  const mine = `${process.pid}:${Date.now()}:${Math.random()}`;
-  for (;;) {
-    try { fs.writeFileSync(file, mine, { flag: 'wx' }); break; } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-    }
-    // A holder that crashed leaves the file behind; writes take milliseconds, so 30s means it is stale.
-    // Only the holder of the reclaim gate removes it, after checking again, so two waiters cannot both
-    // reclaim (and one remove the other's fresh lock).
-    const age = () => { try { return Date.now() - fs.statSync(file).mtimeMs; } catch { return -1; } };
-    if (age() > 30000) {
-      const gate = `${file}.reclaim`;
-      try {
-        fs.writeFileSync(gate, mine, { flag: 'wx' });
-        try { if (age() > 30000) fs.rmSync(file, { force: true }); } finally { fs.rmSync(gate, { force: true }); }
-        continue;
-      } catch (err) {
-        if (err.code !== 'EEXIST') throw err;
-        try { if (Date.now() - fs.statSync(gate).mtimeMs > 10000) fs.rmSync(gate, { force: true }); } catch { /* gone */ }
-      }
-    }
-    if (Date.now() > deadline) throw new Error('timed out waiting for the casebook write lock');
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
-  // Remove the lock only while it is still ours: a waiter may have reclaimed it as stale.
-  try { return fn(); } finally { try { if (fs.readFileSync(file, 'utf8') === mine) fs.rmSync(file, { force: true }); } catch { /* gone */ } }
-}
-
-// ---------- ledger: one small file per session, so concurrent scouts never race ----------
+// ---------- ledger: one small file per session (the topics deleted from it) ----------
 
 const ledgerFile = (sid) => path.join(paths.sessions(), `${sessionKey(sid)}.json`);
 const getLedger = (sid) => readJson(ledgerFile(sid), null);
@@ -140,8 +100,14 @@ function addPendingMark(sid, note) {
   writeJsonAtomic(marksFile(sid), marks);
   return marks;
 }
+/** Pending marks a scan saw without placing them: they wait for a pick, but no longer count as news. */
+function markSeen(sid, before) {
+  const marks = getMarks(sid);
+  const saw = (m) => !m.seen && String(m.at || '') <= before;
+  if (marks.some(saw)) writeJsonAtomic(marksFile(sid), marks.map((m) => (saw(m) ? { ...m, seen: true } : m)));
+}
 const clearMarks = (sid) => fs.rmSync(marksFile(sid), { force: true });
-/** Remove only the marks a scan placed: a mark added while the scan ran stays for the next one. */
+/** Remove only the marks a pick placed: a mark added since the discovery ran stays for the next one. */
 function consumeMarks(sid, used) {
   const key = (m) => `${m.at}|${m.note || ''}`;
   const gone = new Set(used.map(key));
@@ -149,25 +115,8 @@ function consumeMarks(sid, used) {
   if (left.length) writeJsonAtomic(marksFile(sid), left); else clearMarks(sid);
 }
 
-/**
- * The ledger patch that forgets these marks: their notes join `unmarked`, so a /casebook:mark for them found in
- * the transcript is not re-added. A bare mark has no note to remember: it is counted in `bareMarks` instead,
- * so it stands for one empty transcript mark, not every later one.
- */
-function forgetMarks(ledger, marks, sid) {
-  // Only the marks made in this session: a log's other sessions never saw them in their transcripts. A mark of
-  // a log by its ID is in no session's transcript fallback at all. Older marks record no session: all count.
-  const notes = marks.filter((m) => m.via !== 'id' && (!m.session || !sid || m.session === sid)).map((m) => m.note || '');
-  return {
-    unmarked: [...new Set([...(ledger.unmarked || []).filter(Boolean), ...notes.filter(Boolean)])],
-    bareMarks: (ledger.bareMarks || 0) + notes.filter((n) => !n).length,
-  };
-}
-
-/** Remove a log's marks, and remember them so a /casebook:mark found in a transcript is not re-added. */
+/** Remove a log's marks. */
 function clearLogMarks(log) {
-  const sessions = Array.isArray(log.meta.sessions) && log.meta.sessions.length ? log.meta.sessions : [log.meta.session_id].filter(Boolean);
-  for (const sid of sessions) setLedger(sid, forgetMarks(getLedger(sid) || {}, log.meta.marks || [], sid));
   log.meta.marked = false;
   log.meta.marks = [];
   return saveLog(log);
@@ -182,5 +131,5 @@ function applyMark(log, note, session) {
 
 module.exports = {
   listProjects, allLogs, findLog, readLog, saveLog, createLogFile, deleteLog, withWriteLock,
-  forgetMarks, getLedger, setLedger, getMarks, addPendingMark, clearMarks, consumeMarks, applyMark, clearLogMarks,
+  getLedger, setLedger, getMarks, markSeen, addPendingMark, clearMarks, consumeMarks, applyMark, clearLogMarks,
 };

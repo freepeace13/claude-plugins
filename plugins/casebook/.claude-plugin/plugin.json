@@ -1,8 +1,8 @@
 {
   "name": "casebook",
   "displayName": "Casebook",
-  "version": "0.2.1",
-  "description": "Automatically logs potential case studies from every Claude Code session, lets you mark and list them, and writes polished case study Markdown files by ID.",
+  "version": "0.3.0",
+  "description": "Finds potential case studies across your Claude Code sessions on demand, lets you mark and list them, and hands them off to a writer as a checked folder of facts.",
   "author": {
     "name": "Kin Basco",
     "url": "https://github.com/freepeace13"
@@ -10,5 +10,5 @@
   "homepage": "https://github.com/freepeace13/claude-plugins/tree/main/plugins/casebook",
   "repository": "https://github.com/freepeace13/claude-plugins",
   "license": "MIT",
-  "keywords": ["case-study", "portfolio", "hooks", "writing", "developer-brand"]
+  "keywords": ["case-study", "portfolio", "discovery", "handoff", "developer-brand"]
 }

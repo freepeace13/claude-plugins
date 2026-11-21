@@ -13,7 +13,7 @@
     {
       "name": "casebook",
       "source": "./plugins/casebook",
-      "description": "Auto-log potential case studies from every session; mark, list, and write them up as Markdown.",
+      "description": "Find potential case studies across your sessions; mark, list, and hand them off to a writer.",
       "author": {
         "name": "Kin Basco",
         "url": "https://github.com/freepeace13"
@@ -24,8 +24,8 @@
       "tags": [
         "case-study",
         "portfolio",
-        "hooks",
-        "writing",
+        "discovery",
+        "handoff",
         "developer-brand"
       ]
     },

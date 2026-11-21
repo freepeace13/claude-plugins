@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { paths, ID_RE, normNote } = require('./util');
+const { paths } = require('./util');
 
 const MAX_MSG = 2000;
 
@@ -33,6 +33,17 @@ function blocksOf(content) {
   return Array.isArray(content) ? content : [];
 }
 
+function isCasebookTool(b) {
+  if (!b || b.type !== 'tool_use') return false;
+  const i = b.input || {};
+  if (b.name === 'Skill') return /^casebook:/.test(String(i.skill || i.name || ''));
+  // `casebook` as a command word anywhere in the line: after `cd x &&`, a pipe or VAR=value prefixes.
+  // Also by path (`node …/bin/casebook`, `~/.local/bin/casebook`), quoted or not.
+  if (b.name === 'Bash') return /(^\s*|[;&|(]\s*)(\w+=\S*\s+)*(node\s+)?["']?(\S*\/)?casebook["']?(\s|$)/.test(String(i.command || '').split('\n')[0]);
+  const fp = i.file_path || i.path || '';
+  return Boolean(fp) && path.resolve(String(fp)).startsWith(paths.home() + path.sep);
+}
+
 function describeTool(b) {
   const i = b.input || {};
   const target = i.file_path || i.notebook_path || i.path || i.pattern || i.url || i.description || '';
@@ -57,12 +68,20 @@ function condense(file, maxChars = 60000) {
   const files = new Set();
   const readFiles = new Set();
   const prUrls = new Set();
-  const commandMarks = [];
   const opening = [];
   let aiTitle = null;
   let userTurns = 0;
+  // Casebook's own flow: from a casebook slash command up to the user's next typed turn. Its output (topic
+  // listings, other logs, a handoff) and the picks made in it (AskUserQuestion answers arrive as tool results)
+  // are about other work, never read as this session's. A bare answer typed into it (a number, a yes) keeps it.
+  let inCasebook = false;
+  // After a casebook skill the model ran that prints other work (a listing, a log): the text relaying it, up to
+  // the next call that is work again or the next turn of the user.
+  let relaying = false;
+  const turn = (t) => { out.push(`USER: ${clip(t)}`); if (opening.length < 2) opening.push(clip(t, 1000)); userTurns++; };
   let startedAt = null;
   let endedAt = null;
+  let workAt = null;
   let cwd = null;
   let branch = null;
   let sessionId = null;
@@ -81,28 +100,42 @@ function condense(file, maxChars = 60000) {
     if (e.type === 'pr-link' && e.prUrl) prUrls.add(String(e.prUrl));
     if (e.type === 'ai-title' && e.aiTitle) aiTitle = String(e.aiTitle);
     if (e.isSidechain || e.isMeta || !e.message) continue;
+    // The last entry that was the session's own work, not casebook's: when the session last changed.
+    const before = out.length;
 
     if (e.type === 'user') {
       for (const b of blocksOf(e.message.content)) {
         if (b.type !== 'text' || !b.text) continue;
         const cmd = parseCommand(b.text);
         if (cmd) {
-          // A mark of another log by its ID is not a mark of this session (the same test as `casebook mark`).
-          // Typed as the user typed it: drop surrounding quotes the shell would have removed, so it matches the stored note.
-          const markNote = normNote(cmd.args);
-          if (/casebook:mark$/.test(cmd.name) && !ID_RE.test(markNote.split(' ')[0])) commandMarks.push(markNote);
+          relaying = false;
+          // Casebook's own commands are not work: a discovery must not count itself as news for the session.
+          // A mark prints no other work, so what follows it is the session's again.
+          const ours = /^\/?casebook:/.test(cmd.name);
+          inCasebook = ours && !/^\/?casebook:mark$/.test(cmd.name);
+          if (ours) continue;
           out.push(`USER: ${cmd.name} ${clip(cmd.args, 400)}`.trim());
           userTurns++;
           continue;
         }
         const t = stripNoise(b.text);
         if (!t || t.startsWith('Caveat:')) continue;
-        out.push(`USER: ${clip(t)}`);
-        if (opening.length < 2) opening.push(clip(t, 1000));
-        userTurns++;
+        if (inCasebook && /^\s*(\d{1,2}|y|yes|n|no|ok|none)\s*[.!]?\s*$/i.test(t)) continue;
+        inCasebook = false;
+        relaying = false;
+        turn(t);
       }
     } else if (e.type === 'assistant') {
+      if (inCasebook) continue;
       for (const b of blocksOf(e.message.content)) {
+        // A casebook skill the model invoked, a casebook CLI call, a file in the store: casebook's own calls are
+        // not work, though the work around them is.
+        if (isCasebookTool(b)) {
+          if (b.name === 'Skill' && !/^casebook:mark$/.test(String((b.input || {}).skill || (b.input || {}).name || ''))) relaying = true;
+          continue;
+        }
+        if (b.type === 'tool_use') relaying = false;
+        if (relaying) continue;
         if (b.type === 'text' && b.text && b.text.trim()) out.push(`CLAUDE: ${clip(stripNoise(b.text))}`);
         else if (b.type === 'tool_use') {
           out.push(`  ${describeTool(b)}`);
@@ -112,6 +145,7 @@ function condense(file, maxChars = 60000) {
         }
       }
     }
+    if (out.length > before && e.timestamp) workAt = e.timestamp;
   }
 
   let text = out.join('\n');
@@ -121,7 +155,7 @@ function condense(file, maxChars = 60000) {
     text = `${text.slice(0, head)}\n\n[… ${text.length - maxChars} chars omitted from the middle …]\n\n${text.slice(-tail)}`;
   }
   return {
-    text, userTurns, startedAt, endedAt, cwd, branch, sessionId, files: [...files], commandMarks,
+    text, userTurns, startedAt, endedAt, workAt, cwd, branch, sessionId, files: [...files],
     readFiles: [...readFiles], prUrls: [...prUrls], aiTitle, opening: opening.join('\n'),
   };
 }

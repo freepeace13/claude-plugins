@@ -7,4 +7,4 @@ allowed-tools: Bash(casebook:*)
 
 Run `casebook show $ARGUMENTS`.
 
-Show the log as printed. Then add one line: its score, whether it is marked, and whether it has been written up. Offer `/casebook:write <id>` if it hasn't been.
+Show the log as printed. Then add one line: its score and whether it is marked, and offer `/casebook:handoff <id>` to prepare it for a writer.

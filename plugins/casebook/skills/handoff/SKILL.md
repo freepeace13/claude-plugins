@@ -22,7 +22,7 @@ The **intake** is the source logs (and, under `public`, the repository they came
    - **One topic.** If the logs (or the note) hold more than one subject and the note does not pick one, offer up to 3 candidates in one message, each with its subject and the facts behind it, and wait. Then check the chosen topic from the start. Never merge several topics.
    - Map each element to its sources: `logs/<id>.md#<Section>` for a section of a log (Problem, Approach, Outcome, Evidence, Key decision, a mark note), or a `repo:` source. Mark it inferred where the table allows it, or missing.
    - A log's mark notes and key decision are the developer's own words and count as intake. The note and answers never count toward E-3's 3 facts.
-   - Facts the scout flagged as "not independently re-checked" still count, but each one also becomes an Unknown to verify.
+   - Facts a log flags as "not independently re-checked" still count, but each one also becomes an Unknown to verify.
    - The verdict is `thin` if a **reject** element is missing or more than 3 **ask** elements are missing.
 5. **Ask, once.** If the verdict is not yet `thin`, put every missing **ask** element into one message of at most 3 questions, plus, when there is room left, one question on whether the numbers may be published. Wait for the answers. An answer that leaves an element empty makes the verdict `thin`. Ask nothing after this.
 6. **On `thin`:** create nothing. Reply in this shape and stop:
@@ -31,17 +31,17 @@ The **intake** is the source logs (and, under `public`, the repository they came
    Not enough for a handoff. Nothing was written.
    - E-3 only 1 concrete fact (cb-7k2m9q#Outcome: "retries dropped"). Add the before and after numbers or the error message.
    - E-2 no first-hand part. Add what you did or decided.
-   Add them with /casebook:mark <id> "<the facts>", or scan the session again with /casebook:scout <session-id>, then run /casebook:handoff again.
+   Add them with /casebook:mark <id> "<the facts>", then run /casebook:handoff again.
    ```
 
    Cite the log and section for each missing element. Mark notes are part of the log, so `/casebook:mark` is how the developer adds facts.
 7. **Make the folder.** Pick a working title (outcome-focused, no hype). Get the folder path with
-   `casebook out-path --handoff --project "<project, or 'anonymized' under anonymize>" --title "<title>"`
+   `casebook out-path --project "<project, or 'anonymized' under anonymize>" --title "<title>"`
    and add `--dir <dir>` when `--out` was given. It prints a path that does not exist yet; create it by writing the files below into it.
 8. **Write the files.**
    - `logs/<id>.md` for each log: the log as `casebook show <id>` prints it, named by the `id` in its frontmatter (an ID merged into another log prints that log: use its ID, here and in `source_logs`, and write each log once). Under `anonymize`, set `project` to `anonymized`, and drop `repo`, `branch`, `profile`, `session_id`, `sessions`, `session_turns`, `partial_sessions`, `merged_from`, `commits`, `files`, `written_to`, `written_at` and `discovery_note` from the frontmatter, rewrite each `marks` note the same way as the body, and remove anything else, in the frontmatter or the body, that names what must not be named.
    - `handoff.md` in the format below.
-9. **Report** in 3 to 6 lines: the folder path, the topic, the verdict, the open Unknowns, and that the folder is ready for a writer. Do not run `casebook written`: a handoff is not a write-up.
+9. **Report** in 3 to 6 lines: the folder path, the topic, the verdict, the open Unknowns, and that the folder is ready for a writer. Writing the piece is not part of casebook.
 
 ## Writing the facts
 
@@ -49,7 +49,7 @@ The **intake** is the source logs (and, under `public`, the repository they came
 - Write every fact from the developer's point of view, in first person ("I limited CI to pull requests into main"). Logs often say "the team" or describe an assistant doing the work: restate it as the developer's own action and drop the assistant, unless the piece is about it.
 - Never invent metrics, timelines, team sizes or results. Never count one fact twice.
 - Items under a log's "Open threads" are Unknowns, not facts, unless the note or an answer says they are resolved.
-- A log with `partial: true` was scouted while its session was still running: add an Unknown for it.
+- A log with `partial: true` (from an older casebook) was logged while its session was still running: add an Unknown for it.
 
 ## handoff.md format
 

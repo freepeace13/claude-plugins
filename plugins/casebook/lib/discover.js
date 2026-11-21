@@ -8,10 +8,11 @@ const path = require('path');
 const crypto = require('crypto');
 const { PLUGIN_ROOT, paths, readJson, writeJsonAtomic, parseAge } = require('./util');
 const store = require('./store');
-const { condense, findTranscript } = require('./transcript');
+const { condense } = require('./transcript');
 const T = require('./topics');
 const { resolveProject, commitsBetween } = require('./project');
-const { runClaudeAsync, POLICY_RULES, acquireSessionLock } = require('./scout');
+const { runClaudeAsync, POLICY_RULES } = require('./model');
+const { logError } = require('./util');
 
 const MAX_CHAIN = 6;          // sessions in one linked topic
 const LINK_DAYS = 14;         // how far apart linked sessions may be
@@ -64,7 +65,7 @@ function collectSessions(config, { project, since, exclude, force }) {
       const early = cwd && byCwd.get(cwd);
       if (early && (early.policy === 'skip' || (project && early.project !== project))) continue;
       let t;
-      try { t = condense(file, config.scout.maxChars); } catch { continue; }
+      try { t = condense(file, config.scan.maxChars); } catch { continue; }
       // No recorded directory: nothing says which project or policy it has, so it is left out.
       if (!t.userTurns || !t.cwd) continue;
       const key = t.cwd || '';
@@ -76,10 +77,12 @@ function collectSessions(config, { project, since, exclude, force }) {
       out.push({
         sessionId, transcriptPath: file, mtimeMs: st.mtimeMs, size: st.size,
         project: info.project, repo: info.repo || null, root: info.root, policy: info.policy,
-        branch: t.branch, startedAt: t.startedAt, endedAt: t.endedAt, userTurns: t.userTurns,
+        branch: t.branch, startedAt: t.startedAt, endedAt: t.endedAt, workAt: t.workAt, userTurns: t.userTurns,
         files: t.files, readFiles: t.readFiles, prUrls: t.prUrls, aiTitle: t.aiTitle, opening: t.opening,
         text: t.text,
         logs: logs.map((l) => ({ id: l.meta.id, score: l.meta.score, title: l.meta.title, tags: l.meta.tags || [] })),
+        // Pending marks wait for a scan of this session to place them. A mark of a log by ID is in the log already.
+        pending: store.getMarks(sessionId),
       });
     }
   }
@@ -207,7 +210,9 @@ function shortlist(groups, config, { note, tags }) {
   const words = keywords(note);
   const out = [];
   for (const g of groups) {
-    if (g.members.length === 1 && g.members[0].userTurns < config.scout.minTurns) continue;
+    // A session with a pending mark is a candidate however short; one no scan has seen yet also ranks higher.
+    const marked = g.members.some((m) => m.pending.some((k) => !k.seen));
+    if (!g.members.some((m) => m.pending.length) && g.members.length === 1 && g.members[0].userTurns < config.scan.minTurns) continue;
     const text = groupText(g);
     const tagHits = tags.filter((t) => hasWord(text, norm(t)));
     if (tags.length && !tagHits.length) continue;
@@ -215,9 +220,9 @@ function shortlist(groups, config, { note, tags }) {
     const logs = g.members.flatMap((m) => m.logs);
     const logScore = Math.max(0, ...logs.map((l) => l.score || 0));
     const turns = g.members.reduce((n, m) => n + m.userTurns, 0);
-    // Chains are what a one-session scout cannot see; a session that is already logged on its own matters less.
+    // Linked chains first: they hold the stories no single session tells; a session already logged on its own matters less.
     const solo = g.members.length === 1 && logs.length ? -1 : 0;
-    const prelim = (logScore || 2) + (g.members.length > 1 ? 1 : 0) + solo + 3 * noteFit + tagHits.length + Math.min(1, turns / 40);
+    const prelim = (logScore || 2) + (g.members.length > 1 ? 1 : 0) + solo + 3 * noteFit + tagHits.length + Math.min(1, turns / 40) + (marked ? 2 : 0);
     out.push({ ...g, noteFit, tagHits, prelim, latest: Math.max(...g.members.map((m) => t0(m.endedAt))) });
   }
   return out.sort((a, b) => b.prelim - a.prelim || b.latest - a.latest);
@@ -278,6 +283,22 @@ function memberRecord(m) {
   };
 }
 
+/** What a log has not been scanned with yet: pending marks of its sessions (placed on this topic, or not seen by
+ *  any scan yet), or turns its sessions gained since. A mark of the log by ID is in the log already: not news. */
+function hasNews(log, members, topic) {
+  const m = log.meta;
+  const turns = m.session_turns || (m.session_id ? { [m.session_id]: m.user_turns || 0 } : {});
+  const pending = members.map((x) => store.getMarks(x.sessionId));
+  // The model placed the sessions' pending marks on this topic: the pick gives them to the log.
+  if (topic && topic.marks && pending.some((p) => p.length)) return true;
+  // Older logs: 0.2 has scouted_at, 0.1 only created_at. A pending mark a scan saw and left unplaced is news once.
+  const since = m.scanned_at || m.scouted_at || m.created_at || '';
+  // A log from before 0.3 counted casebook's own commands as turns: compare when its sessions last saw work instead
+  // (casebook's own entries left out).
+  const grew = (x) => (m.scanned_at ? (x.userTurns || 0) > (turns[x.sessionId] || 0) : String(x.workAt || x.endedAt || '') > (m.scouted_at || m.updated_at || since));
+  return members.some((x, i) => pending[i].some((k) => !k.seen && String(k.at || '') > since) || grew(x));
+}
+
 /** One model call over a chain. Returns its topics, each cut down to the sessions it belongs to. */
 async function scanChain(g, config, opts) {
   const sids = g.members.map((m) => m.sessionId);
@@ -285,13 +306,14 @@ async function scanChain(g, config, opts) {
   const lastEnd = g.members.map((m) => m.endedAt || '').sort().pop();
   const context = T.contextLogs(first.project, sids, first.startedAt, lastEnd);
   const deleted = opts.force ? [] : T.tombstones(sids);
+  const startedScan = new Date().toISOString();
   const marks = [...context.filter((l) => T.sessionsOf(l).some((s) => sids.includes(s))).flatMap((l) => l.meta.marks || []),
     ...sids.flatMap((sid) => store.getMarks(sid))];
-  const maxTopics = config.scout.maxTopics || 3;
+  const maxTopics = config.scan.maxTopics || 3;
   const commits = chainCommits(g.members, first.root);
   const prompt = renderPrompt(g.members, {
     ...opts, reasons: g.reasons, marks, existing: T.renderExisting(context, sids, deleted), maxTopics, commits,
-  }, config.scout.maxChars);
+  }, config.scan.maxChars);
   const found = T.parseTopics(await runClaudeAsync(prompt, config), maxTopics);
   const byId = new Map(context.map((l) => [l.meta.id, l]));
   const out = [];
@@ -304,11 +326,12 @@ async function scanChain(g, config, opts) {
     // Same title and angle as a log of its own sessions, though the model did not say so: that log.
     if (!same.length) {
       const own = context.filter((l) => T.sessionsOf(l).some((sid) => members.some((m) => m.sessionId === sid)));
-      const twin = own.find((l) => T.sameTitle(l.meta.title, topic.title) && T.sameAngle(l.meta.angle, topic.angle));
+      const twin = own.find((l) => T.sameTopic(l, topic));
       if (twin) { same = [twin]; topic.same_as = [twin.meta.id]; }
     }
-    // Already logged with these very sessions and nothing to merge: not a discovery.
-    if (same.length === 1 && members.every((m) => T.sessionsOf(same[0]).includes(m.sessionId))) continue;
+    // Already logged with these very sessions and nothing to merge: not a discovery, unless the sessions have
+    // news for that log (new turns, or marks made since its last scan), and then it refreshes the log.
+    if (same.length === 1 && members.every((m) => T.sessionsOf(same[0]).includes(m.sessionId)) && !hasNews(same[0], members, topic)) continue;
     // Only what concerns this topic's own sessions: their commits, and the links between them.
     const ids = new Set(members.map((m) => m.sessionId));
     out.push({
@@ -321,7 +344,59 @@ async function scanChain(g, config, opts) {
       known: T.logsForSessions(members.map((m) => m.sessionId), context).map((l) => l.meta.id),
     });
   }
+  // Pending marks this scan saw and tied to no topic stay pending, but are no longer news for these sessions' logs.
+  // Bookkeeping only: a busy lock must not throw away a scan that worked.
+  // Only an open scan: one narrowed by a note or tags looks for something else, and may rightly place nothing.
+  if (!opts.narrowed && !found.some((t) => t.marks)) {
+    try { store.withWriteLock(() => { for (const sid of sids) store.markSeen(sid, startedScan); }, { waitMs: 5000 }); } catch (err) { logError('could not record the marks a scan saw', err); }
+  }
   return out;
+}
+
+// ---------- duplicates across scans ----------
+
+/**
+ * One model call that groups the topics telling the same story, for topics found by different scans (no scan
+ * sees another's topics). In each group the best topic that updates a log stays, else the best one; the other
+ * new topics in it are dropped. A topic that updates a log is never dropped: it names that log. On failure the
+ * list is returned as it was.
+ */
+const projectOf = (f) => f.members[0].project;
+
+async function dedupeTopics(list, config) {
+  // Only new topics can be dropped: with none, the call could change nothing.
+  if (list.length < 2 || list.every((f) => f.updates.length)) return list;
+  const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'prompts', 'dedupe.md'), 'utf8');
+  // Only to tell projects apart: a label, never the project's name (it may be anonymized).
+  const labels = new Map();
+  const label = (f) => { const p = projectOf(f); if (!labels.has(p)) labels.set(p, String.fromCharCode(65 + (labels.size % 26)) + (labels.size >= 26 ? labels.size : '')); return labels.get(p); };
+  const lines = list.map((f, i) => [
+    `### ${i + 1}. ${f.topic.title}`,
+    `Project ${label(f)} · Angle: ${f.topic.angle || 'general'} · ${f.members.length} session${f.members.length > 1 ? 's' : ''}${f.updates.length ? ' · updates an existing log' : ''}`,
+    `Description: ${f.topic.description || '(none)'}`,
+    `Summary: ${f.topic.summary || '(none)'}`,
+  ].join('\n'));
+  let groups;
+  try {
+    const text = await runClaudeAsync(tpl.replace('{{TOPICS}}', () => lines.join('\n\n')), config, { timeoutSec: Math.min(config.scan.timeoutSec || 240, 90) });
+    const raw = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+    groups = Array.isArray(raw.duplicates) ? raw.duplicates : [];
+  } catch (err) {
+    logError('the duplicate check failed; topics are offered unchecked', err);
+    return list;
+  }
+  const drop = new Set();
+  for (const g of groups) {
+    const idx = [...new Set((Array.isArray(g) ? g : []).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= list.length))].sort((a, b) => a - b);
+    if (idx.length < 2) continue;
+    // Work in two projects is two stories, whatever the model says: group within each project.
+    for (const p of new Set(idx.map((n) => projectOf(list[n - 1])))) {
+      const mine = idx.filter((n) => projectOf(list[n - 1]) === p);
+      const keep = mine.find((n) => list[n - 1].updates.length) || mine[0];
+      for (const n of mine) if (n !== keep && !list[n - 1].updates.length) drop.add(n);
+    }
+  }
+  return list.filter((_, i) => !drop.has(i + 1));
 }
 
 // ---------- discover ----------
@@ -349,6 +424,8 @@ async function discover(config, o) {
   let since;
   try { since = o.since ? parseAge(o.since) : parseAge('90d'); } catch (err) { throw userError(err.message); }
   const tags = (o.tags || []).map((t) => t.trim().toLowerCase()).filter(Boolean);
+  // Before any transcript or mark is read: what is added after it was never scanned.
+  const scanStarted = new Date().toISOString();
   const sessions = collectSessions(config, { project: o.project, since, exclude: o.exclude, force: o.force });
   const groups = linkSessions(sessions);
   const ranked = shortlist(groups, config, { note: o.note, tags });
@@ -356,10 +433,11 @@ async function discover(config, o) {
   const summary = { sessions: sessions.length, chains: groups.filter((g) => g.members.length > 1).length, eligible: ranked.length };
   if (o.dryRun || !picked.length) return { ...summary, shortlist: picked, topics: [] };
 
-  const settled = Date.now() - (config.sweep.settleMinutes || 0) * 60000;
+  // A note that names nothing to look for ("anything that scores > 3") filters by score only, not by fit.
+  const narrowed = Boolean(keywords(o.note).length || tags.length);
   const scanned = await Promise.all(picked.map(async (g) => {
     try {
-      return { ok: true, found: await scanChain(g, config, { note: o.note, tags, force: o.force }) };
+      return { ok: true, found: await scanChain(g, config, { note: o.note, tags, force: o.force, narrowed }) };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -367,8 +445,7 @@ async function discover(config, o) {
   const failed = scanned.filter((s) => !s.ok).map((s) => s.error);
   const found = scanned.filter((s) => s.ok).flatMap((s) => s.found);
   // A note that names nothing to look for ("anything that scores > 3") filters by score only, not by fit.
-  const narrowed = Boolean(keywords(o.note).length || tags.length);
-  const topics = found
+  const candidates = found
     .filter((f) => f.topic.score >= (o.minScore || 1) && (!narrowed || f.topic.fit >= 1))
     .sort((a, b) => b.topic.score - a.topic.score || b.topic.fit - a.topic.fit || b.members.length - a.members.length
       || Math.max(...b.members.map((m) => t0(m.endedAt))) - Math.max(...a.members.map((m) => t0(m.endedAt))))
@@ -378,6 +455,14 @@ async function discover(config, o) {
       for (const id of f.updates) taken.add(id);
       return true;
     })(new Set()))
+    // The same new story found twice (one chain's scan, or two chains near each other): only the best one is offered.
+    .filter(((kept) => (f) => {
+      if (!f.updates.length && kept.some((k) => projectOf(k) === projectOf(f) && T.sameTopic(k.topic, f.topic))) return false;
+      kept.push(f);
+      return true;
+    })([]));
+  // Retellings in other words get past the title and description checks: the model compares what is left.
+  const topics = (await dedupeTopics(candidates, config))
     .slice(0, o.top || 3)
     .map((f, i) => {
       const first = f.members[0];
@@ -387,7 +472,6 @@ async function discover(config, o) {
         commits: f.commits,
         info: { project: first.project, repo: first.repo, policy: chainPolicy(f.members), root: first.root },
         members: f.members.map(memberRecord),
-        partial: f.members.some((m) => m.mtimeMs > settled),
       };
     });
 
@@ -397,13 +481,16 @@ async function discover(config, o) {
     pruneDiscoveries();
     id = newDiscoveryId();
     writeJsonAtomic(path.join(discoveriesDir(), `${id}.json`), {
-      id, created_at: new Date().toISOString(), note: o.note || '', tags, minScore: o.minScore || null, force: Boolean(o.force), topics, picked: {},
+      id, created_at: new Date().toISOString(), scan_started_at: scanStarted, note: o.note || '', tags, minScore: o.minScore || null, force: Boolean(o.force), topics, picked: {},
     });
   }
   return { ...summary, id, scored: scanned.filter((s) => s.ok).length, failed, best, topics };
 }
 
 // ---------- pick ----------
+
+/** The pending marks of a session the discovery's scan could see: one made since stays for the next discovery. */
+const scannedMarks = (sid, d) => store.getMarks(sid).filter((k) => !d.scan_started_at || String(k.at || '') <= d.scan_started_at);
 
 /** Log topic `n` of discovery `id`: a new log, or an update of the log(s) it is the same as. */
 function pick(config, id, n) {
@@ -417,74 +504,65 @@ function pick(config, id, n) {
 
   // A discovery can be days old: check again that nothing it relied on changed since.
   const sids = t.members.map((m) => m.sessionId);
-  const releases = [];
-  try {
-    for (const sid of sids) {
-      const release = acquireSessionLock(sid, { wait: false, timeoutMs: (config.scout.timeoutSec || 240) * 1000 });
-      if (!release) throw userError(`a scout of session ${sid.slice(0, 8)} is running; try again in a minute`);
-      releases.push(release);
+  // Every check runs under the write lock, so nothing can change a target between the check and the write.
+  const r = store.withWriteLock(() => {
+    // Read the discovery again under the lock: another pick of it may have just recorded its log.
+    const pickedNow = Object.values(readJson(file, d).picked || {}).map((x) => T.resolveLog(x)).filter(Boolean);
+    const gone = t.updates.filter((uid) => !T.resolveLog(uid));
+    // Any of them: a log deleted since must not come back merged into another.
+    if (gone.length) {
+      throw userError(`${gone.length === 1 && t.updates.length === 1 ? 'the log this topic updates is' : 'logs this topic merges are'} gone (${gone.join(', ')}); run discovery again`);
     }
-    // Partial as of now, not as of the discovery: a session that has since settled is finished.
-    const settled = Date.now() - (config.sweep.settleMinutes || 0) * 60000;
-    const partialSessions = sids.filter((sid) => { const f = findTranscript(sid); try { return f && fs.statSync(f).mtimeMs > settled; } catch { return false; } });
-    const partial = partialSessions.length > 0;
-    // Every check runs under the write lock, so no scan can change a target between the check and the write.
-    const r = store.withWriteLock(() => {
-      const gone = t.updates.filter((uid) => !T.resolveLog(uid));
-      // Any of them: a log deleted since must not come back merged into another.
-      if (gone.length) {
-        throw userError(`${gone.length === 1 && t.updates.length === 1 ? 'the log this topic updates is' : 'logs this topic merges are'} gone (${gone.join(', ')}); run discovery again`);
-      }
-      // The notes were taken from the logs as they were then: a log changed since would lose its new notes.
-      const changed = t.updates.filter((uid) => {
-        const l = T.resolveLog(uid);
-        return l && t.targets && (l.meta.id !== uid || (l.meta.updated_at || l.meta.created_at || '') !== t.targets[uid]);
-      });
-      if (changed.length) throw userError(`${changed.join(', ')} changed since the discovery ran; run discovery again`);
-      // A log these sessions gained since may already tell this story: the discovery never weighed it.
-      if (t.known) {
-        // Logs made by earlier picks of this same discovery are other topics it listed, not news.
-        const mineToo = Object.values(d.picked || {}).map((x) => T.resolveLog(x)).filter(Boolean).map((l) => l.meta.id);
-        const fresh = T.logsForSessions(sids).map((l) => l.meta.id).filter((x) => !t.known.includes(x) && !t.updates.includes(x) && !mineToo.includes(x));
-        if (fresh.length) throw userError(`these sessions were logged again since the discovery ran (${fresh.join(', ')}); run discovery again`);
-      }
-      const deleted = d.force ? [] : T.tombstones(sids);
-      const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
-      if (!topic) throw userError('this topic was deleted since the discovery ran; run discovery again, or with --force');
-      // The project's policy as it is now: it may have changed since the discovery ran.
-      const now = resolveProject(t.info.root || t.info.cwd || null, config);
-      if (t.info.root && now.policy === 'skip') throw userError(`${t.info.project} is now set to skip; nothing was logged`);
-      if (t.info.root && t.info.policy === 'public' && now.policy !== 'public') {
-        throw userError(`${t.info.project} is no longer public; run discovery again so the notes follow its policy`);
-      }
-      const bySession = topic.marks ? sids.map((sid) => [sid, store.getMarks(sid)]) : [];
-      // Exactly the logs the discovery listed: a title match it did not show is never overwritten.
-      const res = T.applyTopic(topic, {
-        members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), partial, partialSessions, mode: 'discovery', note: d.note, commits: t.commits, noTwins: true,
-      });
-      for (const [sid, m] of bySession) store.consumeMarks(sid, m);
-      // The sessions are scanned now: the catch-up and the regrow gate count from here.
-      // As of the discovery, so whatever was added since still counts as new.
-      // A session scanned again after the discovery keeps that newer record.
-      // A pick settles only the logs it writes (applyTopic): a session with another partial log keeps no size,
-      // so its own final scan still comes.
-      for (const m of t.members) {
-        const prev = store.getLedger(m.sessionId) || {};
-        if (prev.scoutedAt && prev.scoutedAt > d.created_at) continue;
-        const waiting = T.logsForSessions([m.sessionId]).some((l) => T.partialSessionsOf(l).includes(m.sessionId));
-        store.setLedger(m.sessionId, { project: t.info.project, userTurns: m.userTurns, ...(waiting ? {} : { size: m.size }), scoutedAt: new Date().toISOString() });
-      }
-      return res;
+    // The notes were taken from the logs as they were then: a log changed since would lose its new notes.
+    const changed = t.updates.filter((uid) => {
+      const l = T.resolveLog(uid);
+      return l && t.targets && (l.meta.id !== uid || (l.meta.updated_at || l.meta.created_at || '') !== t.targets[uid]);
     });
-    // Read it again under the lock: another pick of this discovery may have recorded its own log meanwhile.
-    store.withWriteLock(() => {
-      const now = readJson(file, d);
-      writeJsonAtomic(file, { ...now, picked: { ...(now.picked || {}), [t.rank]: r.logId } });
+    if (changed.length) throw userError(`${changed.join(', ')} changed since the discovery ran; run discovery again`);
+    // A log these sessions gained since may already tell this story: the discovery never weighed it.
+    if (t.known) {
+      // Logs made by earlier picks of this same discovery are other topics it listed, not news.
+      const mineToo = pickedNow.map((l) => l.meta.id);
+      const fresh = T.logsForSessions(sids).map((l) => l.meta.id).filter((x) => !t.known.includes(x) && !t.updates.includes(x) && !mineToo.includes(x));
+      if (fresh.length) throw userError(`these sessions were logged again since the discovery ran (${fresh.join(', ')}); run discovery again`);
+    }
+    const deleted = d.force ? [] : T.tombstones(sids);
+    const [topic] = T.screenTopics([{ ...t.topic, same_as: t.updates }], deleted);
+    if (!topic) throw userError('this topic was deleted since the discovery ran; run discovery again, or with --force');
+    // The project's policy as it is now: it may have changed since the discovery ran.
+    const now = resolveProject(t.info.root || t.info.cwd || null, config);
+    if (t.info.root && now.policy === 'skip') throw userError(`${t.info.project} is now set to skip; nothing was logged`);
+    if (t.info.root && t.info.policy === 'public' && now.policy !== 'public') {
+      throw userError(`${t.info.project} is no longer public; run discovery again so the notes follow its policy`);
+    }
+    // A new topic that retells what an earlier pick of this discovery already logged is that log.
+    if (!t.updates.length) {
+      const twin = pickedNow.find((l) => l.meta.project === t.info.project && T.sameTopic(l, topic));
+      if (twin) {
+        // The marks the model tied to this topic go to the log that tells it.
+        if (topic.marks) {
+          for (const sid of sids) {
+            const m = scannedMarks(sid, d);
+            for (const k of m) store.applyMark(twin, k.note, sid);
+            store.consumeMarks(sid, m);
+          }
+        }
+        return { status: 'exists', logId: twin.meta.id, title: twin.meta.title };
+      }
+    }
+    const bySession = topic.marks ? sids.map((sid) => [sid, scannedMarks(sid, d)]) : [];
+    const res = T.applyTopic(topic, {
+      members: t.members, info: t.info, marks: bySession.flatMap(([, m]) => m), note: d.note, commits: t.commits, scannedAt: d.scan_started_at || d.created_at,
     });
-    return { ...r, sessions: sids, partial };
-  } finally {
-    for (const release of releases) release();
-  }
+    for (const [sid, m] of bySession) store.consumeMarks(sid, m);
+    return res;
+  });
+  // Read it again under the lock: another pick of this discovery may have recorded its own log meanwhile.
+  store.withWriteLock(() => {
+    const now = readJson(file, d);
+    writeJsonAtomic(file, { ...now, picked: { ...(now.picked || {}), [t.rank]: r.logId } });
+  });
+  return { ...r, sessions: sids };
 }
 
 module.exports = { discover, pick, collectSessions, linkSessions, shortlist, keywords };
