@@ -2,7 +2,7 @@
 name: handoff
 description: Gather what a writer needs from one or more casebook logs, given their IDs, and check it against the handoff checks. Writes a handoff folder (handoff.md plus the source logs) ready for writing. Use when the user wants to prepare, hand off or check casebook logs before a case study is written.
 argument-hint: "<log-id> [<log-id>…] [--out <dir>] [extra instructions]"
-allowed-tools: Read, Write, Glob, Grep, Bash(casebook:*), Bash(git remote:*), Bash(git show:*), Bash(git log:*)
+allowed-tools: Read, Write, Glob, Grep, Bash(casebook:*), Bash(git remote:*), Bash(git show:*), Bash(git log:*), Bash(git branch:*), Bash(git rev-parse:*), Bash(gh pr list:*), Bash(gh pr view:*)
 ---
 
 Prepare a handoff from casebook logs. Arguments: `$ARGUMENTS`
@@ -16,11 +16,17 @@ The **intake** is the source logs (and, under `public`, the repository they came
 1. **Parse the arguments.** Pull the log IDs (`cb-` + 6 letters/digits) out of the arguments, and `--out <dir>` if given. Everything else is the note. If there are no IDs, run `casebook list --marked` and ask the user which IDs to use. Stop there.
 2. **Check each ID** with `casebook show <id> --path`. If any is missing, say which one and stop.
 3. **Read the logs** with `casebook show <id>`. Order them by `started_at`; later sessions are the next chapter, not a repeat. Use the strictest policy among them: `anonymize` beats `public`.
-   - `public`: if the current directory is the logs' repository (`git remote get-url origin` matches the log's `repo`), you may read the listed files and commits (`git show`, `git log`) to find more facts. Cite them as `repo:<path>:<line>` or `repo:<short hash>`.
-   - `anonymize`: never name the client, employer, company, product, repository, domain, people or internal URLs. Use generic descriptions ("a B2B logistics platform"). No commit hashes, file paths or code from the repository. Keep the technical story, stack and numbers. If the current directory is the logs' repository, you may still read it (the same commands) to settle open items, but write only what may be named and cite it as `repo` alone.
+   - `public`: if the current directory is the logs' repository (`git remote get-url origin` matches the log's `repo`), you may read the listed files and commits (`git show`, `git log`) to find more facts. Cite them as `repo:<path>:<line>` or `repo:<short hash>`. Then turn the evidence into links a reader can follow (C-7), for a `github.com` repository:
+     - repository: `https://github.com/<owner>/<repo>`;
+     - commit: `<repository>/commit/<full hash>`, only when `git branch -r --contains <hash>` lists a remote branch (an unpushed commit has no public page);
+     - pull request: `<repository>/pull/<n>`, from the logs or `gh pr list --state all --search <hash>`;
+     - lines of a file: `<repository>/blob/<full hash>/<path>#L<a>-L<b>`, pinned to a pushed commit, never to a branch.
+     Each link is a fact, stated with what it shows ("The never-overwrite move: https://…/blob/…/lib/util.js#L180-L205"). For another host, give the repository URL only, and only links the author confirms.
+   - `anonymize`: never name the client, employer, company, product, repository, domain, people or internal URLs. Use generic descriptions ("a B2B logistics platform"), and still say what the system is and does (C-6). No links, commit hashes, pull request numbers or file paths. Keep the technical story, stack and numbers. If the current directory is the logs' repository, you may still read it (the same commands) to settle open items, but write only what may be named and cite it as `repo` alone.
+   - **Code**, under either policy: at most one excerpt of up to 15 lines, from a log's `## Code` section or, in the repository, from the change itself, when it shows the decision. Under `anonymize`, rename identifiers, paths, strings and comments that name what must not be named. Never keep secrets, tokens, keys, passwords, connection strings, internal hostnames or IPs, customer or personal data; when unsure, leave the code out.
 4. **Run the checks** in `handoff.md`: the core elements (E-), then the case study elements (C-). Casebook hands off case studies only: each log's `type` is `case-study` (a log from an older casebook has none and is one too). If the note asks for another kind of piece, say casebook prepares case studies only and stop.
    - **One topic.** If the logs (or the note) hold more than one subject and the note does not pick one, offer up to 3 candidates in one message, each with its subject and the facts behind it, and wait. Then check the chosen topic from the start. Never merge several topics.
-   - Map each element to its sources: `logs/<id>.md#<Section>` for a section of a log (Problem, Approach, Outcome, Evidence, Key decision, a mark note), or a `repo:` source. Mark it inferred where the table allows it, or missing.
+   - Map each element to its sources: `logs/<id>.md#<Section>` for a section of a log (System, Problem, Approach, Outcome, Evidence, Code, Key decision, a mark note), or a `repo:` source. Mark it inferred where the table allows it, or missing.
    - A log's mark notes and key decision are the developer's own words and count as intake. The note and answers never count toward E-3's 3 facts.
    - Facts a log flags as "not independently re-checked" still count, but each one also becomes an Unknown to verify.
    - The verdict is `thin` if a **reject** element is missing or more than 3 **ask** elements are missing.
@@ -73,7 +79,9 @@ topic: Queue retries storming Redis after deploys
 title: Working title
 project: acme-api                 # "anonymized" under anonymize
 repo: github.com/owner/repo       # omit under anonymize or when unknown
+url: https://github.com/owner/repo  # the public repository; omit under anonymize
 policy: public                    # public | anonymize
+system: A Laravel 12 API that serves a mobile app's websocket clients  # C-6; no names under anonymize
 source_logs: [cb-7k2m9q, cb-p3x8aa]
 period: 2026-11-02 – 2026-11-16   # from the logs' started_at and ended_at
 stack: [Laravel 12, Redis]
@@ -100,6 +108,8 @@ The extra instructions, verbatim, or "none".
 | C-3 | Result | found | F-5 |
 | C-4 | Client | inferred | F-9 |
 | C-5 | Period, stack, URL | answered | F-10 |
+| C-6 | System | found | F-12 |
+| C-7 | Evidence | inferred | F-6, F-13 |
 
 ## Facts
 - F-1 (source: logs/cb-7k2m9q.md#Problem) ...
@@ -110,6 +120,15 @@ The extra instructions, verbatim, or "none".
 - F-9 (source: policy) The project is anonymized; no client is named.
 - F-10 (source: answer) No public URL.
 - F-11 (source: repo) As of 2026-11-19, the change is released in version 1.4.
+- F-12 (source: logs/cb-7k2m9q.md#System) The system is a Laravel 12 API that serves a mobile app's websocket clients.
+- F-13 (source: repo:3fa91c2) The jittered backoff: https://github.com/owner/repo/blob/3fa91c2…/app/Ws/Backoff.php#L12-L30
+
+## Code
+Source: logs/cb-7k2m9q.md#Code (or repo:<path>:<lines>). Leave the section out when there is none.
+
+```php
+$delay = min($cap, $base * 2 ** $attempt) * random_int(50, 100) / 100;
+```
 
 ## Open items
 - O-1 Release status (cb-7k2m9q#Open threads): settled by F-11

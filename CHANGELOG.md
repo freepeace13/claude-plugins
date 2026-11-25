@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## casebook 0.4.0, porch 0.4.0 — 2026-11-26
+- casebook: a repository GitHub says is public is `public` with no config rule, wherever it lives (one anonymous request to the GitHub API per repository a day, kept in `state/visibility.json`); a private repository, no repository, or no answer stays `anonymize`. `.casebook.json` and config rules still win; `"detectPublic": false` turns it off. The default config no longer ships the `YOUR-GITHUB-HANDLE` placeholder rule
+- casebook: discovery offers only topics scoring 4 or more by default (`scan.minScore`, `--min-score` overrides). The prompt adds a senior bar (beyond one file, options weighed against constraints, evidence) and lists work that never clears it (wording or config tweaks, renames, removals, release chores, review fix lists). No topic is a correct answer, and discovery says so
+- casebook: each log has `## System` (what the system is and does, without names under `anonymize`) and `## Code` (one excerpt of at most 15 lines, renamed under `anonymize`, never secrets). Code is no longer limited to one line
+- casebook: handoff checks C-6 System and C-7 Evidence, with a table of what may be named. Under `public`, evidence becomes links: repository, commits (only pushed ones), pull requests and lines of a file pinned to a commit. Under `anonymize`, no links, hashes or paths, but code with names renamed is allowed
+- porch: case study intake checks C-6 System and C-7 Evidence links, with the same kind of naming table. Briefs carry `system`, link facts and a `## Code` section; AC-8 (The problem opens with what the system is) and AC-9 (public: links the evidence; anonymized: no links or names) are standard for case studies. Push refuses an anonymized case study with an `https://` link
+- porch: the writer checks each of the author's voice rules against the brief, and its self-check ends with a `Voice:` line naming the voice files it read and each rule that did not apply, with why. Review fails AC-5 without it
+
 ## casebook 0.3.2, porch 0.3.2 — 2026-11-22
 - `~/.local/bin/casebook` and `~/.local/bin/porch` are now small launchers, not symlinks to one installed version. Each run finds the newest copy installed in any Claude Code profile (`$CLAUDE_CONFIG_DIR` and every `~/.claude*` folder, from `plugins/installed_plugins.json`, or any cached copy for a profile without one), so an install or update needs no relink. Claude Code has no install or update hook to do it then. With no copy installed anywhere, the launcher says so and exits 127
 - The SessionStart hook runs on every session start (new, resumed, cleared or compacted), not only a fresh startup. It replaces a symlink to any copy of the plugin, a broken link or an older launcher; a newer launcher, a link to anything else and any other file are left alone

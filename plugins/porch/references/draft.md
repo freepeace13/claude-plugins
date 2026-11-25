@@ -22,6 +22,7 @@ Opening paragraph...
 AC-1 pass
 AC-2 pass
 ...
+Voice: read references/voice.md, ~/.porch/voice.md (updated 2026-11-21); not applied: code-first (no Code in the brief), next-step ending (no next step in Facts)
 Revision: what changed in this round, if any
 -->
 ```

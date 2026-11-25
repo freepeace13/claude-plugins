@@ -2,13 +2,13 @@
 
 Casebook finds the case studies hiding in your Claude Code sessions and hands them off to whoever writes them up. Install it once and it works in every project.
 
-- **Finds topics on demand.** `/casebook:discovery` reads your recent sessions, links the ones that carry one piece of work (a resumed branch, a handoff file, one pull request), and has a cheap headless model (Haiku by default) pull out their potential case studies. It ranks the best 3 and logs the one you pick as a structured log, scored from 1 to 5.
+- **Finds topics on demand.** `/casebook:discovery` reads your recent sessions, links the ones that carry one piece of work (a resumed branch, a handoff file, one pull request), and has a cheap headless model (Haiku by default) pull out their potential case studies. It ranks the best 3 and logs the one you pick as a structured log, scored from 1 to 5. Only senior-level topics (4 or 5) are offered by default; a discovery that finds none says so, and that is a normal result.
 - **Lets you flag the good ones.** Run `/casebook:mark "the queue redesign"` at the moment it matters. The next discovery that covers that session focuses on what you marked.
 - **Logs topics, not sessions.** A session can feed several logs, and a log can draw on several sessions. Every scan sees the logs already near it, so a topic is updated rather than logged twice: each log is unique.
 - **Lists them per project** with IDs, scores and marks. `--marked` shows only what you flagged.
 - **Hands off, doesn't write.** `/casebook:handoff cb-7k2m9q cb-p3x8aa` checks the logs against `handoff.md` and writes a handoff folder with the facts and their sources. Open questions are settled from the repository or by you before the folder is written. Writing the piece is up to you or your own tools.
 - **Cleans up.** You can delete one log, or delete a filtered batch.
-- **Privacy first.** Each project is `public`, `anonymize` (the default) or `skip`. Under `anonymize`, client and company names never reach the notes or the handoff.
+- **Privacy first.** Each project is `public`, `anonymize` (the default) or `skip`. A repository GitHub says is public is `public` without any rule, wherever it lives; one with no repository, a private one, or one GitHub could not be asked about is `anonymize`. Under `anonymize`, names, links and commit hashes never reach the notes or the handoff; under `public`, the handoff links the repository, commits, pull requests and lines of code. Either way, every log says what kind of system the work was on, and may keep one short code excerpt with no secrets.
 
 ## Install
 
@@ -19,7 +19,7 @@ Casebook finds the case studies hiding in your Claude Code sessions and hands th
 
 Requirements: Claude Code with plugin support, Node.js 18 or newer on PATH, and git. Tested on macOS and Linux.
 
-Open the config once and add your own repositories as `public`:
+Public GitHub repositories are found on their own. Add a rule to the config only to change that, for example to keep a public repository anonymized or to skip one:
 
 ```bash
 casebook config      # prints the path, ~/.casebook/config.json
@@ -141,12 +141,17 @@ The CLI equivalent is `casebook discover` (add `--dry-run` to see the chains wit
 {
   "defaultPolicy": "anonymize",
   "projects": [
-    { "match": "github.com/your-handle/*", "policy": "public" },
+    { "match": "github.com/your-handle/side-project", "policy": "anonymize" },
     { "match": "*/client-acme/*", "policy": "skip" }
   ],
-  "scan": { "model": "haiku", "minTurns": 4, "maxTopics": 3, "maxChars": 60000, "timeoutSec": 240, "command": "claude" }
+  "detectPublic": true,
+  "scan": { "model": "haiku", "minTurns": 4, "maxTopics": 3, "minScore": 4, "maxChars": 60000, "timeoutSec": 240, "command": "claude" }
 }
 ```
+
+**Policy order.** A repository's `.casebook.json` wins, then the first matching rule, then, for a `github.com` remote, whether the repository is public, then `defaultPolicy`. The public check is one anonymous request to `https://api.github.com/repos/<owner>/<repo>` (200 is public, 404 private or missing); nothing else is sent, and the answer is kept for a day in `state/visibility.json`. No answer (offline, rate limited, no `curl`) counts as private. Set `"detectPublic": false` to turn it off, and it never runs when `defaultPolicy` is `skip`.
+
+`scan.minScore` (default 4) is the lowest score a discovery offers; `--min-score` overrides it.
 
 A config from before 0.3 keeps working: its `scout` settings are read as `scan`. `sweep`, `output` and `scout.keepMinScore` are ignored.
 

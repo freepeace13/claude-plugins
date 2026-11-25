@@ -16,12 +16,14 @@ Fields, taken from Porch's `create-case-study` / `update-case-study` tools:
 Body, exactly three sections:
 
 ## The problem
-What was wrong, for whom, and the constraints.
+Open with what the system is and does (the brief's `system`), so a reader with no context knows what was being built. Then what was wrong, for whom, and the constraints.
 
 ## What I did
-The approach, the decisions, what was ruled out and why.
+The approach, the decisions, what was ruled out and why. Show the brief's `## Code` excerpt where it explains a decision.
 
 ## The result
 What changed. Only numbers that are facts. Where a result is unknown, write around it and add a verify comment.
 
-Default length 600 to 1,000 words unless the brief says otherwise. Under `anonymize`, never name the client, company, product, repository, domain or people.
+Evidence: when the brief is not anonymized, link each evidence fact that carries a URL at the place the claim is made (the commit beside the change, the pull request beside the review, the lines beside the code), and the repository once early on. Use only URLs from the facts.
+
+Default length 600 to 1,000 words unless the brief says otherwise. Under `anonymize`, never name the client, company, product, repository, domain or people, and give no links, commit hashes or file paths; still say what the system is and does.

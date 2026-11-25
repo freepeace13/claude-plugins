@@ -5,7 +5,7 @@ Treat linked sessions as chapters of one story, in the order given. Later sessio
 Use no tools. Reply with ONE JSON object and nothing else: no prose and no code fences.
 
 ## Topics
-Return up to {{MAX_TOPICS}} topics, best first. A topic can span several of the sessions; the same work seen from another angle (a debugging hunt and the architecture decision it led to) is another topic. Each one must be a distinct story that stands on its own; never split one story into parts to make more topics.
+Return up to {{MAX_TOPICS}} topics, best first. None is a correct answer: when no story clears the senior bar below, reply `{"topics": []}`. Never pad the list with smaller work to fill it. A topic can span several of the sessions; the same work seen from another angle (a debugging hunt and the architecture decision it led to) is another topic. Each one must be a distinct story that stands on its own; never split one story into parts to make more topics.
 
 Give each topic an `angle`, one of: debugging, architecture, performance, reliability, security, data, testing, migration, developer-experience, product, process, or another single word if none fits.
 
@@ -23,9 +23,16 @@ The logs below are already in the casebook. Each log is unique: never return a t
 ## Scoring (be strict; most work is 1–2)
 - 1: routine chore (renames, dependency bumps, typo fixes, Q&A with no outcome)
 - 2: small fix or feature with little decision-making
-- 3: a non-trivial problem with a clear approach and outcome
-- 4: a meaningful design decision, trade-off, debugging hunt or performance win with evidence
-- 5: a standout story: hard constraints, alternatives weighed, measurable result
+- 3: a non-trivial problem with a clear approach and outcome, but local in scope
+- 4: a meaningful design decision, trade-off, debugging hunt or performance win with evidence, that clears the senior bar
+- 5: a standout story: hard constraints, alternatives weighed, measurable result, that clears the senior bar
+
+Only 4 and 5 are offered by default. A topic clears the **senior bar** only when it shows judgment a senior engineer is hired for, with enough context to tell it:
+- the problem reaches past one file or function: a system boundary, data that must survive a change, other components or users that depend on it, production or release risk;
+- the developer weighed real options against constraints and can say why one won;
+- the result rests on evidence (tests, numbers, a shipped change, a before and after).
+
+These never clear it, however cleanly they were done, so they score 3 or lower: a wording or prompt tweak, a config or flag change, renames and moves, removing a feature, a version bump or release chore, a review fix list, a one-off bug with an obvious cause, and work explained only by the session it happened in.
 
 Score the story each topic tells across its sessions. Being split across sessions neither raises nor lowers the score.
 
@@ -47,7 +54,9 @@ The developer marked these sessions {{MARKED_HINT}}. A mark means they think som
 ## Privacy policy for this project: {{POLICY}}
 {{POLICY_RULES}}
 
-Never include secrets, tokens, credentials, personal data of third parties, or code longer than one line.
+Never include secrets, tokens, credentials, keys, passwords, internal hostnames or IPs, customer data, or personal data of third parties.
+
+Code is welcome where it shows the decision: at most one excerpt per topic, up to 15 lines, copied from the sessions. Under anonymize, rename identifiers, paths and strings that would name what must not be named. Leave it out rather than include anything above.
 
 ## Output schema
 {
@@ -60,6 +69,7 @@ Never include secrets, tokens, credentials, personal data of third parties, or c
       "marks": false,
       "score": 1,
       "title": "Short outcome-focused title, max 80 chars",
+      "system": "One sentence on what the system is and does, and who uses it: kind of software, its job, its main parts or stack. Under anonymize, describe it without naming it (\"a multi-tenant SaaS for clinic scheduling\", \"a Node.js CLI that mines editor session logs\")",
       "description": "1–2 plain sentences that identify the work, not sell it: the part of the system, the problem, and the change made. Name concrete things (modules, services, technologies, the error). The same work must always get nearly the same description, whatever the title",
       "summary": "2–3 sentences: what was solved and why it mattered",
       "problem": "What was wrong or needed, in context",
@@ -67,7 +77,8 @@ Never include secrets, tokens, credentials, personal data of third parties, or c
       "approach": "What was done and how, at the architecture/decision level",
       "alternatives": ["Option considered and why it was rejected"],
       "outcome": "Result: what works now, tests passing, numbers if any",
-      "evidence": ["Concrete proof: test names, metrics, commits, before/after"],
+      "evidence": ["Concrete proof: test names, metrics, commits, pull requests, files changed, before/after. Under public, give commit hashes, pull request numbers and file paths exactly as the sessions show them"],
+      "code": "One short excerpt (max 15 lines) that shows the decision, or empty",
       "tags": ["lowercase stack/topic tags, max 8"],
       "quote": "One sentence stating the key decision, in the developer's own voice if they said one; else empty",
       "open_threads": ["Anything unfinished that a writer should verify; may be empty"]

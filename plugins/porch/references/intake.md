@@ -43,6 +43,19 @@ A case study tells one engagement: The problem, What I did, The result. Its thes
 | C-3 | Result | An outcome that rests on a fact: a number, a shipped change, a before and after. | ask once; still missing after the answer: reject |
 | C-4 | Client | A client name, or whether to anonymize. | ask |
 | C-5 | Period, stack, URL | Optional. | unknown |
+| C-6 | System | What the system is and does, in one or two sentences: the kind of software, its job, who uses it, its main parts or stack. "A Node.js CLI that mines editor session logs for case-study topics" passes; "a plugin" does not. Under anonymize, described without names. | infer from the intake, else ask |
+| C-7 | Evidence links | Not anonymized: every public link in the intake that shows the work (repository, commit, pull request, lines of a file) becomes a fact with its URL, and at least the repository URL when there is one. Anonymized: none, and none may appear. | not anonymized: unknown; anonymized: passes as "none" |
+
+### What a case study may name
+
+| | Public project or repository | Private project (anonymized) |
+|---|---|---|
+| What the system is and does | always | always, without names |
+| Project, product or app name | yes | no |
+| Repository, commit, pull request and file links | yes, `https://` links from the intake only | never |
+| Code (one excerpt, at most 15 lines) | yes | yes, with names renamed generically |
+
+Code never carries secrets, tokens, keys, passwords, connection strings, internal hostnames or IPs, customer data or personal data. When in doubt, leave it out. A project counts as public only when the intake says so (a public repository URL, or the author's answer); otherwise ask under C-4.
 
 ## Rules
 

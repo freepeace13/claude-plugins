@@ -792,3 +792,19 @@ test('porch SessionStart hook runs on every session source, links silently and n
   assert.strictEqual(bad.status, 0);
   assert.strictEqual(bad.stdout, '');
 });
+
+test('case studies say what the system is, link evidence only when public, and the writer reports the voice it read', () => {
+  const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+  assert.match(read('references/intake.md'), /\| C-6 \| System \|/);
+  assert.match(read('references/intake.md'), /\| C-7 \| Evidence links \|/);
+  assert.match(read('references/intake.md'), /### What a case study may name/);
+  const brief = read('references/brief.md');
+  assert.match(brief, /^system: /m);
+  assert.match(brief, /AC-8 Case study: The problem opens by saying what the system is/);
+  assert.match(brief, /AC-9 Case study, not anonymized: links the evidence facts/);
+  assert.match(read('references/case-study.md'), /Open with what the system is and does/);
+  assert.match(read('agents/writer.md'), /Then a `Voice:` line naming the files you read/);
+  assert.match(read('skills/draft/SKILL.md'), /must have a `Voice:` line naming `voice_user`/);
+  assert.match(read('skills/push/SKILL.md'), /`anonymize: true`, refuse on any `https:\/\/` link/);
+  for (const f of ['references/intake.md', 'references/brief.md', 'agents/writer.md']) assert.doesNotMatch(read(f), /casebook/i, f);
+});
