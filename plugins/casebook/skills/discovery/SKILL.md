@@ -15,7 +15,7 @@ Discovery reads every session of this profile, links the ones that continue each
 Start from `casebook discover` and add:
 
 - **note**: everything in the arguments that is not a flag. It can name a topic ("websocket + redis stream worked together") or give rules. Pass it verbatim as `--note "<note>"`, quoted safely for the shell.
-- **score**: `--score N` becomes `--min-score N`, which keeps topics scoring N or higher (1 to 5). If the note states a threshold in words instead, convert it: "scores > 3" or "above 3" is `--min-score 4`, "at least 3" is `--min-score 3`. Leave the note as it is.
+- **score**: `--score N` becomes `--min-score N`, which keeps topics scoring N or higher (1 to 5). Without it, only topics scoring 4 or 5 are offered: the senior-level ones. If the note states a threshold in words instead, convert it: "scores > 3" or "above 3" is `--min-score 4`, "at least 3" is `--min-score 3`. Leave the note as it is.
 - **tags**: `--tags a,b` passes through as `--tags a,b`. A topic must mention at least one of them.
 - `--all`, `--project <name>`, `--since <age>` and `--force` pass through. Add no other flags. (`--force` brings back deleted topics, and sessions whose log was deleted by an older casebook.)
 
@@ -23,7 +23,7 @@ Start from `casebook discover` and add:
 
 Run the command with the Bash tool's `timeout` set to `600000` ms. A candidate can take two model runs (a retry with fewer flags on older Claude Code), and reading the sessions comes first. If the command is cut off by that timeout, say so and suggest running it again with a shorter `--since` (or without `--all`).
 
-- If it prints `Nothing to discover` or `No topic matched`, relay that line (and any `failed` line) in a code block and stop. When a `--min-score` or tags were given, add one line suggesting a lower score or fewer tags.
+- If it prints `Nothing to discover` or `No topic matched`, relay that line (and any `failed` line) in a code block and stop. No senior-level topic is a normal result, not a failure: say so in one line, and do not suggest lowering the score unless the user gave one. When tags were given, you may suggest fewer tags.
 - If it failed, show the error line and stop.
 
 Otherwise it prints a discovery ID (`d-xxxxxx`) and up to 3 ranked topics. Show the output exactly as printed, inside a code block.

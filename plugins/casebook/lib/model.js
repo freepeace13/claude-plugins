@@ -7,9 +7,9 @@ const { paths } = require('./util');
 
 const POLICY_RULES = {
   public:
-    'Public: you may name the project, repository, libraries and the developer\'s own product. Still do not name third-party clients or people.',
+    'Public: the repository is public. You may name the project, repository, libraries and the developer\'s own product, and cite commit hashes, pull request numbers and file paths. Still do not name third-party clients or people.',
   anonymize:
-    'Anonymize: this may be client or employer work. Do NOT name the client, company, product, repository, domain, people, or internal URLs. Describe them generically ("a logistics SaaS", "a fintech client"). Keep the technical story, stack and numbers.',
+    'Anonymize: this may be client or employer work. Do NOT name the client, company, product, repository, domain, people, or internal URLs. Describe them generically ("a logistics SaaS", "a fintech client"), and still say what the system is and does. No commit hashes, pull request numbers or file paths. Keep the technical story, stack and numbers.',
 };
 
 function childEnv() {

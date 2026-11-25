@@ -28,6 +28,7 @@ role: ""                 # case study only
 period: ""               # case study only
 url: ""                  # case study only, http(s)
 stack: [Laravel, Redis]  # case study only
+system: A Laravel 12 API that serves a mobile app's websocket clients  # case study only, C-6; no names when anonymize is true
 ---
 
 ## Intake
@@ -43,6 +44,14 @@ stack: [Laravel, Redis]  # case study only
 - F-1 (source: intake/queue.md) Claim, number or name, stated exactly as it may be written
 - F-2 (source: note) ...
 - F-3 (source: answer) Filled by the author's answer to an intake question
+- F-4 (source: intake/handoff.md#Facts) The jittered backoff: https://github.com/owner/repo/blob/3fa91c2.../app/Ws/Backoff.php#L12-L30
+
+## Code
+Source: intake/... (one excerpt, at most 15 lines, checked for secrets). Leave the section out when there is none.
+
+```php
+$delay = min($cap, $base * 2 ** $attempt) * random_int(50, 100) / 100;
+```
 
 ## Unknowns
 - U-1 What is not known and the writer must write around
@@ -59,7 +68,9 @@ stack: [Laravel, Redis]  # case study only
 - AC-5 Passes the voice rules (base Fixed rules, then voice_user, then the base Defaults it does not cover; for an author's finished draft, only what the writer added can fail); first person throughout, no "the owner", "the user" or operator
 - AC-6 Never names anything in never_name
 - AC-7 Follows body-format.md and the type's template
-- AC-8+ Piece-specific criteria added by intake
+- AC-8 Case study: The problem opens by saying what the system is and does (system)
+- AC-9 Case study, not anonymized: links the evidence facts that carry a URL, at least the repository when there is one. Anonymized: no links, names, commit hashes or file paths
+- AC-10+ Piece-specific criteria added by intake
 ```
 
 ## Rules
@@ -70,3 +81,4 @@ stack: [Laravel, Redis]  # case study only
 - AC-1 to AC-7 are standard. Intake adds criteria specific to the piece, such as "mentions the ruled-out option".
 - For a case study the outline is exactly: The problem, What I did, The result.
 - Case-study outcome must trace to a fact.
+- A case study's `system` is always filled. Links are facts with their `https://` URL and what they show, only when `anonymize` is false. Code goes in `## Code`, copied exactly from the intake (renamed generically under anonymize), never with secrets; the writer may show it and nothing else as code.

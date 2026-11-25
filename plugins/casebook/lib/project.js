@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { readJson, slugify, globMatch } = require('./util');
+const { isPublicRepo } = require('./visibility');
 
 function git(cwd, args) {
   try {
@@ -63,6 +64,9 @@ function resolveProject(cwd, config) {
       }
     }
   }
+  // No rule names it: a repository GitHub says is public is public, wherever it lives. Anything else (no
+  // repository, a private one, no answer) falls to the default. A skip default still skips.
+  if (!policy && repo && config.defaultPolicy !== 'skip' && config.detectPublic !== false && isPublicRepo(repo)) policy = 'public';
   return { project, repo, root: root || null, cwd: dir, policy: policy || config.defaultPolicy || 'anonymize' };
 }
 

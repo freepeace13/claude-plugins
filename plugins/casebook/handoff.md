@@ -31,6 +31,19 @@ A case study tells one piece of work: the problem, what the author did, the resu
 | C-3 | Result | An outcome that rests on a fact: a number, a shipped change, a before and after. | ask once; still missing after the answer: reject |
 | C-4 | Client | A client name, or that it is the author's own project, or that it is anonymized. | infer from the policy and the logs, else ask |
 | C-5 | Period, stack, URL | Period and stack from the logs. URL: the public link, or "none". | infer, else open item |
+| C-6 | System | What the system is and does, in one or two sentences: the kind of software, its job, who uses it, its main parts or stack. "A Node.js CLI that mines editor session logs for case-study topics" passes; "a plugin" does not. Under `anonymize`, described without names. | infer from the logs' System section (and the repository's README when you are in it), else ask |
+| C-7 | Evidence | Under `public`: the repository URL and at least one link a reader can follow to the work itself: a commit, a pull request, or a file at a commit with its lines. Under `anonymize`: none, and none may appear anywhere in the handoff. | under `public`, infer from the repository, else open item; under `anonymize`, passes as "none" |
+
+## What may be named
+
+| | `public` | `anonymize` |
+|---|---|---|
+| What the system is and does | always | always, without names |
+| Project, product or app name | yes | no |
+| Repository, commit, pull request and file links | yes, only ones that resolve publicly | never |
+| Code (one excerpt, at most 15 lines) | yes | yes, with names renamed generically |
+
+Code never carries secrets, tokens, keys, passwords, connection strings, internal hostnames or IPs, customer data or personal data. When in doubt, leave it out.
 
 ## Open items
 

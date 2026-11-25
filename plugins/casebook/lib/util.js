@@ -214,12 +214,16 @@ function migrateLocked() {
 
 const DEFAULT_CONFIG = {
   defaultPolicy: 'anonymize',
-  projects: [{ match: 'github.com/YOUR-GITHUB-HANDLE/*', policy: 'public' }],
+  projects: [],
+  // A repository no rule names is public when GitHub says it is public.
+  detectPublic: true,
   scan: {
     command: 'claude',
     model: 'haiku',
     minTurns: 4,
     maxTopics: 3,
+    // Topics below this score are never offered; --min-score overrides it.
+    minScore: 4,
     maxChars: 60000,
     timeoutSec: 240,
   },

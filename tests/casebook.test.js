@@ -18,6 +18,8 @@ function sandbox() {
     CASEBOOK_HOME: path.join(root, 'casebook'),
     CLAUDE_CONFIG_DIR: path.join(root, 'claude'),
     CASEBOOK_BIN_DIR: path.join(root, 'bin'),
+    // No GitHub lookups in tests, except the ones that point CASEBOOK_GITHUB_API at a local stand-in.
+    CASEBOOK_VISIBILITY: 'off',
   };
   delete env.CASEBOOK_SCAN;
 
@@ -311,11 +313,11 @@ test('discovery: new angles, nothing-new topics, deleted topics, and the score, 
 test('the same new topic is offered once per discovery, and a pick never logs it twice', () => {
   const s = sandbox();
   s.transcript('dup', 3);
-  const r = s.run(['discover'], { env: reply(topic({ title: 'Fix Redis retry storm', score: 5 }), topic({ title: 'Fixing Redis retry storms' }), topic({ title: 'Fixing Redis retry storms', angle: 'testing', score: 3 })) });
+  const r = s.run(['discover'], { env: reply(topic({ title: 'Fix Redis retry storm', score: 5 }), topic({ title: 'Fixing Redis retry storms' }), topic({ title: 'Fixing Redis retry storms', angle: 'testing', score: 4 })) });
   assert.strictEqual(r.status, 0, r.stderr);
   assert.match(r.out, /1\. \[5\] Fix Redis retry storm\n/);
   assert.doesNotMatch(r.out, /\] Fixing Redis retry storms\n {3}acme-api · debugging/, 'the retold story is dropped');
-  assert.match(r.out, /2\. \[3\] Fixing Redis retry storms\n {3}acme-api · testing/, 'another angle is another topic');
+  assert.match(r.out, /2\. \[4\] Fixing Redis retry storms\n {3}acme-api · testing/, 'another angle is another topic');
 
   // A discovery saved before this check can still list the twin: the pick finds the log the first pick made.
   const did = didOf(r.out);
@@ -337,11 +339,11 @@ test('topics with other titles but the same description are the same story', () 
   const r = s.run(['discover'], { env: reply(
     topic({ title: 'Taming the thundering herd', description: desc, score: 5 }),
     topic({ title: 'Jittered backoff for websocket clients', description: `${desc} Also capped retries.` }),
-    topic({ title: 'Load-testing the gateway reconnects', angle: 'testing', description: desc, score: 3 }),
+    topic({ title: 'Load-testing the gateway reconnects', angle: 'testing', description: desc, score: 4 }),
   ) });
   assert.match(r.out, /1\. \[5\] Taming the thundering herd/);
   assert.doesNotMatch(r.out, /Jittered backoff for websocket clients/, 'same angle, same description: dropped');
-  assert.match(r.out, /2\. \[3\] Load-testing the gateway reconnects/, 'another angle stays');
+  assert.match(r.out, /2\. \[4\] Load-testing the gateway reconnects/, 'another angle stays');
 
   // The description is kept on the log, shown to later scans, and remembered when the log is deleted.
   const id = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', didOf(r.out), '1']).out)[1];
@@ -374,7 +376,7 @@ test('one model call checks the remaining topics for retellings in other words',
   const env = reply(
     topic({ title: 'Stopping retry storms', description: 'Retry storms in the queue worker.', score: 5, belongs: [1, 2] }),
     topic({ title: 'Queue retry budget, end to end', same_as: [x], belongs: [1, 2] }),
-    topic({ title: 'Schema for job audit', angle: 'data', description: 'Audit table for jobs.', score: 3, belongs: [2] }),
+    topic({ title: 'Schema for job audit', angle: 'data', description: 'Audit table for jobs.', score: 4, belongs: [2] }),
   );
   const r = s.run(['discover'], { env: { ...env, STUB_DEDUPE: '{"duplicates":[[1,2]]}' } });
   assert.strictEqual(r.status, 0, r.stderr);
@@ -384,7 +386,7 @@ test('one model call checks the remaining topics for retellings in other words',
   assert.match(asked, /### 2\. Queue retry budget, end to end\nProject A · Angle: debugging · 2 sessions · updates an existing log/);
   assert.doesNotMatch(r.out, /Stopping retry storms/, 'the new retelling goes; the topic that names the log stays');
   assert.match(r.out, new RegExp(`1\\. \\[4\\] Queue retry budget, end to end[\\s\\S]*updates: ${x}`));
-  assert.match(r.out, /2\. \[3\] Schema for job audit/);
+  assert.match(r.out, /2\. \[4\] Schema for job audit/);
 
   // A failed check offers the topics unchecked and says so in the log.
   const f = s.run(['discover'], { env: { ...env, STUB_DEDUPE_FAIL: '1' } });
@@ -437,7 +439,7 @@ test('a scan of some of a log\'s sessions never lowers its score, and sees the w
   s.transcript('w3', 3);
   const long = 'x'.repeat(5000);
   const id = seedLog(s, { sessions: ['w1', 'w2'], score: 5, title: 'Reconnects over two days', body: `# Reconnects over two days\n\n## Problem\n${long}END-OF-LONG\n` });
-  assert.strictEqual(discoverPick(s, reply(topic({ title: 'Reconnects over two days, revisited', same_as: [id], score: 3 }))), id);
+  assert.strictEqual(discoverPick(s, reply(topic({ title: 'Reconnects over two days, revisited', same_as: [id], score: 4 }))), id);
   assert.match(s.run(['show', id]).out, /score: 5/);
   assert.match(fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8'), /END-OF-LONG/, 'the model sees the whole log it may rewrite');
 });
@@ -885,7 +887,7 @@ test('picking a topic never overwrites a title match the discovery did not list'
   const s = sandbox();
   s.transcript('ta6', 3, onBranch('ta6', 'feat/tw'));
   s.transcript('tb6', 3, onBranch('tb6', 'feat/tw'));
-  const r = s.run(['discover'], { env: reply(topic({ title: 'Redis stream backpressure fix', belongs: [1, 2] }), topic({ title: 'Redis stream backpressure fix load testing', angle: 'testing', belongs: [1, 2], score: 3 })) });
+  const r = s.run(['discover'], { env: reply(topic({ title: 'Redis stream backpressure fix', belongs: [1, 2] }), topic({ title: 'Redis stream backpressure fix load testing', angle: 'testing', belongs: [1, 2], score: 4 })) });
   const did = /Discovery (d-[a-z0-9]{6})/.exec(r.out)[1];
   const one = /Created (cb-[a-z0-9]{6})/.exec(s.run(['discover', 'pick', did, '1']).out)[1];
   const two = s.run(['discover', 'pick', did, '2']);
@@ -971,7 +973,7 @@ console.log(JSON.stringify({score:4,title:'T',summary:'s',problem:'p',constraint
 `);
   fs.chmodSync(stub, 0o755);
 
-  const baseEnv = { ...process.env, HOME: home, CASEBOOK_HOME: cb, CASEBOOK_BIN_DIR: path.join(root, 'bin') };
+  const baseEnv = { ...process.env, CASEBOOK_VISIBILITY: 'off', HOME: home, CASEBOOK_HOME: cb, CASEBOOK_BIN_DIR: path.join(root, 'bin') };
   delete baseEnv.CASEBOOK_PROFILE; delete baseEnv.CASEBOOK_SCAN; delete baseEnv.CLAUDE_CONFIG_DIR;
   const config = JSON.stringify({ defaultPolicy: 'public', scan: { command: stub, minTurns: 2 } });
   const seedStore = (dir = cb) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'config.json'), config); };
@@ -1264,7 +1266,7 @@ test('handoff skill: reads handoff.md, thin writes nothing, stays inside caseboo
   assert.match(hint(skill), /^"<log-id> \[<log-id>…\] \[--out <dir>\]/);
   assert.match(skill, /\$\{CLAUDE_PLUGIN_ROOT\}\/handoff\.md/);
   assert.ok(fs.existsSync(path.join(root, 'handoff.md')), 'the checks it reads ship with the plugin');
-  for (const id of ['E-1', 'E-2', 'E-3', 'E-4', 'C-1', 'C-2', 'C-3', 'C-4', 'C-5']) assert.match(read('handoff.md'), new RegExp(`\\| ${id} \\|`));
+  for (const id of ['E-1', 'E-2', 'E-3', 'E-4', 'C-1', 'C-2', 'C-3', 'C-4', 'C-5', 'C-6', 'C-7']) assert.match(read('handoff.md'), new RegExp(`\\| ${id} \\|`));
   assert.match(skill, /Nothing was written/);
   assert.match(skill, /type: case-study/);
   assert.doesNotMatch(read('handoff.md'), /\| A-\d \|/, 'no article checks: casebook hands off case studies');
@@ -1280,7 +1282,7 @@ function linkSandbox() {
   const dir = path.join(root, 'bin');
   const home = path.join(root, 'home');
   const profile = path.join(home, '.claude');
-  const env = { ...process.env, CASEBOOK_BIN_DIR: dir, CASEBOOK_HOME: path.join(root, 'store'), HOME: home, CLAUDE_CONFIG_DIR: profile };
+  const env = { ...process.env, CASEBOOK_VISIBILITY: 'off', CASEBOOK_BIN_DIR: dir, CASEBOOK_HOME: path.join(root, 'store'), HOME: home, CLAUDE_CONFIG_DIR: profile };
   const run = (args, input = '') => spawnSync(process.execPath, [BIN, ...args], { encoding: 'utf8', env, input });
   // A fake install of a plugin at some version; its bin prints which one ran.
   const fakePlugin = (name, version) => {
@@ -1395,4 +1397,88 @@ test('casebook SessionStart hook runs on every session source, links silently an
   const bad = spawnSync(process.execPath, [BIN, ...['hook', 'session-start']], { encoding: 'utf8', env: { ...s.env, CASEBOOK_BIN_DIR: 'relative/bin' }, input: '{}' });
   assert.strictEqual(bad.status, 0);
   assert.strictEqual(bad.stdout, '');
+});
+
+// ---------- senior bar, system and code, public detection ----------
+
+test('discovery offers only topics scoring 4 or more by default; none at all is a fine answer', () => {
+  const s = sandbox();
+  s.transcript('lo', 3);
+  const r = s.run(['discover'], { env: reply(topic({ title: 'Renamed a flag', score: 3 })) });
+  assert.match(r.out, /No topic matched\. Scored 1 candidate\(s\) .*best scored 3, below 4\./);
+  assert.match(s.run(['discover', '--min-score', '3'], { env: reply(topic({ title: 'Renamed a flag', score: 3 })) }).out, /\[3\] Renamed a flag/);
+  assert.match(s.run(['discover'], { env: { STUB_TOPICS: '{"topics":[]}' } }).out, /No topic matched/);
+  const prompt = fs.readFileSync(path.join(s.root, 'last-prompt.txt'), 'utf8');
+  assert.match(prompt, /senior bar/);
+  assert.match(prompt, /\{"topics": \[\]\}/);
+  assert.match(prompt, /"system":/);
+});
+
+test('a log keeps the system it is part of and one code excerpt', () => {
+  const s = sandbox();
+  s.transcript('sc', 3);
+  const id = discoverPick(s, reply(topic({ title: 'Jittered reconnects', system: 'A Laravel API serving websocket clients.', code: 'sleep(min(cap, base * 2 ** n) * rand())\n```' })));
+  const out = s.run(['show', id]).out;
+  assert.match(out, /## System\nA Laravel API serving websocket clients\./);
+  assert.match(out, /## Code\n```\nsleep\(min\(cap, base \* 2 \*\* n\) \* rand\(\)\)\n\n```/);
+});
+
+/** A stand-in for the GitHub API in its own process (the CLI runs synchronously): public/* is 200, the rest 404. */
+async function fakeGitHub() {
+  const child = spawn(process.execPath, ['-e', `
+    const http = require('http');
+    const seen = [];
+    const srv = http.createServer((req, res) => { seen.push(req.url); require('fs').writeFileSync(process.argv[1], JSON.stringify(seen)); res.statusCode = req.url.startsWith('/repos/public/') ? 200 : 404; res.end('{}'); });
+    srv.listen(0, '127.0.0.1', () => console.log(srv.address().port));
+  `, path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gh-')), 'seen.json')], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const port = await new Promise((resolve) => child.stdout.once('data', (d) => resolve(String(d).trim())));
+  const seenFile = child.spawnargs[child.spawnargs.length - 1];
+  return { url: `http://127.0.0.1:${port}`, seen: () => JSON.parse(fs.readFileSync(seenFile, 'utf8')), stop: () => child.kill() };
+}
+
+test('a repository GitHub says is public is public without a rule; private, unknown and no repo stay anonymized', async () => {
+  const gh = await fakeGitHub();
+  try {
+    const s = sandbox();
+    // No project rules at all: only the lookup can make it public.
+    fs.writeFileSync(path.join(s.env.CASEBOOK_HOME, 'config.json'), JSON.stringify({ defaultPolicy: 'anonymize', projects: [], scan: { command: path.join(s.root, 'fake-claude') } }));
+    const env = { CASEBOOK_VISIBILITY: '', CASEBOOK_GITHUB_API: gh.url };
+    const git = (...a) => spawnSync('git', ['-C', s.repo, ...a], { encoding: 'utf8' });
+
+    git('remote', 'set-url', 'origin', 'git@github.com:public/acme-api.git');
+    assert.match(s.run(['doctor'], { env }).out, /policy public, github\.com\/public\/acme-api/);
+    s.run(['doctor'], { env });
+    assert.strictEqual(gh.seen().length, 1, 'the answer is kept, not asked again');
+
+    git('remote', 'set-url', 'origin', 'git@github.com:private/acme-api.git');
+    assert.match(s.run(['doctor'], { env }).out, /policy anonymize/);
+
+    // No answer (nothing listening) counts as private, and is not kept.
+    git('remote', 'set-url', 'origin', 'git@github.com:public/other.git');
+    assert.match(s.run(['doctor'], { env: { ...env, CASEBOOK_GITHUB_API: 'http://127.0.0.1:9' } }).out.replace(/\n/g, ' '), /policy anonymize/);
+    assert.match(s.run(['doctor'], { env }).out, /policy public, github\.com\/public\/other/);
+
+    // A rule still wins over the lookup.
+    git('remote', 'set-url', 'origin', 'git@github.com:public/acme-api.git');
+    fs.writeFileSync(path.join(s.env.CASEBOOK_HOME, 'config.json'), JSON.stringify({ defaultPolicy: 'anonymize', projects: [{ match: 'github.com/public/*', policy: 'anonymize' }] }));
+    assert.match(s.run(['doctor'], { env }).out, /policy anonymize/);
+
+    // A folder with no repository is never looked up.
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'norepo-'));
+    assert.match(s.run(['doctor'], { env, cwd: bare }).out, /policy anonymize\n/);
+  } finally {
+    gh.stop();
+  }
+});
+
+test('handoff links public evidence, names nothing under anonymize, and allows one checked code excerpt', () => {
+  const root = path.resolve(__dirname, '../plugins/casebook');
+  const read = (f) => fs.readFileSync(path.join(root, f), 'utf8');
+  const skill = read('skills/handoff/SKILL.md');
+  assert.match(skill, /<repository>\/commit\/<full hash>`, only when `git branch -r --contains <hash>` lists a remote branch/);
+  assert.match(skill, /<repository>\/blob\/<full hash>\/<path>#L<a>-L<b>`, pinned to a pushed commit/);
+  assert.match(skill, /No links, commit hashes, pull request numbers or file paths/);
+  assert.match(skill, /Never keep secrets, tokens, keys, passwords/);
+  assert.match(read('handoff.md'), /## What may be named/);
+  assert.match(read('prompts/discovery.md'), /senior bar/);
 });

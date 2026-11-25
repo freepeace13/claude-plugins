@@ -133,7 +133,7 @@ const commands = {
     if (opt.json) return out(JSON.stringify(r, null, 2));
     if (!r.topics.length) {
       if (!r.eligible) return out(`Nothing to discover in ${scope}: ${r.sessions} session(s), none${opt.tags ? ' that mention those tags' : ' long enough'}.`);
-      out(`No topic matched. Scored ${r.scored} candidate(s) in ${scope}; the best scored ${r.best || '-'}.`);
+      out(`No topic matched. Scored ${r.scored} candidate(s) in ${scope}; the best scored ${r.best || '-'}, below ${r.min}.`);
       if (r.failed.length) out(`${r.failed.length} scan(s) failed: ${r.failed[0]}`);
       return;
     }
@@ -317,7 +317,7 @@ const commands = {
   unmark <id>
   delete <id…>                                     delete specific logs
   delete [--project P] [--below-score N] [--older-than 30d] [--unmarked] [--yes]
-  discover [--note "…"] [--min-score N] [--tags a,b] [--project P | --all] [--since 90d] [--candidates 5] [--dry-run]
+  discover [--note "…"] [--min-score N (default 4)] [--tags a,b] [--project P | --all] [--since 90d] [--candidates 5] [--dry-run]
                                                    find topics across linked sessions, ranked (top 3)
   discover pick <discovery-id> <n>                 log topic n of a discovery as one log
   link [--json]                                    write ~/.local/bin/casebook, a launcher for the newest install (done at every session start)

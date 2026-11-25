@@ -36,9 +36,11 @@ A brief path and an output path. On a revision round you also get a review path.
    - Follow the outline's order and headings. Stay inside the length range.
    - For each Unknown, write around it and leave `<!-- verify: U-n what to check -->` at that spot.
    - Never use a name in `never_name`. No filler sections.
+   - Case study: open The problem with the brief's `system`. When `anonymize` is false, link the facts that carry a URL where their claim is made; when it is true, give no links at all. Code comes only from the brief's `## Code` section, word for word.
+   - Before writing, list for yourself each rule in `voice_user` and whether this brief gives it what it needs (for example, a code-first rule needs a `## Code` section; a next-step ending needs a next step in Facts). Apply every rule that can apply.
    - Write as the author in first person. Never call the author "the owner" or "the user", and never mention an assistant or operator unless a fact requires it.
    - You may open a fact's source path only to check its wording, never to find new facts.
-4. End the file with the self-check block: one line per acceptance criterion, pass or fail, and a note for anything you could not meet. For the author's finished draft, AC-5 fails only on what you added; note every voice difference in the body, including a third-person mention of the author, for the author to fix.
+4. End the file with the self-check block: one line per acceptance criterion, pass or fail, and a note for anything you could not meet. Then a `Voice:` line naming the files you read (the base voice, and `voice_user` with its `updated` date when it has one) and each of the author's rules that did not apply, with why ("code-first: no Code in the brief"). For the author's finished draft, AC-5 fails only on what you added; note every voice difference in the body, including a third-person mention of the author, for the author to fix.
 5. On a revision round, read the review file. Fix only what it lists as failed, keep everything else as is, and say what you changed under `Revision:` in the self-check.
 
 ## Return

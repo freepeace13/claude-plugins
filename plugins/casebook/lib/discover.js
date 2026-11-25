@@ -446,7 +446,7 @@ async function discover(config, o) {
   const found = scanned.filter((s) => s.ok).flatMap((s) => s.found);
   // A note that names nothing to look for ("anything that scores > 3") filters by score only, not by fit.
   const candidates = found
-    .filter((f) => f.topic.score >= (o.minScore || 1) && (!narrowed || f.topic.fit >= 1))
+    .filter((f) => f.topic.score >= (o.minScore || config.scan.minScore || 4) && (!narrowed || f.topic.fit >= 1))
     .sort((a, b) => b.topic.score - a.topic.score || b.topic.fit - a.topic.fit || b.members.length - a.members.length
       || Math.max(...b.members.map((m) => t0(m.endedAt))) - Math.max(...a.members.map((m) => t0(m.endedAt))))
     // Chains near each other see the same logs: only the best topic may update a given log.
@@ -484,7 +484,7 @@ async function discover(config, o) {
       id, created_at: new Date().toISOString(), scan_started_at: scanStarted, note: o.note || '', tags, minScore: o.minScore || null, force: Boolean(o.force), topics, picked: {},
     });
   }
-  return { ...summary, id, scored: scanned.filter((s) => s.ok).length, failed, best, topics };
+  return { ...summary, id, scored: scanned.filter((s) => s.ok).length, failed, best, min: o.minScore || config.scan.minScore || 4, topics };
 }
 
 // ---------- pick ----------
